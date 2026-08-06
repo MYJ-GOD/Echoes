@@ -1,5 +1,5 @@
 """
-LLM 服务 - 调用 Echoes-AI 进行文本生成
+LLM 服务 - OpenAI 兼容 LLM 通道（DeepSeek / DashScope）
 
 提供：
 - Query 改写（拼写纠错、指代消解、查询扩展）
@@ -7,18 +7,15 @@ LLM 服务 - 调用 Echoes-AI 进行文本生成
 - RAG 生成
 - 纯 LLM 生成
 - 引用标注
+
+底层调用统一走 app.services.llm_client（provider 由 .env 配置）。
 """
 import logging
-import json
-from typing import List, Dict, Any, AsyncGenerator, Tuple
-import httpx
+from typing import List, Dict, Any
 
-from app.config import settings
+from app.services.llm_client import chat_completion, chat_completion_stream
 
 logger = logging.getLogger(__name__)
-
-# Echoes-AI 服务地址
-ECHOES_AI_URL = settings.ECHOES_AI_URL
 
 # 意图分类 Prompt 模板
 INTENT_CLASSIFICATION_PROMPT = """你是一个意图分类助手。请将用户查询分类为以下类别之一：
@@ -102,32 +99,30 @@ async def rewrite_query(query: str, conversation_history: List[Dict[str, str]] =
         if context_info:
             prompt = f"{context_info}\n\n{prompt}"
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{ECHOES_AI_URL}/generate",
-                json={"prompt": prompt, "stream": False, "max_tokens": 200},
-            )
-            response.raise_for_status()
-            rewritten = response.json().get("text", "").strip()
+        rewritten = await chat_completion(
+            [{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0.3,
+        )
 
-            # 如果改写失败或为空，返回原查询
-            if not rewritten or len(rewritten) < len(query) * 0.5:
-                return {
-                    "original_query": query,
-                    "rewritten_query": query,
-                    "changes": [],
-                    "use_rewrite": False,
-                }
-
-            # 分析变化
-            changes = _analyze_changes(query, rewritten)
-
+        # 如果改写失败或为空，返回原查询
+        if not rewritten or len(rewritten) < len(query) * 0.5:
             return {
                 "original_query": query,
-                "rewritten_query": rewritten,
-                "changes": changes,
-                "use_rewrite": rewritten != query,
+                "rewritten_query": query,
+                "changes": [],
+                "use_rewrite": False,
             }
+
+        # 分析变化
+        changes = _analyze_changes(query, rewritten)
+
+        return {
+            "original_query": query,
+            "rewritten_query": rewritten,
+            "changes": changes,
+            "use_rewrite": rewritten != query,
+        }
     except Exception as e:
         logger.warning(f"Query rewrite failed: {e}, using original query")
         return {
@@ -183,29 +178,28 @@ async def classify_intent(query: str) -> Dict[str, Any]:
     try:
         prompt = INTENT_CLASSIFICATION_PROMPT.format(query=query)
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                f"{ECHOES_AI_URL}/generate",
-                json={"prompt": prompt, "stream": False, "max_tokens": 50},
-            )
-            response.raise_for_status()
-            intent = response.json().get("text", "").strip().lower()
+        intent = await chat_completion(
+            [{"role": "user", "content": prompt}],
+            max_tokens=50,
+            temperature=0.0,
+        )
+        intent = intent.lower()
 
-            # 验证返回的意图类别
-            if intent not in INTENT_CATEGORIES:
-                intent = "knowledge_query"  # 默认
+        # 验证返回的意图类别
+        if intent not in INTENT_CATEGORIES:
+            intent = "knowledge_query"  # 默认
 
-            # 计算置信度（简化实现）
-            confidence = _calculate_intent_confidence(query, intent)
+        # 计算置信度（简化实现）
+        confidence = _calculate_intent_confidence(query, intent)
 
-            return {
-                "intent": intent,
-                "confidence": confidence,
-                "all_scores": {
-                    intent: confidence,
-                    **{k: (1 - confidence) / 3 for k in INTENT_CATEGORIES if k != intent}
-                }
+        return {
+            "intent": intent,
+            "confidence": confidence,
+            "all_scores": {
+                intent: confidence,
+                **{k: (1 - confidence) / 3 for k in INTENT_CATEGORIES if k != intent}
             }
+        }
     except Exception as e:
         logger.warning(f"Intent classification failed: {e}, using default")
         return {
@@ -271,35 +265,14 @@ async def generate_with_context(
 
 回答："""
 
+    messages = [{"role": "user", "content": prompt}]
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            if stream:
-                # 流式调用
-                async with client.stream(
-                    "POST",
-                    f"{ECHOES_AI_URL}/generate",  # TODO: 确认实际 API 路径
-                    json={"prompt": prompt, "stream": True},
-                ) as response:
-                    response.raise_for_status()
-                    chunks = []
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            data = line[6:]
-                            import json
-                            try:
-                                chunk_data = json.loads(data)
-                                if "content" in chunk_data:
-                                    chunks.append(chunk_data["content"])
-                            except json.JSONDecodeError:
-                                continue
-                    return chunks
-            else:
-                response = await client.post(
-                    f"{ECHOES_AI_URL}/generate",
-                    json={"prompt": prompt, "stream": False},
-                )
-                response.raise_for_status()
-                return [response.json()["text"]]
+        if stream:
+            chunks = []
+            async for c in chat_completion_stream(messages, max_tokens=1024, temperature=0.5):
+                chunks.append(c)
+            return chunks
+        return [await chat_completion(messages, max_tokens=1024, temperature=0.5)]
     except Exception as e:
         logger.error(f"LLM generation failed: {e}")
         return [f"抱歉，生成回答时出现错误：{str(e)}"]
@@ -309,34 +282,14 @@ async def generate_plain(query: str, stream: bool = True) -> List[str]:
     """
     纯 LLM 生成（无检索结果时的降级）
     """
+    messages = [{"role": "user", "content": query}]
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            if stream:
-                async with client.stream(
-                    "POST",
-                    f"{ECHOES_AI_URL}/generate",
-                    json={"prompt": query, "stream": True},
-                ) as response:
-                    response.raise_for_status()
-                    chunks = []
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            data = line[6:]
-                            import json
-                            try:
-                                chunk_data = json.loads(data)
-                                if "content" in chunk_data:
-                                    chunks.append(chunk_data["content"])
-                            except json.JSONDecodeError:
-                                continue
-                    return chunks
-            else:
-                response = await client.post(
-                    f"{ECHOES_AI_URL}/generate",
-                    json={"prompt": query, "stream": False},
-                )
-                response.raise_for_status()
-                return [response.json()["text"]]
+        if stream:
+            chunks = []
+            async for c in chat_completion_stream(messages, max_tokens=1024, temperature=0.5):
+                chunks.append(c)
+            return chunks
+        return [await chat_completion(messages, max_tokens=1024, temperature=0.5)]
     except Exception as e:
         logger.error(f"Plain LLM generation failed: {e}")
         return [f"抱歉，生成回答时出现错误：{str(e)}"]

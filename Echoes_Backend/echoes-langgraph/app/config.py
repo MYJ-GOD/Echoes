@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     # Echoes-AI 服务地址
     ECHOES_AI_URL: str = "http://localhost:8000"
 
+    # LLM 通道（OpenAI 兼容端点；DeepSeek / DashScope 通用，改 .env 即可切换）
+    LLM_BASE_URL: str = "https://api.deepseek.com"
+    LLM_API_KEY: str = ""              # 从环境变量 / echoes-langgraph/.env 读
+    LLM_MODEL: str = "deepseek-v4-flash"
+    LLM_TIMEOUT_SECONDS: int = 60
+
+    # Agent 人格模式（温柔/理性/活泼；Nacos 侧 agent.personality_mode 同步）
+    AGENT_PERSONALITY_MODE: str = "温柔"
+
     # CORS 配置
     CORS_ORIGINS: list[str] = ["*"]
 
