@@ -36,12 +36,6 @@ services:
       # Redis Configuration
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-
-      # OSS Configuration
-      - OSS_ENDPOINT=oss-cn-beijing.aliyuncs.com
-      - OSS_ACCESS_KEY_ID=your-aliyun-access-key-id
-      - OSS_ACCESS_KEY_SECRET=your-aliyun-access-key-secret
-      - OSS_BUCKET_NAME=echoes-sim
     volumes:
       # Mount CosyVoice repository
       - ../../third_party/CosyVoice:/app/third_party/CosyVoice:ro

@@ -19,6 +19,7 @@ config/secrets.properties
 # ---- 内部工具 / 规划文档 ----
 .claude/
 .codegraph/
+.reasonix/
 .cursor/
 改造计划_Agent化.md
 

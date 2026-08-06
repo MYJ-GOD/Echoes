@@ -54,12 +54,7 @@ def setup_environment():
         'MYSQL_PASSWORD': 'root',
         # Redis
         'REDIS_HOST': 'localhost',
-        'REDIS_PORT': '6379',
-        # OSS
-        'OSS_ENDPOINT': 'oss-cn-beijing.aliyuncs.com',
-        'OSS_ACCESS_KEY_ID': 'your-aliyun-access-key-id',
-        'OSS_ACCESS_KEY_SECRET': 'your-aliyun-access-key-secret',
-        'OSS_BUCKET_NAME': 'echoes-sim'
+        'REDIS_PORT': '6379'
     }
 
     # Set environment variables

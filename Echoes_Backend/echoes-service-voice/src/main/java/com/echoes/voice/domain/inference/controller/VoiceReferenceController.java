@@ -1,7 +1,7 @@
 package com.echoes.voice.domain.inference.controller;
 
 import com.echoes.voice.domain.inference.client.EchoesAiClient;
-import com.echoes.voice.common.util.AliOssUtil;
+import com.echoes.voice.common.util.MinioUtil;
 import com.echoes.voice.domain.voice.entity.po.VoiceRef;
 import com.echoes.voice.domain.voice.repository.VoiceRefMapper;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -30,7 +30,7 @@ import java.util.concurrent.CompletableFuture;
 public class VoiceReferenceController {
 
     private final EchoesAiClient echoesAiClient;
-    private final AliOssUtil aliOssUtil;
+    private final MinioUtil minioUtil;
     private final VoiceRefMapper voiceRefMapper;
     private final ObjectMapper objectMapper;
 
@@ -59,7 +59,7 @@ public class VoiceReferenceController {
             String ossUrl = "";
             boolean useOss = true;
             try {
-                ossUrl = aliOssUtil.upload(audio, storageKey);
+                ossUrl = minioUtil.upload(audio, storageKey);
                 log.info("Uploaded to OSS: storageKey={}, url={}", storageKey, ossUrl);
             } catch (Exception e) {
                 log.error("OSS upload failed, falling back to Python storage", e);
@@ -162,7 +162,7 @@ public class VoiceReferenceController {
                 if (storageKey != null && storageKey.startsWith("voice_refs/")) {
                     // OSS object key, generate signed URL
                     try {
-                        signedUrl = aliOssUtil.generatePresignedUrl(storageKey, 10);
+                        signedUrl = minioUtil.generatePresignedUrl(storageKey, 10);
                     } catch (Exception e) {
                         log.warn("Failed to generate signed URL: {}", e.getMessage());
                     }
@@ -199,7 +199,7 @@ public class VoiceReferenceController {
             @RequestHeader(value = "X-SESSION-ID", required = false) String sessionId,
             @RequestHeader(value = "X-TURN-ID", required = false) String turnId) {
         try {
-            String signed = aliOssUtil.generatePresignedUrl(storageKey, 10); // 10 minutes
+            String signed = minioUtil.generatePresignedUrl(storageKey, 10); // 10 minutes
             ObjectNode node = objectMapper.createObjectNode();
             node.put("url", signed);
             node.put("storage_key", storageKey);
@@ -220,12 +220,12 @@ public class VoiceReferenceController {
             @RequestHeader(value = "X-TURN-ID", required = false) String turnId) {
         try {
             byte[] audio = audioFile.getBytes();
-            // Use AliOssUtil bean to upload with provided objectName
-            AliOssUtil ossUtil = this.aliOssUtil;
-            // If AliOssUtil not available, fallback to echoesAiClient upload method using filename
+            // Use MinioUtil bean to upload with provided objectName
+            MinioUtil ossUtil = this.minioUtil;
+            // If MinioUtil not available, fallback to echoesAiClient upload method using filename
             String publicUrl = null;
             try {
-                publicUrl = aliOssUtil.upload(audio, objectName);
+                publicUrl = minioUtil.upload(audio, objectName);
             } catch (Exception e) {
                 log.warn("Direct OSS upload failed, falling back to EchoesAiClient uploadVoiceReference", e);
                 JsonNode result = echoesAiClient.uploadVoiceReference(audio, audioFile.getOriginalFilename() != null ? audioFile.getOriginalFilename() : "audio.wav", null, traceId, sessionId, turnId);

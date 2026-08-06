@@ -157,8 +157,34 @@ services:
       retries: 3
       start_period: 40s
 
+  # MinIO 对象存储（S3 兼容，API 9000 / Console 9001）
+  minio:
+    image: minio/minio:latest
+    container_name: echoes-minio
+    restart: always
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-echoes}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-echoes123456}
+      TZ: Asia/Shanghai
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - echoes-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
 volumes:
   mysql_data:
+    driver: local
+  minio_data:
     driver: local
   redis_data:
     driver: local

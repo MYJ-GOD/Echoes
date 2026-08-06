@@ -43,7 +43,7 @@
         <commons-lang3.version>3.13.0</commons-lang3.version>
         <jjwt.version>0.12.3</jjwt.version>
         <java-jwt.version>4.4.0</java-jwt.version>
-        <aliyun-sdk-oss.version>3.17.4</aliyun-sdk-oss.version>
+        <minio.version>8.5.17</minio.version>
         <wechatpay-httpclient.version>0.4.9</wechatpay-httpclient.version>
         <commons-io.version>2.15.1</commons-io.version>
         <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
@@ -168,9 +168,9 @@
                 <version>${java-jwt.version}</version>
             </dependency>
             <dependency>
-                <groupId>com.aliyun.oss</groupId>
-                <artifactId>aliyun-sdk-oss</artifactId>
-                <version>${aliyun-sdk-oss.version}</version>
+                <groupId>io.minio</groupId>
+                <artifactId>minio</artifactId>
+                <version>${minio.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.github.wechatpay-apiv3</groupId>

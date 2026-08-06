@@ -1,6 +1,6 @@
 package com.echoes.voice.domain.cache.service;
 
-import com.echoes.voice.common.util.AliOssUtil;
+import com.echoes.voice.common.util.MinioUtil;
 import com.echoes.voice.common.constants.VoiceConstants;
 import com.echoes.voice.domain.voice.entity.po.VoiceModel;
 import com.echoes.voice.domain.voice.enums.VoiceErrorEnum;
@@ -35,7 +35,7 @@ import java.time.Duration;
 public class VoiceModelCacheService {
 
   private final VoiceModelMapper voiceModelMapper;
-  private final AliOssUtil aliOssUtil;
+  private final MinioUtil minioUtil;
   private final ReactiveRedisTemplate<String, String> redisTemplate;
 
   /**
@@ -91,7 +91,7 @@ public class VoiceModelCacheService {
               log.info("开始下载模型文件: voiceId={}, ossUrl={}", voiceId, ossUrl);
 
               // 3. 从 OSS URL 提取 objectName
-              String objectName = aliOssUtil.extractObjectNameFromUrl(ossUrl);
+              String objectName = minioUtil.extractObjectNameFromUrl(ossUrl);
               if (objectName == null) {
                 throw new VoiceServiceException(
                     VoiceErrorEnum.VOICE_MODEL_NOT_FOUND,
@@ -99,7 +99,7 @@ public class VoiceModelCacheService {
               }
 
               // 4. 生成签名 URL
-              String presignedUrl = aliOssUtil.generatePresignedUrl(
+              String presignedUrl = minioUtil.generatePresignedUrl(
                   objectName, VoiceConstants.OSS_PRESIGNED_URL_EXPIRATION_MINUTES);
 
               // 5. 下载文件
