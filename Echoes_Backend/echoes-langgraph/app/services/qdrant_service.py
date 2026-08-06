@@ -118,6 +118,25 @@ async def init_qdrant_collections():
                     "field_name": "message_type",
                     "field_schema": models.PayloadSchemaType.KEYWORD,
                 },
+                {
+                    "field_name": "user_id",
+                    "field_schema": models.PayloadSchemaType.KEYWORD,
+                },
+            ]
+        },
+        # 用户长期画像（单 point = 单用户，按 id 读取；向量为占位）
+        settings.COLLECTION_PROFILE: {
+            "vectors": models.VectorParams(
+                size=settings.VECTOR_SIZE,
+                distance=models.Distance.COSINE,
+            ),
+            "shard_number": 1,
+            "replication_factor": 1,
+            "payload_index": [
+                {
+                    "field_name": "user_id",
+                    "field_schema": models.PayloadSchemaType.KEYWORD,
+                },
             ]
         }
     }

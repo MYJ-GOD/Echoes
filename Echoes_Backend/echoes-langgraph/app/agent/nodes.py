@@ -5,8 +5,10 @@ planner → (conditional_edges) → tool_router → executor → response_genera
 """
 import json
 import logging
+from datetime import datetime
 from typing import Any, Dict, Literal
 
+from app.agent import memory
 from app.agent.state import AgentState
 from app.agent.tools import TOOL_REGISTRY
 from app.services.llm_client import chat_completion
@@ -151,15 +153,15 @@ async def executor_node(state: AgentState) -> AgentState:
         name, fn, args = item["name"], item["fn"], item["args"]
         try:
             if name == "analyze_emotion":
-                emotion = fn(**args)
+                emotion = await fn(**args)
             elif name == "search_memory":
-                memory_hits = fn(**args)
+                memory_hits = await fn(**args)
             elif name == "get_user_profile":
-                profile = fn(**args)
+                profile = await fn(**args)
             elif name == "generate_comfort_response":
-                results["comfort_response"] = fn(**args)
+                results["comfort_response"] = await fn(**args)
             else:
-                results[name] = fn(**args)
+                results[name] = await fn(**args)
         except Exception as e:
             logger.error("工具执行失败 %s: %s", name, e)
             results[name] = {"error": str(e)}
@@ -213,14 +215,21 @@ async def response_generator_node(state: AgentState) -> AgentState:
 # ============== memory_updater ==============
 
 async def memory_updater_node(state: AgentState) -> AgentState:
-    """生成记忆条目（Week1: 模板摘要 + 空实体；Week2 接 Qdrant + LLM 实体抽取）"""
+    """生成记忆条目（摘要 + LLM 实体抽取）并写入 Qdrant（长期记忆闭环）"""
     query = state.get("query", "")
     response = state.get("response", "")
+    user_id = state.get("user_id", "")
+    if not query or not response:
+        return {"memory_entry": None}
+
+    text = f"用户说：{query}。助手回复：{response}。"
+    entities = await memory.extract_entities(text)
     entry = {
         "summary": f"用户说：{query} | 助手回复：{response}",
-        "entities": [],  # Week2: LLM 实体抽取（mem0 式记忆图谱）
+        "entities": entities,
         "intent": state.get("intent", "chat"),
+        "ts": datetime.now().isoformat(),
     }
-    # Week2: 写 Qdrant conversation_history（含实体 payload）
-    logger.info("memory_entry(待入库): %s", json.dumps(entry, ensure_ascii=False)[:200])
+    saved = await memory.save_memory_entry(user_id, entry)
+    logger.info("memory 保存: saved=%s entities=%s", saved, entities)
     return {"memory_entry": entry}

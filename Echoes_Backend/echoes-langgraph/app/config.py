@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # Collections 名称
     COLLECTION_KNOWLEDGE: str = "knowledge_chunks"
     COLLECTION_CONVERSATION: str = "conversation_history"
+    COLLECTION_PROFILE: str = "user_profile"
 
     # 检索配置
     DEFAULT_TOP_K: int = 5

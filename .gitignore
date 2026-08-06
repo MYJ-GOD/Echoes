@@ -23,6 +23,9 @@ config/secrets.properties
 .cursor/
 改造计划_Agent化.md
 
+# ---- Agent checkpointer ----
+*.sqlite
+
 # ---- IDE / 编辑器 ----
 .idea/
 .vscode/

@@ -20,6 +20,15 @@ from app.agent.nodes import (
 
 logger = logging.getLogger(__name__)
 
+# checkpointer：SqliteSaver 持久化，同 thread_id 可断点续跑
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    _checkpointer = SqliteSaver.from_conn_string("agent_checkpoints.sqlite")
+    logger.info("Agent checkpointer: SqliteSaver 已启用 (agent_checkpoints.sqlite)")
+except Exception as e:  # pragma: no cover - 依赖缺失时降级
+    logger.warning("SqliteSaver 初始化失败，Agent 无持久化 checkpointer: %s", e)
+    _checkpointer = None
 
 def build_agent_workflow() -> StateGraph:
     """构建 Agent 编排 workflow"""
@@ -57,4 +66,4 @@ def build_agent_workflow() -> StateGraph:
 
 
 # 编译 workflow（Agent 与 RAG 并存，互不影响）
-agent_workflow = build_agent_workflow().compile()
+agent_workflow = build_agent_workflow().compile(checkpointer=_checkpointer)
