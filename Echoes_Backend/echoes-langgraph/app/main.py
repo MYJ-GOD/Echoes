@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.api.routes import router as rag_router
 from app.api.optimization_routes import router as optimization_router
+from app.api.agent_routes import router as agent_router
 
 # 配置日志
 logging.basicConfig(
@@ -96,6 +97,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # 注册路由
 app.include_router(rag_router, prefix="/api/v1")
 app.include_router(optimization_router, prefix="/api/v1")
+app.include_router(agent_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["Health"])
