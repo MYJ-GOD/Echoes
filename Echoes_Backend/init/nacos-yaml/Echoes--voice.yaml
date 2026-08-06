@@ -1,0 +1,109 @@
+server:
+  port: 18083
+
+spring:
+  application:
+    name: echoes-service-voice
+  # 数据源配置 (从公共配置继承)
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${echoes.db.host:localhost}:${echoes.db.port:3306}/${echoes.db.name:echoes}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: ${echoes.db.username:root}
+    password: ${echoes.db.password:root}
+    druid:
+      # 连接池配置
+      initial-size: 5
+      min-idle: 5
+      max-active: 20
+      max-wait: 60000
+      time-between-eviction-runs-millis: 60000
+      min-evictable-idle-time-millis: 300000
+      max-evictable-idle-time-millis: 900000
+      validation-query: SELECT 1
+      test-while-idle: true
+      test-on-borrow: false
+      test-on-return: false
+      pool-prepared-statements: true
+      max-pool-prepared-statement-per-connection-size: 20
+      filters: stat,wall,slf4j
+      connection-properties: druid.stat.mergeSql\=true;druid.stat.slowSqlMillis\=5000
+      use-global-data-source-stat: true
+      # Druid 监控页面配置
+      stat-view-servlet:
+        enabled: true
+        url-pattern: /druid/*
+        login-username: admin
+        login-password: admin
+        reset-enable: false
+      web-stat-filter:
+        enabled: true
+        url-pattern: /*
+        exclusions: "*.js,*.gif,*.jpg,*.png,*.css,*.ico,/druid/*"
+  # Redis配置 (从公共配置继承)
+  redis:
+    host: ${echoes.redis.host:localhost}
+    port: ${echoes.redis.port:6379}
+    database: ${echoes.redis.database:0}
+
+# Voice 服务配置
+echoes:
+  ai:
+    direct-url: http://127.0.0.1:18085
+  voice:
+    # 音色数量限制
+    max-assets-per-user: 10
+    # AI回调认证配置
+    callback:
+      api-key-internal: ${VOICE_CALLBACK_API_KEY:change-me-internal-callback-key}
+      allowed-ips: ${echoes.voice.callback.allowed-ips-internal:}
+    # 消息队列配置 (Redis Streams)
+    mq:
+      stream-key: voice-training-tasks
+      group-name: voice-training-group
+      consumer-name: ${echoes.voice.mq.consumer-name:echoes-voice-service}
+
+  # 阿里云 OSS 配置
+  alioss:
+    endpoint: oss-cn-beijing.aliyuncs.com
+    accessKeyId: ${ALIYUN_ACCESS_KEY_ID:your-aliyun-access-key-id}
+    accessKeySecret: ${ALIYUN_ACCESS_KEY_SECRET:your-aliyun-access-key-secret}
+    bucketName: echoes-sim
+
+# CosyVoice 服务配置
+cosyvoice:
+  baseDir: "${ECHOES_AI_BASE_DIR:D:/Echoes/Echoes_Backend/Echoes-AI}"
+  pythonExe: "conda run -n cosyvoice2 python"
+  script: "app/main.py"
+  port: 18085
+  modelDir: "${COSYVOICE_MODEL_DIR:D:/Echoes/models/cosyvoice2-0.5b}"
+  sampleRate: 24000
+  env:
+    HF_ENDPOINT: "https://hf-mirror.com"
+    HF_HOME: "${cosyvoice.baseDir}/hf_download"
+    TRANSFORMERS_CACHE: "${cosyvoice.baseDir}/tf_download"
+    COSYVOICE_REPO_DIR: "${COSYVOICE_REPO_DIR:D:/Echoes/Echoes_Backend/third_party/CosyVoice}"
+    ECHOES_MODELS_DIR: "${ECHOES_MODELS_DIR:D:/Echoes/models}"
+
+# MyBatis配置
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.echoes.voice.domain.voice.entity.*
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+# SpringDoc/Knife4j 配置（API 文档）
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /doc.html
+
+# 日志配置
+logging:
+  level:
+    com.echoes.voice: debug
+    com.echoes.voice.domain.voice.repository: debug

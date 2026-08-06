@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.echoes.admin.domain.governance.repository.AdminConversationTurnMapper">
+
+    <resultMap id="BaseResultMap" type="com.echoes.admin.domain.governance.entity.po.AdminConversationTurn">
+        <id column="id" property="id" jdbcType="BINARY" javaType="java.util.UUID"
+            typeHandler="com.echoes.admin.domain.governance.repository.typehandler.UUIDTypeHandler"/>
+        <result column="conversation_id" property="conversationId" jdbcType="BINARY" javaType="java.util.UUID"
+            typeHandler="com.echoes.admin.domain.governance.repository.typehandler.UUIDTypeHandler"/>
+        <result column="user_id" property="userId" jdbcType="BINARY" javaType="java.util.UUID"
+            typeHandler="com.echoes.admin.domain.governance.repository.typehandler.UUIDTypeHandler"/>
+        <result column="turn_id" property="turnId" jdbcType="VARCHAR"/>
+        <result column="idempotency_key" property="idempotencyKey" jdbcType="VARCHAR"/>
+        <result column="payload_hash" property="payloadHash" jdbcType="BINARY"/>
+        <result column="status" property="status" jdbcType="VARCHAR"/>
+        <result column="final_message_id" property="finalMessageId" jdbcType="VARCHAR"/>
+        <result column="error_code" property="errorCode" jdbcType="VARCHAR"/>
+        <result column="error_stage" property="errorStage" jdbcType="VARCHAR"/>
+        <result column="retryable" property="retryable" jdbcType="INTEGER"/>
+        <result column="start_time" property="startTime" jdbcType="TIMESTAMP"/>
+        <result column="end_time" property="endTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, conversation_id, user_id, turn_id, idempotency_key, payload_hash,
+        status, final_message_id, error_code, error_stage, retryable,
+        start_time, end_time, update_time
+    </sql>
+
+    <!-- 根据 TurnId 查询 -->
+    <select id="selectByTurnId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM conversation_turn
+        WHERE turn_id = #{turnId}
+        LIMIT 1
+    </select>
+
+    <!-- 按会话 ID 查询 Turn 列表 -->
+    <select id="selectTurnsBySessionId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM conversation_turn
+        WHERE conversation_id = #{conversationId}
+        ORDER BY start_time DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 查询失败 Turn 统计（按 error_code 分组） -->
+    <select id="selectFailureStatistics" resultType="com.echoes.admin.domain.governance.repository.AdminConversationTurnMapper$FailureStatistics">
+        SELECT error_code, error_stage, COUNT(*) as count
+        FROM conversation_turn
+        WHERE status = 'FAILED'
+        <if test="timeFrom != null">
+            AND start_time &gt;= #{timeFrom}
+        </if>
+        <if test="timeTo != null">
+            AND start_time &lt;= #{timeTo}
+        </if>
+        GROUP BY error_code, error_stage
+    </select>
+
+    <!-- 统计 Turn 总数 -->
+    <select id="countTotalTurns" resultType="int">
+        SELECT COUNT(*) FROM conversation_turn
+    </select>
+
+</mapper>

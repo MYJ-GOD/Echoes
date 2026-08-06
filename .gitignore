@@ -1,0 +1,53 @@
+# ==================== Echoes 顶层忽略规则 ====================
+# 子目录中已有的 .gitignore 仍然生效
+
+# ---- 模型权重与私人语音数据 ----
+# cosyvoice2 权重体积大（约 4.8GB）且含个人声音数据，绝不入仓，按 models/README.md 下载
+models/*
+!models/README.md
+
+# ---- 第三方源码（按需 git clone，不入仓）----
+third_party/
+
+# ---- 敏感配置（密钥一律走环境变量，绝不放仓库）----
+.env
+.env.*.local
+application-secret.yml
+application-prod.yml
+config/secrets.properties
+
+# ---- 内部工具 / 规划文档 ----
+.claude/
+.codegraph/
+.cursor/
+改造计划_Agent化.md
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.settings/
+.factorypath
+
+# ---- 构建产物 ----
+target/
+**/target/
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+*.log
+logs/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# ---- 系统 / 其他 ----
+.DS_Store
+Thumbs.db
+*.swp

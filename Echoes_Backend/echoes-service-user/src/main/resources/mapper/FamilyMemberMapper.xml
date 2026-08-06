@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.echoes.user.domain.user.repository.FamilyMemberMapper">
+
+    <resultMap id="BaseResultMap" type="com.echoes.user.domain.user.entity.po.FamilyMember">
+        <id column="id" property="id" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler"/>
+        <result column="family_id" property="familyId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler"/>
+        <result column="user_id" property="userId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler"/>
+        <result column="role" property="role" jdbcType="VARCHAR"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id, family_id, user_id, role, create_time
+    </sql>
+
+    <insert id="insert" parameterType="com.echoes.user.domain.user.entity.po.FamilyMember" useGeneratedKeys="false">
+        INSERT INTO family_member (
+            id, family_id, user_id, role, create_time
+        ) VALUES (
+            #{id, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler},
+            #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler},
+            #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler},
+            #{role},
+            NOW()
+        )
+    </insert>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM family_member
+        WHERE id = #{id, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+    </select>
+
+    <select id="selectByFamilyId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM family_member
+        WHERE family_id = #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+        ORDER BY create_time ASC
+    </select>
+
+    <select id="selectByUserId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM family_member
+        WHERE user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+        ORDER BY create_time DESC
+    </select>
+
+    <select id="selectByFamilyAndUser" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM family_member
+        WHERE family_id = #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+          AND user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+        LIMIT 1
+    </select>
+
+    <select id="countByFamilyAndUser" resultType="int">
+        SELECT COUNT(*)
+        FROM family_member
+        WHERE family_id = #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+          AND user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+    </select>
+
+    <select id="countByUserId" resultType="int">
+        SELECT COUNT(*)
+        FROM family_member
+        WHERE user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+    </select>
+
+    <select id="findCommonFamilyId" resultType="java.util.UUID">
+        SELECT fm1.family_id
+        FROM family_member fm1
+        INNER JOIN family_member fm2 ON fm1.family_id = fm2.family_id
+        WHERE fm1.user_id = #{userId1, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+          AND fm2.user_id = #{userId2, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+        LIMIT 1
+    </select>
+
+    <update id="update" parameterType="com.echoes.user.domain.user.entity.po.FamilyMember">
+        UPDATE family_member
+        SET role = #{role}
+        WHERE id = #{id, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+    </update>
+
+    <delete id="deleteById">
+        DELETE FROM family_member
+        WHERE id = #{id, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+    </delete>
+
+    <delete id="deleteByFamilyId">
+        DELETE FROM family_member
+        WHERE family_id = #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+    </delete>
+
+    <delete id="deleteByFamilyAndUser">
+        DELETE FROM family_member
+        WHERE family_id = #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+          AND user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+    </delete>
+
+</mapper>
+

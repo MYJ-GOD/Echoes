@@ -1,0 +1,106 @@
+# Prometheus 监控配置
+# Echoes LangGraph Service
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echoes-langgraph-prometheus
+  namespace: echoes
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      - job_name: 'echoes-langgraph'
+        static_configs:
+          - targets: ['echoes-langgraph-service:80']
+        metrics_path: '/metrics'
+        scrape_interval: 10s
+
+---
+
+# Grafana Dashboard 配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echoes-langgraph-grafana
+  namespace: echoes
+data:
+  dashboard.json: |
+    {
+      "dashboard": {
+        "title": "Echoes LangGraph Dashboard",
+        "panels": [
+          {
+            "title": "请求量",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total{job=\"echoes-langgraph\"}[5m])",
+                "legendFormat": "{{method}} {{path}}"
+              }
+            ]
+          },
+          {
+            "title": "延迟 (P50/P95/P99)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"echoes-langgraph\"}[5m]))",
+                "legendFormat": "P50"
+              },
+              {
+                "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"echoes-langgraph\"}[5m]))",
+                "legendFormat": "P95"
+              },
+              {
+                "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{job=\"echoes-langgraph\"}[5m]))",
+                "legendFormat": "P99"
+              }
+            ]
+          },
+          {
+            "title": "错误率",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total{job=\"echoes-langgraph\",status=~\"5..\"}[5m])",
+                "legendFormat": "5xx errors"
+              }
+            ]
+          },
+          {
+            "title": "缓存命中率",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "cache_hits_total / (cache_hits_total + cache_misses_total)",
+                "legendFormat": "Hit Rate"
+              }
+            ]
+          },
+          {
+            "title": "Pod CPU 使用率",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(container_cpu_usage_seconds_total{pod=~\"echoes-langgraph.*\"}[5m])",
+                "legendFormat": "{{pod}}"
+              }
+            ]
+          },
+          {
+            "title": "Pod 内存使用率",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "container_memory_usage_bytes{pod=~\"echoes-langgraph.*\"}",
+                "legendFormat": "{{pod}}"
+              }
+            ]
+          }
+        ]
+      }
+    }

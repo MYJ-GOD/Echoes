@@ -1,0 +1,261 @@
+# Kubernetes 部署配置
+# Echoes LangGraph Service
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echoes-langgraph-config
+  namespace: echoes
+data:
+  # Qdrant 配置
+  QDRANT_URL: "http://qdrant-service:6333"
+  QDRANT_API_KEY: ""
+
+  # Echoes-AI 服务
+  ECHOES_AI_URL: "http://echoes-ai-service:8000"
+
+  # 模型配置
+  EMBEDDING_MODEL: "BAAI/bge-m3"
+  RERANK_MODEL: "BAAI/bge-reranker-v2-m3"
+
+  # 日志配置
+  LOG_LEVEL: "INFO"
+
+  # 向量配置
+  VECTOR_SIZE: "1024"
+  COLLECTION_KNOWLEDGE: "knowledge_chunks"
+  COLLECTION_CONVERSATION: "conversation_history"
+
+  # 检索配置
+  DEFAULT_TOP_K: "5"
+  DEFAULT_THRESHOLD: "0.5"
+
+  # 缓存配置
+  CACHE_ENABLED: "true"
+  CACHE_TTL_SECONDS: "300"
+  CACHE_MAX_SIZE: "10000"
+
+  # 量化配置
+  USE_QUANTIZATION: "true"
+  QUANTIZATION_METHOD: "INT8"
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echoes-langgraph
+  namespace: echoes
+  labels:
+    app: echoes-langgraph
+    version: v1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: echoes-langgraph
+  template:
+    metadata:
+      labels:
+        app: echoes-langgraph
+        version: v1
+    spec:
+      # 节点选择（可选：选择 GPU 节点）
+      # nodeSelector:
+      #   nvidia.com/gpu: "true"
+
+      # 镜像拉取密钥（如果需要私有镜像）
+      # imagePullSecrets:
+      #   - name: registry-secret
+
+      containers:
+      - name: langgraph
+        image: echoes-registry/langgraph:latest
+        imagePullPolicy: Always
+
+        ports:
+        - containerPort: 8088
+          name: http
+          protocol: TCP
+
+        # 环境变量
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+
+        # 从 ConfigMap 加载环境变量
+        envFrom:
+        - configMapRef:
+            name: echoes-langgraph-config
+
+        # 从 Secret 加载敏感信息
+        # envFrom:
+        # - secretRef:
+        #     name: echoes-langgraph-secret
+
+        # 资源限制
+        resources:
+          requests:
+            cpu: "1000m"
+            memory: "2Gi"
+          limits:
+            cpu: "4000m"
+            memory: "8Gi"
+            # nvidia.com/gpu: "1"  # 如果需要 GPU
+
+        # 健康检查
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8088
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8088
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        # 启动探针（K8s 1.16+）
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8088
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+
+        # 挂载卷（用于模型缓存）
+        volumeMounts:
+        - name: models-cache
+          mountPath: /app/models
+        - name: logs
+          mountPath: /app/logs
+
+        # 生命周期钩子
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 10"]
+
+      # 卷定义
+      volumes:
+      - name: models-cache
+        persistentVolumeClaim:
+          claimName: echoes-models-pvc
+      - name: logs
+        emptyDir: {}
+
+      # 亲和性配置
+      affinity:
+        # Pod 反亲和性：避免在同一节点上运行多个实例
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - echoes-langgraph
+              topologyKey: kubernetes.io/hostname
+
+      # 拓扑分布约束
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: echoes-langgraph
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: echoes-langgraph-service
+  namespace: echoes
+  labels:
+    app: echoes-langgraph
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8088
+    protocol: TCP
+    name: http
+  selector:
+    app: echoes-langgraph
+
+---
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: echoes-langgraph-hpa
+  namespace: echoes
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: echoes-langgraph
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 60
+
+---
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: echoes-langgraph-pdb
+  namespace: echoes
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: echoes-langgraph

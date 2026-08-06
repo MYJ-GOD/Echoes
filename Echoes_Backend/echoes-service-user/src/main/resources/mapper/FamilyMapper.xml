@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.echoes.user.domain.user.repository.FamilyMapper">
+
+    <resultMap id="BaseResultMap" type="com.echoes.user.domain.user.entity.po.Family">
+        <id column="family_id" property="familyId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler"/>
+        <result column="owner_user_id" property="ownerUserId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler"/>
+        <result column="name" property="name" jdbcType="VARCHAR"/>
+        <result column="is_deleted" property="isDeleted" jdbcType="TINYINT"/>
+        <result column="deleted_at" property="deletedAt" jdbcType="TIMESTAMP"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        family_id, owner_user_id, name, is_deleted, deleted_at, create_time, update_time
+    </sql>
+
+    <insert id="insert" parameterType="com.echoes.user.domain.user.entity.po.Family" useGeneratedKeys="false">
+        INSERT INTO family (
+            family_id, owner_user_id, name, is_deleted, create_time, update_time
+        ) VALUES (
+            #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler},
+            #{ownerUserId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler},
+            #{name},
+            0,
+            NOW(),
+            NOW()
+        )
+    </insert>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM family
+        WHERE family_id = #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+          AND is_deleted = 0
+    </select>
+
+    <select id="selectByOwnerUserId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM family
+        WHERE owner_user_id = #{ownerUserId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+    </select>
+
+    <select id="selectByMemberUserId" resultMap="BaseResultMap">
+        SELECT f.family_id, f.owner_user_id, f.name, f.is_deleted, f.deleted_at, f.create_time, f.update_time
+        FROM family f
+        INNER JOIN family_member fm ON f.family_id = fm.family_id
+        WHERE fm.user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+          AND f.is_deleted = 0
+        ORDER BY f.create_time DESC
+    </select>
+
+    <select id="selectValidByUserId" resultMap="BaseResultMap">
+        SELECT DISTINCT f.family_id, f.owner_user_id, f.name, f.is_deleted, f.deleted_at, f.create_time, f.update_time
+        FROM family f
+        LEFT JOIN family_member fm ON f.family_id = fm.family_id
+        WHERE (f.owner_user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+           OR fm.user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler})
+          AND f.is_deleted = 0
+        ORDER BY f.create_time DESC
+    </select>
+
+    <update id="update" parameterType="com.echoes.user.domain.user.entity.po.Family">
+        UPDATE family
+        SET name = #{name},
+            update_time = NOW()
+        WHERE family_id = #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+          AND is_deleted = 0
+    </update>
+
+    <update id="softDelete">
+        UPDATE family
+        SET is_deleted = 1,
+            deleted_at = #{deletedAt},
+            update_time = NOW()
+        WHERE family_id = #{familyId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+    </update>
+
+    <select id="countByOwner" resultType="int">
+        SELECT COUNT(*)
+        FROM family
+        WHERE owner_user_id = #{ownerUserId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+          AND is_deleted = 0
+    </select>
+
+</mapper>
+

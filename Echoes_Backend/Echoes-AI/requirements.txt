@@ -1,0 +1,41 @@
+# Web Framework
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart
+websockets
+requests
+
+# Storage
+# (using Java signed URL for OSS access, no direct OSS client needed)
+
+# Configuration
+pydantic>=2.7.0
+pydantic-settings
+python-dotenv
+
+# AI / Machine Learning (CosyVoice dependencies)
+torch>=2.3.1
+torchaudio>=2.3.1
+conformer==0.3.2
+diffusers==0.29.0
+hydra-core==1.3.2
+HyperPyYAML==1.2.2
+inflect==7.3.1
+librosa==0.10.2
+modelscope==1.20.0
+networkx==3.1
+numpy==1.26.4
+omegaconf==2.3.0
+onnx==1.16.0
+# Use standard onnxruntime for windows compat, or onnxruntime-gpu if CUDA available
+onnxruntime>=1.20.0
+openai-whisper==20231117
+opencc-python-reimplemented==0.1.7
+protobuf==4.25
+soundfile==0.12.1
+transformers>=4.40.0
+x-transformers==2.11.24
+wetext==0.0.4
+
+# Monitoring
+tensorboard==2.14.0

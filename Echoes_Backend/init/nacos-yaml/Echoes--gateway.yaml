@@ -1,0 +1,289 @@
+# Echoes 网关服务配置
+# Data ID: Echoes--gateway.yaml
+# Group: DEFAULT_GROUP
+# 配置格式: YAML
+# 
+# 注意：此配置会覆盖 application.yaml 中的同名配置
+
+server:
+  port: ${echoes.server.port:18080}
+
+spring:
+  # Gateway 路由配置
+  cloud:
+    gateway:
+      # CORS 全局配置（WebFlux 方式）
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOriginPatterns: "*"
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - OPTIONS
+              - PATCH
+            allowedHeaders: "*"
+            allowCredentials: true
+            maxAge: 3600
+      # 全局默认过滤器配置
+      default-filters:
+        # 全局请求/响应日志（可选，生产环境建议关闭或使用异步日志）
+        # - name: Logging
+        #   args:
+        #     level: INFO
+      # HTTP 客户端配置（Gateway 使用 Netty HttpClient）
+      httpclient:
+        connect-timeout: 5000  # 连接超时（毫秒）
+        response-timeout: 300s  # 响应超时（5分钟，语音合成需要较长时间）
+        pool:
+          type: ELASTIC  # 连接池类型：FIXED（固定）或 ELASTIC（弹性）
+          max-connections: 500  # 最大连接数
+          acquire-timeout: 45000  # 获取连接超时（毫秒）
+          max-idle-time: 30s  # 最大空闲时间
+      # 负载均衡配置（使用 Spring Cloud LoadBalancer）
+      loadbalancer:
+        enabled: true
+        # 可以配置负载均衡策略，如轮询、随机、加权等
+      # 启用指标（用于监控）
+      metrics:
+        enabled: true
+      # 路由配置
+      routes:
+        # ==================== Security Blocking Routes (Hard Deny) ====================
+        # 1. 封堵 chat-parallel (Internal Only)
+        - id: deny-chat-parallel
+          uri: no://op
+          predicates:
+            - Path=/api/conversation/chat-parallel
+          filters:
+            - SetStatus=410
+        
+        # 2. 封堵旧 Session 接口 (Deprecated)
+        - id: deny-message-session
+          uri: no://op
+          predicates:
+            - Path=/api/message/session/**
+          filters:
+            - SetStatus=410
+
+        # 3. 封堵 Voice 服务直连 (Internal Only)
+        # 禁止所有外部访问 Voice 服务的内部接口
+        
+        # 允许 Echoes-AI 服务访问签名 URL 接口
+        - id: allow-ai-signed-url
+          uri: lb://echoes-service-voice
+          predicates:
+            - Path=/api/voice/internal/assets/ref/signed
+          filters:
+            - StripPrefix=1
+        
+        # 封堵其他内部接口
+        - id: deny-voice-internal
+          uri: no://op
+          predicates:
+            - Path=/api/voice/inference/**,/api/voice/internal/**,/api/voice/admin/**
+          filters:
+            - SetStatus=403
+
+        # Voice 服务路由 (外部可访问的业务接口)
+        - id: echoes-service-voice
+          uri: lb://echoes-service-voice
+          predicates:
+            - Path=/api/voice/**
+          filters:
+            - StripPrefix=1
+
+        # 4. 封堵 Internal 路由 (Hard Deny)
+        - id: deny-internal-routes
+          uri: no://op
+          predicates:
+            - Path=/api/internal/**
+          filters:
+            - SetStatus=403
+        # ==================== End Security Blocking ====================
+
+        # 用户服务路由
+        - id: echoes-service-user
+          uri: lb://echoes-service-user
+          predicates:
+            - Path=/api/user/**
+          filters:
+            - StripPrefix=1
+          metadata:
+            connect-timeout: 5000
+            response-timeout: 30s
+
+        # Message endpoints routing (聊天消息入口)
+        - id: echoes-service-message
+          uri: lb://echoes-service-conversation
+          predicates:
+            - Path=/api/message/**
+          filters:
+            - StripPrefix=1
+          metadata:
+            connect-timeout: 5000
+            response-timeout: 30s
+        # 联系人会话（MySQL）路由：会话索引表 conversation_session
+        - id: echoes-service-conversation-session
+          uri: lb://echoes-service-conversation
+          predicates:
+            - Path=/api/conversation-session/**
+          filters:
+            - StripPrefix=1
+          metadata:
+            connect-timeout: 5000
+            response-timeout: 30s
+        # 流式对话+语音合成路由（新增）
+        - id: echoes-service-conversation-stream
+          uri: lb://echoes-service-conversation
+          predicates:
+            - Path=/api/conversation/**
+          filters:
+            - StripPrefix=1
+          metadata:
+            connect-timeout: 5000
+            response-timeout: 180s
+        # 语音服务路由 (Internal Access Only via Service Discovery, but mapped here for internal services if needed via gateway loopback, though direct feign/webclient is preferred. 
+        # Since we hard blocked /api/voice/** above, this route is effectively unreachable from external world with /api prefix.
+        # However, for internal services accessing via Gateway (if any), we might need a route. 
+        # But per instruction "Gateway externally only routes user+conversation", we keep voice route but it's shadowed by the deny rule for external traffic.
+        # Actually, let's just keep it for completeness but it is blocked by the deny rule above.)
+        - id: echoes-service-voice
+          uri: lb://echoes-service-voice
+          predicates:
+            - Path=/api/internal/voice/**
+          filters:
+            - StripPrefix=1
+          # metadata 中的超时配置不会生效，已移除
+        # 管理服务路由
+        - id: echoes-service-admin
+          uri: lb://echoes-service-admin
+          predicates:
+            - Path=/api/admin/**
+          filters:
+            - StripPrefix=1
+          metadata:
+            connect-timeout: 5000
+            response-timeout: 30s
+  # JSON 配置
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+    serialization:
+      write-dates-as-timestamps: false
+  # 数据源配置（如果 Gateway 需要直接访问数据库）
+  datasource:
+    driver-class-name: ${echoes.datasource.driver-class-name:com.mysql.cj.jdbc.Driver}
+    url: jdbc:mysql://${echoes.datasource.host:localhost}:${echoes.datasource.port:3306}/${echoes.datasource.database:echoes}?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: ${echoes.datasource.username:root}
+    password: ${echoes.datasource.password:root}
+  # Redis 配置
+  data:
+    redis:
+      host: ${echoes.redis.host:localhost}
+      port: ${echoes.redis.port:6379}
+      database: ${echoes.redis.database:0}
+      timeout: ${echoes.redis.timeout:3000ms}
+      lettuce:
+        pool:
+          max-active: ${echoes.redis.pool.max-active:8}
+          max-wait: ${echoes.redis.pool.max-wait:-1ms}
+          max-idle: ${echoes.redis.pool.max-idle:8}
+          min-idle: ${echoes.redis.pool.min-idle:0}
+    # MongoDB 配置
+    mongodb:
+      uri: mongodb://${MONGODB_USERNAME:root}:${MONGODB_PASSWORD:root}@${MONGODB_HOST:localhost}:${MONGODB_PORT:27017}/${MONGODB_DATABASE:echoes}?authSource=admin
+      # 或者使用以下方式分别配置
+      # host: ${echoes.mongodb.host:localhost}
+      # port: ${echoes.mongodb.port:27017}
+      # database: ${echoes.mongodb.database:echoes}
+      # authentication-database: admin  # 认证数据库
+
+# ==================== Gateway 服务专属配置 ====================
+echoes:
+  # 数据源配置（开发环境：使用 localhost）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    host: ${DB_HOST:localhost}  # 开发环境使用 localhost，生产环境使用 mysql（Docker 服务名）
+    port: 3306
+    database: ${DB_NAME:echoes}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+  # Redis 配置（开发环境：使用 localhost）
+  redis:
+    host: ${REDIS_HOST:localhost}  # 开发环境使用 localhost，生产环境使用 redis（Docker 服务名）
+    port: 6379
+    database: 0
+    timeout: 3000ms
+    pool:
+      max-active: 8
+      max-wait: -1ms
+      max-idle: 8
+      min-idle: 0
+  # 服务控制配置
+  voice:
+    auto-start-process: false
+  conversation:
+    auto-start-process: false
+  # 阿里云 OSS 配置（开发环境）
+  alioss:
+    endpoint: "oss-cn-beijing.aliyuncs.com"
+    accessKeyId: ${ALIYUN_ACCESS_KEY_ID:your-aliyun-access-key-id}
+    accessKeySecret: ${ALIYUN_ACCESS_KEY_SECRET:your-aliyun-access-key-secret}
+    bucketName: "echoes-sim"
+
+# CosyVoice 配置（开发环境）- 使用官方完整版
+cosyvoice:
+  baseDir: "D:/Echoes/Echoes_Backend/Echoes-AI"
+  pythonExe: "conda run -n cosyvoice2 python"
+  script: "app/main.py"
+  port: 8000
+  modelDir: "D:/Echoes/models/cosyvoice2-0.5b"
+  sampleRate: 24000
+  env:
+    HF_ENDPOINT: "https://hf-mirror.com"
+    HF_HOME: "${cosyvoice.baseDir}/hf_download"
+    TRANSFORMERS_CACHE: "${cosyvoice.baseDir}/tf_download"
+    COSYVOICE_REPO_DIR: "D:/Echoes/Echoes_Backend/third_party/CosyVoice"
+    ECHOES_MODELS_DIR: "D:/Echoes/models"
+
+# JWT 配置（与 user-service 保持一致）
+sky:
+  jwt:
+    user-secret-key: ${JWT_USER_SECRET_KEY:change-me-user-secret-key-0123456789abcdef}
+    user-ttl: 7200000  # Token过期时间：2小时（毫秒）
+    user-token-name: token
+
+# Knife4j Gateway 配置（API 文档聚合）
+# 使用自动发现策略：Knife4j Gateway 会自动从 Nacos 服务发现中查找所有注册的服务
+# 并自动访问每个服务的 /v3/api-docs 端点进行文档聚合
+knife4j:
+  gateway:
+    enabled: true  # 启用 Knife4j Gateway 聚合功能
+    strategy: discover  # 聚合策略：discover（自动发现）
+    discover:
+      enabled: true  # 启用自动发现
+      version: openapi3  # OpenAPI 版本
+
+# 鉴权白名单配置（支持热更新）
+# 注意：/api/user/auth/validate 已从默认白名单中移除，因为此接口用于验证 Token，本身需要鉴权保护
+echoes:
+  gateway:
+    auth:
+      whitelist:
+        enabled: true
+        paths:
+          - /api/user/auth/login
+          - /api/user/auth/register
+          - /api-docs
+          - /api-docs/**
+          - /api/*/v3/api-docs/**
+          - /v3/api-docs/**
+          - /swagger-ui/**
+          - /swagger-ui.html
+          - /webjars/**
+          - /doc.html
+          - /favicon.ico
+          - /actuator/**

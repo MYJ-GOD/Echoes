@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  echoes-ai:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    container_name: echoes-ai
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Service Configuration
+      - PORT=8000
+      - LOG_LEVEL=INFO
+
+      # CosyVoice Configuration
+      - COSYVOICE_REPO_DIR=/app/third_party/CosyVoice
+      - ECHOES_MODELS_DIR=/app/models
+      - COSYVOICE_MODEL_SUBDIR=cosyvoice2-0.5b
+      - TTS_SAMPLE_RATE=24000
+
+      # Nacos Configuration
+      - NACOS_SERVER_ADDR=nacos:8848
+      - NACOS_NAMESPACE=
+      - NACOS_GROUP=DEFAULT_GROUP
+      - SERVICE_NAME=echoes-ai
+
+      # Database Configuration
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=echoes
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=root
+
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+
+      # OSS Configuration
+      - OSS_ENDPOINT=oss-cn-beijing.aliyuncs.com
+      - OSS_ACCESS_KEY_ID=your-aliyun-access-key-id
+      - OSS_ACCESS_KEY_SECRET=your-aliyun-access-key-secret
+      - OSS_BUCKET_NAME=echoes-sim
+    volumes:
+      # Mount CosyVoice repository
+      - ../../third_party/CosyVoice:/app/third_party/CosyVoice:ro
+      # Mount models
+      - ../../../models:/app/models:ro
+      # Runtime data
+      - ./../runtime:/app/runtime
+    networks:
+      - echoes-network
+    depends_on:
+      - mysql
+      - redis
+      - mongodb
+      - nacos
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+networks:
+  echoes-network:
+    external: true
+    name: echoes-backend_echoes-network

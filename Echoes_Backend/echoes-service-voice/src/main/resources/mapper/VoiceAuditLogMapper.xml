@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.echoes.voice.domain.voice.repository.VoiceAuditLogMapper">
+
+    <!-- 结果映射 -->
+    <resultMap id="BaseResultMap" type="com.echoes.voice.domain.voice.entity.po.VoiceAuditLog">
+        <id column="audit_id" property="auditId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="voice_asset_id" property="voiceAssetId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="actor_user_id" property="actorUserId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="action" property="action" jdbcType="VARCHAR"/>
+        <result column="result" property="result" jdbcType="VARCHAR"/>
+        <result column="details" property="details" jdbcType="VARCHAR"/>
+        <result column="ts" property="ts" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <!-- 基础列 -->
+    <sql id="Base_Column_List">
+        audit_id, voice_asset_id, actor_user_id, action, result, details, ts
+    </sql>
+
+    <!-- 根据ID查询 -->
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM voice_audit_log
+        WHERE audit_id = #{auditId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </select>
+
+    <!-- 根据音色资产ID查询 -->
+    <select id="selectByVoiceAssetId" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM voice_audit_log
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+        ORDER BY ts DESC
+    </select>
+
+    <!-- 根据操作用户ID查询 -->
+    <select id="selectByActorUserId" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM voice_audit_log
+        WHERE actor_user_id = #{actorUserId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+        ORDER BY ts DESC
+    </select>
+
+    <!-- 根据音色资产ID和用户ID查询 -->
+    <select id="selectByAssetAndActor" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM voice_audit_log
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND actor_user_id = #{actorUserId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+        ORDER BY ts DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 插入 -->
+    <insert id="insert" parameterType="com.echoes.voice.domain.voice.entity.po.VoiceAuditLog" useGeneratedKeys="false">
+        INSERT INTO voice_audit_log (
+            audit_id, voice_asset_id, actor_user_id, action, result, details, ts
+        ) VALUES (
+            #{auditId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{actorUserId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{action},
+            #{result},
+            CASE
+                WHEN #{details} IS NULL OR #{details} = '' THEN NULL
+                WHEN JSON_VALID(#{details}) THEN CAST(#{details} AS JSON)
+                ELSE JSON_OBJECT('message', #{details})
+            END,
+            #{ts}
+        )
+    </insert>
+
+    <!-- 清理过期日志 -->
+    <delete id="deleteOlderThan">
+        DELETE FROM voice_audit_log
+        WHERE ts &lt; #{cutoffDate}
+    </delete>
+
+</mapper>
+

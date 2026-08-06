@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.echoes.admin.domain.governance.repository.AuditEventMapper">
+
+    <resultMap id="AuditEventVOMap" type="com.echoes.admin.domain.governance.entity.vo.AuditEventVO">
+        <id column="audit_id" property="auditId" jdbcType="BINARY" javaType="java.util.UUID"
+            typeHandler="com.echoes.admin.domain.governance.repository.typehandler.UUIDTypeHandler"/>
+        <result column="voice_asset_id" property="voiceAssetId" jdbcType="BINARY" javaType="java.util.UUID"
+            typeHandler="com.echoes.admin.domain.governance.repository.typehandler.UUIDTypeHandler"/>
+        <result column="actor_user_id" property="actorUserId" jdbcType="BINARY" javaType="java.util.UUID"
+            typeHandler="com.echoes.admin.domain.governance.repository.typehandler.UUIDTypeHandler"/>
+        <result column="action" property="action" jdbcType="VARCHAR"/>
+        <result column="result" property="result" jdbcType="VARCHAR"/>
+        <result column="details" property="details" jdbcType="VARCHAR"/>
+        <result column="ts" property="ts" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        audit_id, voice_asset_id, actor_user_id, action, result, details, ts
+    </sql>
+
+    <!-- 分页查询审计事件 -->
+    <select id="selectAuditEvents" resultMap="AuditEventVOMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_audit_log
+        <where>
+            <if test="voiceAssetId != null">
+                AND voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.admin.domain.governance.repository.typehandler.UUIDTypeHandler}
+            </if>
+            <if test="action != null">AND action = #{action}</if>
+            <if test="result != null">AND result = #{result}</if>
+            <if test="timeFrom != null">AND ts &gt;= #{timeFrom}</if>
+            <if test="timeTo != null">AND ts &lt;= #{timeTo}</if>
+        </where>
+        ORDER BY ts DESC
+        LIMIT #{offset}, #{limit}
+    </select>
+
+    <!-- 统计审计事件数量 -->
+    <select id="countAuditEvents" resultType="int">
+        SELECT COUNT(*)
+        FROM voice_audit_log
+        <where>
+            <if test="voiceAssetId != null">
+                AND voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.admin.domain.governance.repository.typehandler.UUIDTypeHandler}
+            </if>
+            <if test="action != null">AND action = #{action}</if>
+            <if test="result != null">AND result = #{result}</if>
+            <if test="timeFrom != null">AND ts &gt;= #{timeFrom}</if>
+            <if test="timeTo != null">AND ts &lt;= #{timeTo}</if>
+        </where>
+    </select>
+
+    <!-- 根据 ID 查询审计事件 -->
+    <select id="selectAuditEventById" resultMap="AuditEventVOMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_audit_log
+        WHERE audit_id = #{auditId, typeHandler=com.echoes.admin.domain.governance.repository.typehandler.UUIDTypeHandler}
+        LIMIT 1
+    </select>
+
+</mapper>

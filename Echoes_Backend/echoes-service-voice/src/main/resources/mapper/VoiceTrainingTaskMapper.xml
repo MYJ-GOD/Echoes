@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.echoes.voice.domain.voice.repository.VoiceTrainingTaskMapper">
+
+    <!-- 结果映射 -->
+    <resultMap id="BaseResultMap" type="com.echoes.voice.domain.voice.entity.po.VoiceTrainingTask">
+        <id column="task_id" property="taskId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="voice_asset_id" property="voiceAssetId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="voice_model_id" property="voiceModelId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="ref_id" property="refId" jdbcType="VARCHAR"/>
+        <result column="user_id" property="userId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="status" property="status" jdbcType="VARCHAR"/>
+        <result column="progress" property="progress" jdbcType="DECIMAL"/>
+        <result column="log_path" property="logPath" jdbcType="VARCHAR"/>
+        <result column="start_time" property="startTime" jdbcType="TIMESTAMP"/>
+        <result column="end_time" property="endTime" jdbcType="TIMESTAMP"/>
+        <result column="is_deleted" property="deleted" jdbcType="TINYINT"/>
+        <result column="deleted_at" property="deletedAt" jdbcType="TIMESTAMP"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <!-- 基础列 -->
+    <sql id="Base_Column_List">
+        task_id, voice_asset_id, voice_model_id, ref_id, user_id, status, progress,
+        log_path, start_time, end_time, is_deleted, deleted_at, create_time, update_time
+    </sql>
+
+    <!-- 根据ID查询 -->
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE task_id = #{taskId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </select>
+
+    <!-- 根据音色资产ID查询最新任务 -->
+    <select id="selectLatestByVoiceAssetId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+        LIMIT 1
+    </select>
+
+    <!-- 根据用户ID查询 -->
+    <select id="selectByUserId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+    </select>
+
+    <!-- 根据用户ID和状态查询 -->
+    <select id="selectByUserIdAndStatus" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND status = #{status}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+    </select>
+
+    <!-- 根据用户ID分页查询 -->
+    <select id="selectByUserIdWithPage" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <!-- 根据用户ID和状态分页查询 -->
+    <select id="selectByUserIdAndStatusWithPage" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND status = #{status}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <!-- 根据用户ID统计数量 -->
+    <select id="countByUserId" resultType="int">
+        SELECT COUNT(*)
+        FROM voice_training_task
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </select>
+
+    <!-- 根据用户ID和状态统计数量 -->
+    <select id="countByUserIdAndStatus" resultType="int">
+        SELECT COUNT(*)
+        FROM voice_training_task
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND status = #{status}
+          AND is_deleted = 0
+    </select>
+
+    <!-- 根据音色资产ID查询 -->
+    <select id="selectByVoiceAssetId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+    </select>
+
+    <!-- 查询进行中的任务 -->
+    <select id="selectRunningTasks" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE status = 'training'
+          AND is_deleted = 0
+        ORDER BY start_time ASC
+    </select>
+
+    <!-- 插入 -->
+    <insert id="insert" parameterType="com.echoes.voice.domain.voice.entity.po.VoiceTrainingTask" useGeneratedKeys="false">
+        INSERT INTO voice_training_task (
+            task_id, voice_asset_id, voice_model_id, ref_id, user_id, status, progress,
+            log_path, start_time, end_time, is_deleted, create_time, update_time
+        ) VALUES (
+            #{taskId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{voiceModelId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{refId},
+            #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{status},
+            #{progress},
+            #{logPath},
+            #{startTime},
+            #{endTime},
+            0, NOW(), NOW()
+        )
+    </insert>
+
+    <!-- 更新进度 -->
+    <update id="updateProgress">
+        UPDATE voice_training_task
+        SET progress = #{progress}, update_time = NOW()
+        WHERE task_id = #{taskId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </update>
+
+    <!-- 更新状态 -->
+    <update id="updateStatus">
+        UPDATE voice_training_task
+        SET status = #{status}, update_time = NOW()
+        WHERE task_id = #{taskId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </update>
+
+    <!-- 更新完成 -->
+    <update id="updateComplete">
+        UPDATE voice_training_task
+        SET status = #{status},
+            end_time = #{endTime},
+            voice_model_id = #{voiceModelId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            update_time = NOW()
+        WHERE task_id = #{taskId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </update>
+
+    <!-- 更新日志路径 -->
+    <update id="updateLogPath">
+        UPDATE voice_training_task
+        SET log_path = #{logPath}, update_time = NOW()
+        WHERE task_id = #{taskId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </update>
+
+    <!-- 软删除 -->
+    <update id="softDelete">
+        UPDATE voice_training_task
+        SET is_deleted = 1, deleted_at = #{deletedAt}
+        WHERE task_id = #{taskId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </update>
+
+    <!-- 根据状态查询任务列表（管理端使用） -->
+    <select id="selectByStatus" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE status = #{status}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+    </select>
+
+    <!-- 查询所有任务（管理端使用） -->
+    <select id="selectAll" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM voice_training_task
+        WHERE is_deleted = 0
+        ORDER BY create_time DESC
+    </select>
+
+</mapper>
+

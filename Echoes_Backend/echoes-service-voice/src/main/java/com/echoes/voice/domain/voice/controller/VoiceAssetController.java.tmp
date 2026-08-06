@@ -1,0 +1,19 @@
+    /**
+     * 【Internal API】获取用户默认音色
+     * 供 conversation 服务调用，获取用户级默认音色
+     */
+    @Operation(summary = "获取用户默认音色", description = "获取用户设置的默认音色资产 ID")
+    @GetMapping("/internal/voice/users/{userId}/default-voice")
+    public ResponseEntity<UUID> getUserDefaultVoice(@PathVariable("userId") UUID userId) {
+        try {
+            UserVoiceLink link = userVoiceLinkMapper.selectDefaultByUserId(userId);
+            if (link != null && link.getIsDefault() == 1 && link.getIsDeleted() == null) {
+                return ResponseEntity.ok(link.getVoiceAssetId());
+            }
+            return ResponseEntity.notFound().build();
+        } catch (Exception e) {
+            log.error("获取用户默认音色失败，userId={}", userId, e);
+            return ResponseEntity.internalServerError().build();
+        }
+    }
+

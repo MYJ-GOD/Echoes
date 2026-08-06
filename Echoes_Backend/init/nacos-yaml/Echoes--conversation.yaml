@@ -1,0 +1,103 @@
+server:
+  port: 18082
+
+spring:
+  cloud:
+    # Sentinel 熔断降级配置
+    sentinel:
+      enabled: true
+      transport:
+        # Sentinel Dashboard 地址（可选，如果没有 dashboard 可不配）
+        dashboard: ${SENTINEL_DASHBOARD_ADDR:localhost:8080}
+      datasource:
+        ds1:
+          nacos:
+            server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+            dataId: ${spring.application.name}-sentinel
+            groupId: DEFAULT_GROUP
+            rule-type: flow
+    # LoadBalancer 配置
+    loadbalancer:
+      cache:
+        # 服务发现缓存配置：减少缓存时间以便更快发现新服务
+        enabled: true
+        ttl: 10s  # 缓存存活时间（默认 35s），减少到 10 秒以便更快刷新
+        capacity: 256  # 缓存容量
+  mvc:
+    async:
+      request-timeout: 300000  # 5 分钟超时（300 秒），语音合成可能需要较长时间
+  data:
+    redis:
+      host: ${echoes.redis.host:localhost}
+      port: ${echoes.redis.port:6379}
+      database: ${echoes.redis.database:0}
+    # MongoDB 配置
+    mongodb:
+      uri: mongodb://${MONGODB_USERNAME:root}:${MONGODB_PASSWORD:root}@${MONGODB_HOST:localhost}:${MONGODB_PORT:27017}/${MONGODB_DATABASE:echoes}?authSource=admin
+  # MySQL 数据源配置（会话索引表 conversation_session）
+  datasource:
+    driver-class-name: ${echoes.datasource.driver-class-name:com.mysql.cj.jdbc.Driver}
+    url: jdbc:mysql://${echoes.datasource.host:localhost}:${echoes.datasource.port:3306}/${echoes.datasource.database:echoes}?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: ${echoes.datasource.username:root}
+    password: ${echoes.datasource.password:root}
+
+  # Spring AI Alibaba (DashScope) 配置
+  # 在 Nacos 中配置可以避免在代码中暴露敏感信息
+  ai:
+    dashscope:
+      # API Key（必填）- 在 Nacos 中配置更安全
+      api-key: ${DASHSCOPE_API_KEY:your-dashscope-api-key}
+
+      # API 基础 URL（可选）
+      # 默认：https://dashscope.aliyuncs.com/api/v1（北京地域）
+      # 新加坡地域：https://dashscope-intl.aliyuncs.com/api/v1
+      base-url: https://dashscope.aliyuncs.com/api/v1
+
+      # 默认模型名称
+      # 常用模型：
+      #   - qwen-turbo: 通义千问 Turbo 版本（快速响应）
+      #   - qwen-plus: 通义千问 Plus 版本（更强能力）
+      #   - qwen-max: 通义千问 Max 版本（最强能力）
+      #   - qwen3-max: 通义千问 3.0 Max 版本（最新最强能力）
+      model: qwen3-max-2026-01-23
+
+      # Agent 配置（可选）
+      agent:
+        app-id: ${DASHSCOPE_APP_ID:}  # 大模型应用 ID（如果使用 Agent 模式）
+
+      # 业务空间 ID（可选）
+      workspace-id: ${DASHSCOPE_WORKSPACE_ID:}
+
+# Conversation 服务自动启动配置 & 公共数据源配置
+echoes:
+  # 数据源配置（与 gateway / user / voice 保持一致）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    host: ${DB_HOST:localhost}
+    port: 3306
+    database: ${DB_NAME:echoes}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+  conversation:
+    auto-start-process: false  # 已禁用，改用阿里云百炼
+  # Echoes-AI 直接访问地址（用于在发现/负载均衡出现问题时回退）
+  ai:
+    direct-url: http://127.0.0.1:18085
+
+# 临时调试：提高 LoadBalancer / Nacos / VoiceService 客户端日志级别，重现问题后可复原为 INFO
+logging:
+  level:
+    com.echoes.conversation.client: INFO
+    org.springframework.cloud.loadbalancer: INFO
+    org.springframework.cloud.client.loadbalancer: INFO
+    com.alibaba.nacos: INFO
+    reactor.netty: INFO
+
+# SpringDoc/Knife4j 配置（API 文档）
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /doc.html

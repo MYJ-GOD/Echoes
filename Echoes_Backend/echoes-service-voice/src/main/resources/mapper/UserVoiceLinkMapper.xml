@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.echoes.voice.domain.voice.repository.UserVoiceLinkMapper">
+
+    <resultMap id="BaseResultMap" type="com.echoes.voice.domain.voice.entity.po.UserVoiceLink">
+        <id column="link_id" property="linkId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="user_id" property="userId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="voice_asset_id" property="voiceAssetId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="nickname" property="nickname" jdbcType="VARCHAR"/>
+        <result column="is_default" property="isDefault" jdbcType="TINYINT"/>
+        <result column="is_deleted" property="isDeleted" jdbcType="TINYINT"/>
+        <result column="deleted_at" property="deletedAt" jdbcType="TIMESTAMP"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <!-- 基础列 -->
+    <sql id="Base_Column_List">
+        link_id, user_id, voice_asset_id, nickname, is_default, is_deleted, deleted_at, create_time, update_time
+    </sql>
+
+    <!-- 根据 ID 查询 -->
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM user_voice_link
+        WHERE link_id = #{linkId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </select>
+
+    <!-- 根据用户 ID 和音色资产 ID 查询 -->
+    <select id="selectByUserIdAndAssetId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM user_voice_link
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+        LIMIT 1
+    </select>
+
+    <!-- 根据用户 ID 查询列表 -->
+    <select id="selectByUserId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM user_voice_link
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+        ORDER BY create_time DESC
+    </select>
+
+    <!-- 查询用户未删除的绑定关系 -->
+    <select id="selectValidByUserId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM user_voice_link
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+    </select>
+
+    <!-- 查询用户的默认音色绑定 -->
+    <select id="selectDefaultByUserId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM user_voice_link
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+          AND is_default = 1
+        LIMIT 1
+    </select>
+
+    <!-- 检查绑定是否已存在 -->
+    <select id="countByUserIdAndAssetId" resultType="int">
+        SELECT COUNT(*)
+        FROM user_voice_link
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </select>
+
+    <!-- 统计用户绑定数量 -->
+    <select id="countByUserId" resultType="int">
+        SELECT COUNT(*)
+        FROM user_voice_link
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </select>
+
+    <!-- 插入 -->
+    <insert id="insert" parameterType="com.echoes.voice.domain.voice.entity.po.UserVoiceLink" useGeneratedKeys="false">
+        INSERT INTO user_voice_link (
+            link_id, user_id, voice_asset_id, nickname, is_default, is_deleted, create_time, update_time
+        ) VALUES (
+            #{linkId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{nickname},
+            #{isDefault},
+            0,
+            NOW(), NOW()
+        )
+    </insert>
+
+    <!-- 更新 -->
+    <update id="update" parameterType="com.echoes.voice.domain.voice.entity.po.UserVoiceLink">
+        UPDATE user_voice_link
+        <set>
+            <if test="nickname != null">nickname = #{nickname},</if>
+            <if test="isDefault != null">is_default = #{isDefault},</if>
+            update_time = NOW()
+        </set>
+        WHERE link_id = #{linkId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </update>
+
+    <!-- 取消用户的默认音色设置 -->
+    <update id="clearDefaultByUserId">
+        UPDATE user_voice_link
+        SET is_default = 0, update_time = NOW()
+        WHERE user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_default = 1
+          AND is_deleted = 0
+    </update>
+
+    <!-- 设置指定绑定为默认音色 -->
+    <update id="setDefault">
+        UPDATE user_voice_link
+        SET is_default = 1, update_time = NOW()
+        WHERE link_id = #{linkId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </update>
+
+    <!-- 软删除 -->
+    <update id="softDelete">
+        UPDATE user_voice_link
+        SET deleted_at = #{deletedAt}, is_deleted = 1
+        WHERE link_id = #{linkId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </update>
+
+    <!-- 根据音色资产 ID 删除 -->
+    <update id="deleteByVoiceAssetId">
+        UPDATE user_voice_link
+        SET deleted_at = NOW(), is_deleted = 1
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </update>
+
+</mapper>

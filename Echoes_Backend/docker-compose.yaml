@@ -1,0 +1,176 @@
+version: '3.8'
+
+services:
+  # MySQL 数据库服务
+  mysql:
+    image: mysql:8.0
+    container_name: echoes-mysql
+    restart: always
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: echoes
+      MYSQL_USER: echoes
+      MYSQL_PASSWORD: echoes
+      TZ: Asia/Shanghai
+    volumes:
+      # 数据持久化
+      - mysql_data:/var/lib/mysql
+      # 初始化脚本
+      - ./init/mysql:/docker-entrypoint-initdb.d
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    networks:
+      - echoes-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis 缓存服务
+  redis:
+    image: redis:7-alpine
+    container_name: echoes-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --requirepass ""
+    networks:
+      - echoes-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB 文档数据库服务
+  mongodb:
+    image: mongo:7
+    container_name: echoes-mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+      MONGO_INITDB_DATABASE: echoes
+      TZ: Asia/Shanghai
+    volumes:
+      # 数据持久化
+      - mongodb_data:/data/db
+    networks:
+      - echoes-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command:
+      - --wiredTigerCacheSizeGB=1
+      - --logpath=/var/log/mongodb/mongod.log
+
+  # Nacos 服务注册与配置中心
+  nacos:
+    image: nacos/nacos-server:v2.2.3
+    container_name: echoes-nacos
+    restart: always
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+      - "9849:9849"
+    environment:
+      # 单机模式
+      MODE: standalone
+      # JVM 参数
+      JVM_XMS: 256m
+      JVM_XMX: 256m
+      JVM_XMN: 128m
+      TZ: Asia/Shanghai
+    volumes:
+      # 数据持久化
+      - nacos_data:/home/nacos/data
+      - nacos_logs:/home/nacos/logs
+      - ./init/nacos-yaml:/home/nacos/init.d
+    networks:
+      - echoes-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8848/nacos/v1/console/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ============== RAG Service ==============
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: echoes-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+    networks:
+      - echoes-network
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/6333"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  langgraph-service:
+    build:
+      context: ./echoes-langgraph
+      dockerfile: Dockerfile
+    container_name: echoes-langgraph
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - ECHOES_AI_URL=http://host.docker.internal:8000
+      - EMBEDDING_MODEL=BAAI/bge-m3
+      - RERANK_MODEL=BAAI/bge-reranker-v2-m3
+      - LOG_LEVEL=INFO
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks:
+      - echoes-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  mongodb_data:
+    driver: local
+  nacos_data:
+    driver: local
+  nacos_logs:
+    driver: local
+  qdrant_storage:
+    driver: local
+
+networks:
+  echoes-network:
+    driver: bridge

@@ -1,0 +1,41 @@
+server:
+  port: 8000
+
+spring:
+  cloud:
+    nacos:
+      discovery:
+        server-addr: nacos:8848
+        namespace: ""
+        group: DEFAULT_GROUP
+  mvc:
+    async:
+      request-timeout: 300000  # 5 minutes
+  data:
+    redis:
+      host: ${echoes.redis.host:localhost}
+      port: ${echoes.redis.port:6379}
+      database: ${echoes.redis.database:0}
+
+# Echoes-AI (CosyVoice) 服务配置（开发环境）
+echoes:
+  cosyvoice:
+    baseDir: "D:/Echoes/Echoes_Backend/Echoes-AI"
+    pythonExe: "conda run -n cosyvoice2 python"
+    script: "app/main.py"
+    port: 18085
+    modelDir: "D:/Echoes/models/cosyvoice2-0.5b"
+    sampleRate: 24000
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HOME: "${cosyvoice.baseDir}/hf_download"
+      TRANSFORMERS_CACHE: "${cosyvoice.baseDir}/tf_download"
+      COSYVOICE_REPO_DIR: "D:/Echoes/Echoes_Backend/third_party/CosyVoice"
+      ECHOES_MODELS_DIR: "D:/Echoes/models"
+
+# Service discovery metadata (optional) - helps consumers identify capabilities
+metadata:
+  service.type: "ai-worker"
+  service.capabilities: "tts,asr,stream"
+
+

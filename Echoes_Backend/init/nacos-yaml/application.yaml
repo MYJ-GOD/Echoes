@@ -1,0 +1,49 @@
+echoes:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    host: ${DB_HOST:localhost}  # 开发环境使用 localhost，生产环境使用 mysql（Docker 服务名）
+    port: 3306
+    database: ${DB_NAME:echoes}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+
+  redis:
+    host: ${REDIS_HOST:localhost}  # 开发环境使用 localhost，生产环境使用 redis（Docker 服务名）
+    port: 6379
+    database: 0
+    timeout: 3000ms
+    pool:
+      max-active: 8
+      max-wait: -1ms
+      max-idle: 8
+      min-idle: 0
+
+  mongodb:
+    host: ${MONGODB_HOST:localhost}  # 开发环境使用 localhost，生产环境使用 mongodb（Docker 服务名）
+    port: 27017
+    database: ${MONGODB_DATABASE:echoes}
+    username: ${MONGODB_USERNAME:root}  # MongoDB 认证用户名
+    password: ${MONGODB_PASSWORD:root}  # MongoDB 认证密码
+
+  # 服务端口配置（默认）
+  server:
+    port: 18080
+
+  # 阿里云 OSS 配置
+  alioss:
+    endpoint: "oss-cn-beijing.aliyuncs.com"
+    accessKeyId: ${ALIYUN_ACCESS_KEY_ID:your-aliyun-access-key-id}
+    accessKeySecret: ${ALIYUN_ACCESS_KEY_SECRET:your-aliyun-access-key-secret}
+    bucketName: "echoes-sim"
+
+spring:
+  ai:
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY:your-dashscope-api-key}
+      base-url: https://dashscope.aliyuncs.com/api/v1
+      model: qwen3-max
+      agent:
+        app-id: ${DASHSCOPE_APP_ID:}
+
+      workspace-id: ${DASHSCOPE_WORKSPACE_ID:}
+

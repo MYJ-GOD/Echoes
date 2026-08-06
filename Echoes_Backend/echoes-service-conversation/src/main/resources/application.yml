@@ -1,0 +1,33 @@
+# Echoes Conversation Service - 本地配置文件
+# 仅保留必要的本地配置，其他配置请从 Nacos 配置中心加载
+spring:
+  application:
+    name: echoes-service-conversation
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  # 允许 Bean 定义覆盖（解决 FeignClient 重复注册问题）
+  main:
+    allow-bean-definition-overriding: true
+  # 本地默认数据源配置（用于访问 MySQL 表 conversation_session）
+  # 即使 Nacos 未正确加载，也能保证 DataSource 可用，避免启动失败
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${echoes.datasource.host:localhost}:${echoes.datasource.port:3306}/${echoes.datasource.database:echoes}?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: ${echoes.datasource.username:root}
+    password: ${echoes.datasource.password:root}
+  config:
+    import:
+      - "optional:nacos:application.yaml?group=DEFAULT_GROUP"
+      - "optional:nacos:Echoes--conversation.yaml?group=DEFAULT_GROUP"
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        namespace: ${NACOS_NAMESPACE:}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        namespace: ${NACOS_NAMESPACE:}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
+        file-extension: yaml
+

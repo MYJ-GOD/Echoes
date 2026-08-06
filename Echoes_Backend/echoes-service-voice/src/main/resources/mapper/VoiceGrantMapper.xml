@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.echoes.voice.domain.voice.repository.VoiceGrantMapper">
+
+    <!-- 结果映射 -->
+    <resultMap id="BaseResultMap" type="com.echoes.voice.domain.voice.entity.po.VoiceGrant">
+        <id column="grant_id" property="grantId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="voice_asset_id" property="voiceAssetId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="grantee_user_id" property="granteeUserId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="permission" property="permission" jdbcType="VARCHAR"/>
+        <result column="expires_at" property="expiresAt" jdbcType="TIMESTAMP"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <!-- 基础列 -->
+    <sql id="Base_Column_List">
+        grant_id, voice_asset_id, grantee_user_id, permission, expires_at, create_time
+    </sql>
+
+    <!-- 根据ID查询 -->
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM voice_grant
+        WHERE grant_id = #{grantId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </select>
+
+    <!-- 根据音色资产ID查询 -->
+    <select id="selectByVoiceAssetId" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM voice_grant
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </select>
+
+    <!-- 根据被授权用户ID查询 -->
+    <select id="selectByGranteeUserId" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM voice_grant
+        WHERE grantee_user_id = #{granteeUserId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </select>
+
+    <!-- 查询用户收到的有效授权 -->
+    <select id="selectValidGrantsByUserId" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM voice_grant
+        WHERE grantee_user_id = #{granteeUserId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND (expires_at IS NULL OR expires_at > #{now})
+        ORDER BY create_time DESC
+    </select>
+
+    <!-- 检查授权是否存在 -->
+    <select id="countByAssetAndGrantee" resultType="int">
+        SELECT COUNT(*)
+        FROM voice_grant
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND grantee_user_id = #{granteeUserId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND permission = #{permission}
+    </select>
+
+    <!-- 插入 -->
+    <insert id="insert" parameterType="com.echoes.voice.domain.voice.entity.po.VoiceGrant" useGeneratedKeys="false">
+        INSERT INTO voice_grant (
+            grant_id, voice_asset_id, grantee_user_id, permission, expires_at, create_time
+        ) VALUES (
+            #{grantId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{granteeUserId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{permission},
+            #{expiresAt},
+            NOW()
+        )
+    </insert>
+
+    <!-- 更新 -->
+    <update id="update" parameterType="com.echoes.voice.domain.voice.entity.po.VoiceGrant">
+        UPDATE voice_grant
+        <set>
+            <if test="permission != null">permission = #{permission},</if>
+            <if test="expiresAt != null">expires_at = #{expiresAt},</if>
+        </set>
+        WHERE grant_id = #{grantId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </update>
+
+    <!-- 删除 -->
+    <delete id="deleteById">
+        DELETE FROM voice_grant
+        WHERE grant_id = #{grantId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </delete>
+
+    <!-- 根据音色资产ID删除 -->
+    <delete id="deleteByVoiceAssetId">
+        DELETE FROM voice_grant
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+    </delete>
+
+</mapper>
+

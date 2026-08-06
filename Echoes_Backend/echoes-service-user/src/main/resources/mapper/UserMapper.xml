@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.echoes.user.domain.user.repository.UserMapper">
+    
+    <!-- 启用 BinaryUuidTypeHandler -->
+    <resultMap id="BaseResultMap" type="com.echoes.user.domain.user.entity.po.CoreUser">
+        <id column="user_id" property="userId" typeHandler="com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler"/>
+        <result column="user_type" property="userType" typeHandler="com.echoes.user.domain.user.repository.typehandler.UserTypeHandler"/>
+        <result column="name" property="name"/>
+        <result column="phone_number" property="phoneNumber"/>
+        <result column="email" property="email"/>
+        <result column="avatar_url" property="avatarUrl"/>
+        <result column="status" property="status" typeHandler="com.echoes.user.domain.user.repository.typehandler.UserStatusHandler"/>
+        <result column="deleted_at" property="deletedAt"/>
+        <result column="create_time" property="createTime"/>
+        <result column="update_time" property="updateTime"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        user_id, user_type, name, phone_number, email, avatar_url, status, deleted_at, create_time, update_time
+    </sql>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM core_user
+        WHERE user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+        AND deleted_at IS NULL
+    </select>
+
+    <select id="selectByName" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM core_user
+        WHERE name = #{name}
+        AND deleted_at IS NULL
+        LIMIT 1
+    </select>
+
+    <select id="selectByPhoneNumber" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM core_user
+        WHERE phone_number = #{phoneNumber}
+        AND deleted_at IS NULL
+        LIMIT 1
+    </select>
+
+    <select id="selectByEmail" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM core_user
+        WHERE email = #{email}
+        AND deleted_at IS NULL
+        LIMIT 1
+    </select>
+
+    <insert id="insert" parameterType="com.echoes.user.domain.user.entity.po.CoreUser">
+        INSERT INTO core_user (
+            user_id, user_type, name, phone_number, email, 
+            avatar_url, status, create_time, update_time
+        ) VALUES (
+            #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler},
+            #{userType, typeHandler=com.echoes.user.domain.user.repository.typehandler.UserTypeHandler}, #{name}, #{phoneNumber}, #{email},
+            #{avatarUrl}, #{status}, #{createTime}, #{updateTime}
+        )
+    </insert>
+
+    <update id="update" parameterType="com.echoes.user.domain.user.entity.po.CoreUser">
+        UPDATE core_user
+        <set>
+            <if test="name != null">name = #{name},</if>
+            <if test="phoneNumber != null">phone_number = #{phoneNumber},</if>
+            <if test="email != null">email = #{email},</if>
+            <if test="avatarUrl != null">avatar_url = #{avatarUrl},</if>
+            <if test="status != null">status = #{status},</if>
+            <if test="userType != null">user_type = #{userType, typeHandler=com.echoes.user.domain.user.repository.typehandler.UserTypeHandler},</if>
+            <if test="deletedAt != null">deleted_at = #{deletedAt},</if>
+            update_time = NOW()
+        </set>
+        WHERE user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+        AND deleted_at IS NULL
+    </update>
+
+    <update id="updateStatus">
+        UPDATE core_user
+        SET status = #{status}, update_time = NOW()
+        WHERE user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+        AND deleted_at IS NULL
+    </update>
+
+</mapper>

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.echoes.user.domain.user.repository.UserAuthMapper">
+    
+    <resultMap id="BaseResultMap" type="com.echoes.user.domain.user.entity.po.UserAuth">
+        <id column="auth_id" property="authId" typeHandler="com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler"/>
+        <result column="user_id" property="userId" typeHandler="com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler"/>
+        <result column="provider" property="provider"/>
+        <result column="open_id" property="openId"/>
+        <result column="union_id" property="unionId"/>
+        <result column="create_time" property="createTime"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        auth_id, user_id, provider, open_id, union_id, create_time
+    </sql>
+
+    <select id="selectByProviderAndOpenId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM user_auth
+        WHERE provider = #{provider}
+        AND open_id = #{openId}
+        LIMIT 1
+    </select>
+
+    <select id="selectByUserId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM user_auth
+        WHERE user_id = #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler}
+    </select>
+
+    <insert id="insert" parameterType="com.echoes.user.domain.user.entity.po.UserAuth">
+        INSERT INTO user_auth (
+            auth_id, user_id, provider, open_id, union_id, create_time
+        ) VALUES (
+            #{authId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler},
+            #{userId, typeHandler=com.echoes.user.domain.user.repository.typehandler.BinaryUuidTypeHandler},
+            #{provider}, #{openId}, #{unionId}, #{createTime}
+        )
+    </insert>
+
+</mapper>

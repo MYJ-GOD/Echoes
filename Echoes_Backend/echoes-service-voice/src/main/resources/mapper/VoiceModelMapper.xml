@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.echoes.voice.domain.voice.repository.VoiceModelMapper">
+
+    <resultMap id="BaseResultMap" type="com.echoes.voice.domain.voice.entity.po.VoiceModel">
+        <id column="voice_model_id" property="voiceModelId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="voice_asset_id" property="voiceAssetId" jdbcType="BINARY" javaType="java.util.UUID" typeHandler="com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler"/>
+        <result column="ref_id" property="refId" jdbcType="VARCHAR"/>
+        <result column="model_version" property="modelVersion" jdbcType="INTEGER"/>
+        <result column="model_storage_key" property="modelStorageKey" jdbcType="VARCHAR"/>
+        <result column="prompt" property="prompt" jdbcType="LONGVARCHAR"/>
+        <result column="similarity_score" property="similarityScore" jdbcType="DECIMAL"/>
+        <result column="status" property="status" jdbcType="VARCHAR"/>
+        <result column="is_deleted" property="deleted" jdbcType="TINYINT"/>
+        <result column="deleted_at" property="deletedAt" jdbcType="TIMESTAMP"/>
+        <result column="create_time" property="createTime" jdbcType="TIMESTAMP"/>
+        <result column="update_time" property="updateTime" jdbcType="TIMESTAMP"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        voice_model_id, voice_asset_id, ref_id, model_version, model_storage_key,
+        prompt, similarity_score, status, is_deleted, deleted_at, create_time, update_time
+    </sql>
+
+    <select id="selectByUserIdAndVoiceName" resultMap="BaseResultMap">
+        SELECT
+            vm.voice_model_id, vm.voice_asset_id, vm.ref_id, vm.model_version, vm.model_storage_key,
+            vm.prompt, vm.similarity_score, vm.status, vm.is_deleted, vm.deleted_at, vm.create_time, vm.update_time
+        FROM voice_model vm
+        INNER JOIN voice_asset va ON vm.voice_asset_id = va.voice_asset_id
+        WHERE va.owner_user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND va.name = #{voiceName}
+          AND va.is_deleted = 0
+          AND vm.is_deleted = 0
+          AND vm.status = 'success'
+        ORDER BY vm.model_version DESC, vm.create_time DESC
+        LIMIT 1
+    </select>
+
+    <select id="selectById" resultMap="BaseResultMap">
+        SELECT
+        <include refid="Base_Column_List"/>
+        FROM voice_model
+        WHERE voice_model_id = #{voiceModelId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </select>
+
+    <select id="selectByUserId" resultMap="BaseResultMap">
+        SELECT
+            vm.voice_model_id, vm.voice_asset_id, vm.ref_id, vm.model_version, vm.model_storage_key,
+            vm.prompt, vm.similarity_score, vm.status, vm.is_deleted, vm.deleted_at, vm.create_time, vm.update_time
+        FROM voice_model vm
+        INNER JOIN voice_asset va ON vm.voice_asset_id = va.voice_asset_id
+        WHERE va.owner_user_id = #{userId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND va.is_deleted = 0
+          AND vm.is_deleted = 0
+        ORDER BY vm.create_time DESC
+    </select>
+
+    <select id="selectMaxModelVersionByAssetId" resultType="int">
+        SELECT MAX(model_version)
+        FROM voice_model
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </select>
+
+    <select id="selectLatestSuccessByAssetId" resultMap="BaseResultMap">
+        SELECT
+            <include refid="Base_Column_List"/>
+        FROM voice_model
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+          AND status = 'success'
+        ORDER BY model_version DESC, create_time DESC
+        LIMIT 1
+    </select>
+
+    <!-- 根据音色资产 ID 查询模型列表 -->
+    <select id="selectByAssetId" resultMap="BaseResultMap">
+        SELECT
+            <include refid="Base_Column_List"/>
+        FROM voice_model
+        WHERE voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+        ORDER BY create_time DESC
+    </select>
+
+    <insert id="insert" parameterType="com.echoes.voice.domain.voice.entity.po.VoiceModel" useGeneratedKeys="false">
+        INSERT INTO voice_model (
+            voice_model_id, voice_asset_id, ref_id, model_version, model_storage_key,
+            prompt, similarity_score, status, is_deleted, deleted_at, create_time, update_time
+        ) VALUES (
+            #{voiceModelId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},
+            #{refId},
+            #{modelVersion},
+            #{modelStorageKey},
+            #{prompt},
+            #{similarityScore},
+            #{status},
+            0,
+            NULL,
+            NOW(),
+            NOW()
+        )
+    </insert>
+
+    <update id="update" parameterType="com.echoes.voice.domain.voice.entity.po.VoiceModel">
+        UPDATE voice_model
+        <set>
+            <if test="voiceAssetId != null">voice_asset_id = #{voiceAssetId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler},</if>
+            <if test="refId != null">ref_id = #{refId},</if>
+            <if test="modelVersion != null">model_version = #{modelVersion},</if>
+            <if test="modelStorageKey != null">model_storage_key = #{modelStorageKey},</if>
+            <if test="prompt != null">prompt = #{prompt},</if>
+            <if test="similarityScore != null">similarity_score = #{similarityScore},</if>
+            <if test="status != null">status = #{status},</if>
+            update_time = NOW()
+        </set>
+        WHERE voice_model_id = #{voiceModelId, typeHandler=com.echoes.voice.domain.voice.repository.typehandler.UUIDTypeHandler}
+          AND is_deleted = 0
+    </update>
+
+</mapper>
