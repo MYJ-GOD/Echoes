@@ -48,6 +48,10 @@ spring:
       # API Key（必填）- 在 Nacos 中配置更安全
       api-key: ${DASHSCOPE_API_KEY:your-dashscope-api-key}
 
+  # echoes-langgraph（Agent 编排服务）配置
+  langgraph:
+    url: ${LANGGRAPH_URL:http://localhost:8088/api/v1}
+
       # API 基础 URL（可选）
       # 默认：https://dashscope.aliyuncs.com/api/v1（北京地域）
       # 新加坡地域：https://dashscope-intl.aliyuncs.com/api/v1

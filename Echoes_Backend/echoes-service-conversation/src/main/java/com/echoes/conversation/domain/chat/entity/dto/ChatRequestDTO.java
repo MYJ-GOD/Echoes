@@ -36,6 +36,9 @@ public class ChatRequestDTO {
     @Schema(description = "系统用户ID (内部透传用)", hidden = true)
     private String sysUserId;
     
+    @Schema(description = "是否走 Agent 编排模式（true 转发 echoes-langgraph；默认 false 直连 Qwen）", defaultValue = "false")
+    private Boolean agentMode = false;
+    
     @Schema(description = "附件列表")
     private List<String> attachments;
 

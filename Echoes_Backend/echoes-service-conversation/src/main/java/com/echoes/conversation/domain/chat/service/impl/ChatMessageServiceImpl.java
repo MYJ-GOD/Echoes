@@ -1,5 +1,6 @@
 package com.echoes.conversation.domain.chat.service.impl;
 
+import com.echoes.conversation.domain.chat.client.AgentLangGraphClient;
 import com.echoes.conversation.common.constants.AIChatConstants;
 import com.echoes.conversation.domain.chat.entity.dto.ChatRequestDTO;
 import com.echoes.conversation.domain.chat.entity.po.ChatMessage;
@@ -62,6 +63,7 @@ public class ChatMessageServiceImpl implements IChatMessageService {
     private final com.echoes.conversation.domain.chat.repository.ConversationSessionRepository conversationSessionRepository;
     private final JwtProperties jwtProperties;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final AgentLangGraphClient agentLangGraphClient;
 
     public ChatMessageServiceImpl(
             ChatMessageRepository chatMessageRepository,
@@ -71,7 +73,8 @@ public class ChatMessageServiceImpl implements IChatMessageService {
             MongoTemplate mongoTemplate,
             RedisTemplate<String, Object> redisTemplate,
             com.echoes.conversation.domain.chat.repository.ConversationSessionRepository conversationSessionRepository,
-            JwtProperties jwtProperties) {
+            JwtProperties jwtProperties,
+            AgentLangGraphClient agentLangGraphClient) {
         this.chatMessageRepository = chatMessageRepository;
         this.chatSessionRepository = chatSessionRepository;
         this.chatSessionService = chatSessionService;
@@ -80,6 +83,7 @@ public class ChatMessageServiceImpl implements IChatMessageService {
         this.redisTemplate = redisTemplate;
         this.conversationSessionRepository = conversationSessionRepository;
         this.jwtProperties = jwtProperties;
+        this.agentLangGraphClient = agentLangGraphClient;
     }
 
     @Override
@@ -116,6 +120,17 @@ public class ChatMessageServiceImpl implements IChatMessageService {
     public Flux<String> chatStream(ChatRequestDTO request) {
         ChatSessionVO sessionVO = getOrCreateSession(request);
         UUID sessionId = UuidUtils.parseLenient(sessionVO.getId());
+
+        // Agent 编排模式（Week3）：转发 echoes-langgraph /agent/chat/stream，
+        // 返回的文本流与直连 Qwen 格式一致，上层 SSE 流程不变
+        if (Boolean.TRUE.equals(request.getAgentMode())) {
+            addUserMessage(sessionId, request.getMessage(), request.getAttachments());
+            return agentLangGraphClient.streamChat(
+                    request.getMessage(),
+                    sessionId.toString(),
+                    request.getTurnId(),
+                    request.getSysUserId());
+        }
 
         List<Message> messages = buildContext(sessionId, request);
 
