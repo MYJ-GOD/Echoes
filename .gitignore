@@ -25,6 +25,8 @@ config/secrets.properties
 
 # ---- Agent checkpointer ----
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # ---- IDE / 编辑器 ----
 .idea/

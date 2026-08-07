@@ -32,7 +32,7 @@ PLANNER_PROMPT = """你是「一闻如故」语音陪伴 Agent 的规划器。�
 - generate_comfort_response: 生成安慰话术
 
 只输出 JSON（不要其他内容）：
-{"intent": "chat|emotional_support|memory_recall|profile_query|task", "tools": ["工具名"], "reasoning": "一句话理由"}
+{{"intent": "chat|emotional_support|memory_recall|profile_query|task", "tools": ["工具名"], "reasoning": "一句话理由"}}
 
 用户输入：{query}"""
 
@@ -118,9 +118,8 @@ def _build_args(name: str, query: str, user_id: str, state: AgentState) -> Dict[
     if name == "update_user_state":
         emotion = state.get("emotion") or {}
         return {"user_id": user_id, "emotion": emotion.get("emotion"), "intensity": emotion.get("intensity")}
-    if name == "generate_comfort_response":
-        emotion = state.get("emotion") or {}
-        return {"emotion": emotion.get("emotion", "neutral"), "intensity": emotion.get("intensity", 0.5)}
+    # generate_comfort_response 不在此组参：它依赖 analyze_emotion 的输出，
+    # 必须在 executor 执行时用实时 emotion（tool_router 阶段情绪还没分析）
     return {}
 
 
@@ -135,7 +134,8 @@ async def tool_router_node(state: AgentState) -> AgentState:
         if fn is None:
             logger.warning("未知工具被忽略: %s", name)
             continue
-        execution.append({"name": name, "fn": fn, "args": _build_args(name, query, user_id, state)})
+        # 只存可序列化的 name+args；函数对象进 state 会让 checkpointer msgpack 序列化失败
+        execution.append({"name": name, "args": _build_args(name, query, user_id, state)})
     return {"execution_plan": execution}
 
 
@@ -150,7 +150,12 @@ async def executor_node(state: AgentState) -> AgentState:
     profile = state.get("profile")
 
     for item in execution:
-        name, fn, args = item["name"], item["fn"], item["args"]
+        name, args = item["name"], item["args"]
+        fn = TOOL_REGISTRY.get(name)
+        if fn is None:
+            logger.warning("executor 收到未知工具: %s", name)
+            results[name] = {"error": f"unknown tool: {name}"}
+            continue
         try:
             if name == "analyze_emotion":
                 emotion = await fn(**args)
@@ -159,7 +164,12 @@ async def executor_node(state: AgentState) -> AgentState:
             elif name == "get_user_profile":
                 profile = await fn(**args)
             elif name == "generate_comfort_response":
-                results["comfort_response"] = await fn(**args)
+                # 用已分析出的实时情绪（plan 中 analyze_emotion 在前的场景）；无则兜底 neutral
+                emo = emotion or {}
+                results["comfort_response"] = await fn(
+                    emotion=emo.get("emotion", "neutral"),
+                    intensity=emo.get("intensity", 0.5),
+                )
             else:
                 results[name] = await fn(**args)
         except Exception as e:

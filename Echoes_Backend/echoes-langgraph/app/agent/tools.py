@@ -26,7 +26,7 @@ _HAPPY_WORDS = ["开心", "高兴", "太好了", "哈哈", "喜欢", "棒"]
 _VALID_EMOTIONS = {"sad", "anxious", "happy", "angry", "neutral"}
 
 EMOTION_PROMPT = """你是情绪分析器。从用户文本判断主要情绪，只输出 JSON：
-{"emotion": "sad|anxious|happy|angry|neutral", "intensity": 0.0到1.0, "confidence": 0.0到1.0}
+{{"emotion": "sad|anxious|happy|angry|neutral", "intensity": 0.0到1.0, "confidence": 0.0到1.0}}
 
 用户文本：{text}"""
 

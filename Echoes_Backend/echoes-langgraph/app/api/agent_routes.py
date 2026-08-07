@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.agent.workflow import agent_workflow
+from app.agent.workflow import get_agent_workflow
 from app.config import settings
 
 router = APIRouter(prefix="/agent", tags=["Agent"])
@@ -61,7 +61,8 @@ async def agent_chat(request: AgentRequest) -> AgentResponse:
     """Agent 对话（非流式）：planner → 工具链 → 人格化生成 → 记忆入库"""
     start = time.time()
     try:
-        result = await agent_workflow.ainvoke(
+        workflow = await get_agent_workflow()
+        result = await workflow.ainvoke(
             _build_inputs(request), config=_thread_config(request)
         )
         latency_ms = int((time.time() - start) * 1000)
@@ -89,7 +90,8 @@ async def agent_chat_stream(request: AgentRequest):
         # state 在 values 模式下累积，同一字段会在后续事件重复出现，按节点去重
         yielded = {"intent": False, "emotion": False, "memory": False, "response": False}
         try:
-            async for event in agent_workflow.astream(
+            workflow = await get_agent_workflow()
+            async for event in workflow.astream(
                 _build_inputs(request),
                 config=_thread_config(request),
                 stream_mode="values",

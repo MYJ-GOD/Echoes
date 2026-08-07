@@ -24,7 +24,7 @@ class AgentState(TypedDict, total=False):
     needs_tools: bool
 
     # ============== 工具执行 ==============
-    execution_plan: List[Dict[str, Any]]         # tool_router 产出 [{name, fn, args}]
+    execution_plan: List[Dict[str, Any]]         # tool_router 产出 [{name, args}]（函数执行时解析，不存 state）
     tool_results: Dict[str, Any]
     emotion: Optional[Dict[str, Any]]            # {emotion, intensity, confidence}
     memory_hits: List[Dict[str, Any]]

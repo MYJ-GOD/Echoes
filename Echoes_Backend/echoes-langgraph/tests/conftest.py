@@ -1,17 +1,26 @@
 """
 测试配置
 """
-import pytest
 import asyncio
+import os
+
+import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from app.agent.workflow import close_agent_checkpointer
 
-@pytest.fixture
-def event_loop():
-    """创建事件循环"""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+
+@pytest.fixture(autouse=True, scope="session")
+def _clean_checkpointer_before_session():
+    """测试会话开始前删除旧 checkpoint 文件，避免跨进程残留状态污染 thread_id"""
+    for f in ("agent_checkpoints.sqlite", "agent_checkpoints.sqlite-wal", "agent_checkpoints.sqlite-shm"):
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+    yield
+    # 收尾：关闭连接，避免 aiosqlite 线程阻塞 pytest 进程退出
+    asyncio.run(close_agent_checkpointer())
 
 
 @pytest.fixture
