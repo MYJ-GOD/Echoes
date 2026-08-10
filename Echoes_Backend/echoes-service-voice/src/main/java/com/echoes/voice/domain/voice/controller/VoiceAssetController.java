@@ -242,18 +242,21 @@ public class VoiceAssetController {
      * 获取用户ID
      */
     private UUID getUserId(String userId) {
-        if (userId != null && !userId.isBlank()) {
-            try {
-                return UUID.fromString(userId);
-            } catch (IllegalArgumentException e) {
-                log.warn("无效的X-USER-ID格式: {}", userId);
-            }
-        }
-        // 从BaseContext获取
+        // 1. 优先从 BaseContext 获取（UserContextFilter 已从网关注入的 X-USER-ID 设置）
         Object currentId = BaseContext.getCurrentId();
         if (currentId instanceof UUID) {
             return (UUID) currentId;
         }
+
+        // 2. Fallback: 客户端传入（开发环境/旧客户端兼容）
+        if (userId != null && !userId.isBlank()) {
+            try {
+                return UUID.fromString(userId);
+            } catch (IllegalArgumentException e) {
+                log.warn("getUserId fallback: 无效的 userId 格式: {}", userId);
+            }
+        }
+
         throw new VoiceServiceException(VoiceErrorEnum.USER_ID_REQUIRED, "用户ID不能为空");
     }
 

@@ -97,28 +97,36 @@ public class ChatStreamApplicationService {
     }
 
     /**
-     * 解析用户 ID
+     * 解析用户 ID：优先从 BaseContext（网关注入的 X-USER-ID），fallback 到 session 表查询
      */
     private AtomicReference<UUID> resolveUserId(String sysUserId, UUID sessionId) {
         AtomicReference<UUID> userIdRef = new AtomicReference<>(null);
 
-        if (sysUserId != null && !sysUserId.isBlank()) {
-            try {
-                userIdRef.set(UuidUtils.parseLenient(sysUserId));
-            } catch (Exception e) {
-                log.warn("Invalid sysUserId in request: {}", e.getMessage());
-            }
+        // 1. 优先从 BaseContext 获取（UserContextFilter 已从 X-USER-ID 设置）
+        UUID contextUserId = com.echoes.context.BaseContext.getCurrentId();
+        if (contextUserId != null) {
+            userIdRef.set(contextUserId);
+            log.debug("Resolved userId from BaseContext: {}", contextUserId);
+            return userIdRef;
         }
 
-        if (userIdRef.get() == null && sessionId != null) {
+        // 2. Fallback: 从 conversation_session 表查询（兜底逻辑，正常流程不应走到这里）
+        if (sessionId != null) {
             try {
                 var conv = conversationSessionRepository.findById(sessionId).orElse(null);
                 if (conv != null && (conv.getIsDeleted() == null || conv.getIsDeleted() == 0)) {
                     userIdRef.set(conv.getUserId());
+                    log.debug("Resolved userId from conversation_session fallback: sessionId={}, userId={}",
+                              sessionId, conv.getUserId());
                 }
             } catch (Exception e) {
                 log.error("Failed to resolve userId from conversation_session: sessionId={}", sessionId, e);
             }
+        }
+
+        if (userIdRef.get() == null) {
+            log.warn("resolveUserId: userId is null after all attempts (sysUserId={}, sessionId={})",
+                     sysUserId, sessionId);
         }
 
         return userIdRef;

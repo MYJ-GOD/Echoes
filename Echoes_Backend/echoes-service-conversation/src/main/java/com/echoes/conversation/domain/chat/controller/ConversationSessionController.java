@@ -66,42 +66,39 @@ public class ConversationSessionController {
             @RequestParam(value = "title", required = false) String title,
             @Parameter(name = "voiceId", description = "声纹模型 ID")
             @RequestParam(value = "voiceId", required = false) String voiceId,
-            @Parameter(name = "userId", description = "用户 ID（备用，当网关未透传 X-USER-ID 时使用）")
+            @Parameter(name = "userId", description = "用户 ID（已废弃，仅作兼容保留；实际取网关注入的 X-USER-ID）")
             @RequestParam(value = "userId", required = false) String userIdParam,
             @RequestHeader(value = "X-USER-ID", required = false) String userIdHeader
             , @RequestHeader(value = "Authorization", required = false) String authorization
     ) {
         log.info("createSession called: title='{}', userIdHeader='{}', userIdParamPresent={}, authorizationPresent={}",
                 title, userIdHeader, userIdParam != null && !userIdParam.isBlank(), authorization != null && !authorization.isBlank());
-        // 优先使用网关透传的 X-USER-ID，如为空则退化为前端传入的 userId
-        String userIdStr = userIdHeader != null ? userIdHeader : userIdParam;
-        // fallback: try Authorization token
-        if ((userIdStr == null || userIdStr.isBlank()) && authorization != null && authorization.startsWith("Bearer ")) {
+
+        // 一律从 BaseContext 获取用户 ID（UserContextFilter 已从网关注入的 X-USER-ID 设置）
+        java.util.UUID userId = com.echoes.context.BaseContext.getCurrentId();
+
+        // Fallback：网关未注入 X-USER-ID 时（开发环境/旧客户端），尝试从 Authorization token 解析
+        if (userId == null && authorization != null && authorization.startsWith("Bearer ")) {
             try {
                 String token = authorization.substring(7);
                 var decoded = com.echoes.util.JwtUtil.verifyToken(jwtProperties.getUserSecretKey(), token);
                 String uid = decoded.getClaim(JwtClaimsConstant.USER_ID).asString();
-                if (uid != null && !uid.isBlank()) userIdStr = uid;
+                if (uid != null && !uid.isBlank()) {
+                    userId = UuidUtils.parseLenient(uid);
+                }
             } catch (Exception e) {
-                log.debug("Failed to parse Authorization token for userId fallback: {}", e.getMessage(), e);
+                log.warn("Failed to parse userId from Authorization token: {}", e.getMessage());
             }
-        }
-        java.util.UUID userId = null;
-        try {
-            if (userIdStr != null && !userIdStr.isBlank()) {
-                userId = UuidUtils.parseLenient(userIdStr);
-            }
-        } catch (Exception e) {
-            log.debug("Failed to parse userId '{}': {}", userIdStr, e.getMessage(), e);
-            // keep userId null to be handled below
         }
 
-        // Validate presence of userId early to avoid NULL insertion into MySQL (user_id is NOT NULL)
         if (userId == null) {
-            log.warn("createSession called without userId (header='{}' param='{}')", userIdHeader, userIdParam);
-            return Result.error("USER_ID_REQUIRED");
+            log.error("createSession rejected: userId is null after all resolution attempts");
+            return Result.error("用户未登录或认证信息缺失");
         }
 
+        String userIdStr = userId.toString();
+
+        log.debug("Resolved userId: {}", userId);
 
         ConversationSession session = new ConversationSession();
         session.setUserId(userId);
