@@ -37,6 +37,10 @@ echoes:
     bucketName: ${MINIO_BUCKET_NAME:echoes-sim}
     secure: false
 
+  # Agent 配置
+  agent:
+    personality_mode: ${AGENT_PERSONALITY_MODE:温柔}  # 温柔/理性/活泼
+
 spring:
   ai:
     dashscope:

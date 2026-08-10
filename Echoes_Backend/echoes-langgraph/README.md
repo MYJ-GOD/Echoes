@@ -50,6 +50,61 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
 | `/rag/chat` | POST | RAG 对话（非流式） |
 | `/rag/chat/stream` | POST | RAG 对话（流式，NDJSON） |
 
+### Agent 编排（Week1-4）
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/agent/chat` | POST | Agent 对话（非流式）：planner → 工具链 → 人格化生成 → 记忆 |
+| `/agent/chat/stream` | POST | Agent 对话（流式，NDJSON），Java 端转 SSE |
+
+**Agent StateGraph 工作流：**
+
+```
+                    ┌─────────┐
+                    │ planner │  (LLM 决策：intent + tools)
+                    └────┬────┘
+                         │
+                    [needs_tools?]
+                    ╱           ╲
+              tools ╱             ╲ direct (闲聊短路)
+                  ╱               ╲
+          ┌──────▼────┐            ╲
+          │tool_router│             ╲
+          │(构造执行计划)│             ╲
+          └─────┬─────┘              ╲
+                │                     ╲
+          ┌─────▼─────┐                ╲
+          │  executor  │                 ╲
+          │(顺序执行工具)│                 ╲
+          └─────┬─────┘                  ╲
+                │                         ╲
+                └────────┬─────────────────┘
+                         │
+                ┌────────▼────────┐
+                │response_generator│  (人格化生成/安慰话术短路)
+                └────────┬─────────┘
+                         │
+                ┌────────▼────────┐
+                │ memory_updater  │  (实体抽取 + Qdrant 写入)
+                └────────┬─────────┘
+                         │
+                        END
+```
+
+**节点职责：**
+- **planner**：LLM 分析用户意图（chat/emotional_support/memory_recall/profile_query/task），决定需要哪些工具
+- **tool_router**：将工具名解析为可执行清单 `{name, args}`（体现工具选择能力）
+- **executor**：按 plan 顺序执行工具，结果写入 state（情绪分析 → 记忆检索 → 画像查询 → 安慰话术）
+- **response_generator**：综合情绪/记忆/画像 + 人格模式（温柔/理性/活泼）生成回复；情绪支持场景走模板话术短路（不调 LLM，快且稳）
+- **memory_updater**：LLM 实体抽取 + 对话摘要写入 Qdrant `conversation_history`（长期记忆闭环）
+
+**条件边：**
+- `planner → [needs_tools?]`：有工具需求 → `tool_router`；纯闲聊 → `response_generator`（短路径）
+
+**特性：**
+- **Checkpointer（AsyncSqliteSaver）**：`thread_id` = `session_id`，同会话断点续跑
+- **记忆图谱**：向量检索 + 实体链接双信号（实体命中奖励 +0.15/个，最高 +0.45）
+- **容错降级**：Qdrant 未启动/bge-m3 未下载时优雅降级（payload 关键词匹配），不 crash workflow
+
 ### 可观测性
 | 端点 | 方法 | 说明 |
 |------|------|------|
@@ -67,11 +122,17 @@ echoes-langgraph/
 │   ├── api/
 │   │   ├── routes.py        # API 路由（含混合检索、可观测性）
 │   │   └── __init__.py
-│   ├── graph/
+│   ├── graph/               # RAG 工作流（检索增强生成）
 │   │   ├── workflow.py      # LangGraph 工作流定义
 │   │   ├── nodes.py         # 节点实现
 │   │   ├── state.py         # 状态定义
 │   │   └── __init__.py
+│   ├── agent/               # Agent 编排（语音陪伴，Week1-4）
+│   │   ├── workflow.py      # 五节点 StateGraph + AsyncSqliteSaver checkpointer
+│   │   ├── nodes.py         # planner/tool_router/executor/generator/memory_updater
+│   │   ├── tools.py         # 陪伴工具集（情绪/记忆/画像/安慰话术）
+│   │   ├── memory.py        # Qdrant 长期记忆 + 实体链接记忆图谱
+│   │   └── state.py         # Agent 状态定义
 │   ├── services/
 │   │   ├── __init__.py      # 服务导出
 │   │   ├── qdrant_service.py    # Qdrant 检索（支持混合检索）
@@ -88,8 +149,10 @@ echoes-langgraph/
 │       └── __init__.py
 ├── tests/
 │   ├── __init__.py
-│   ├── conftest.py          # 测试配置
-│   └── test_retrieval.py    # 检索测试套件
+│   ├── conftest.py          # 测试配置（checkpointer 清理 + 连接关闭）
+│   ├── test_retrieval.py    # 检索测试套件
+│   └── test_agent_workflow.py  # Agent workflow 集成测试（10 个，Week4）
+├── pytest.ini               # pytest 配置（禁用插件，解决 event loop 挂起）
 ├── requirements.txt
 ├── Dockerfile
 ├── .env.example
