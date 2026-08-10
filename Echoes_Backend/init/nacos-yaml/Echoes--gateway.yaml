@@ -68,18 +68,17 @@ spring:
           filters:
             - SetStatus=410
 
-        # 3. 封堵 Voice 服务直连 (Internal Only)
-        # 禁止所有外部访问 Voice 服务的内部接口
-        
-        # 允许 Echoes-AI 服务访问签名 URL 接口
+        # 3. 封堵 Voice 服务内部接口 (Internal Only)
+        # 路由顺序匹配，先中即停。顺序必须是：白名单例外 → deny → 业务路由
+        # 白名单例外：允许 Echoes-AI 服务访问签名 URL 接口（其路径匹配下方 deny 的 internal/**，故须在前）
         - id: allow-ai-signed-url
           uri: lb://echoes-service-voice
           predicates:
             - Path=/api/voice/internal/assets/ref/signed
           filters:
             - StripPrefix=1
-        
-        # 封堵其他内部接口
+
+        # 封堵内部接口（inference/internal/admin），阻止外部直连
         - id: deny-voice-internal
           uri: no://op
           predicates:
@@ -87,7 +86,7 @@ spring:
           filters:
             - SetStatus=403
 
-        # Voice 服务路由 (外部可访问的业务接口)
+        # Voice 服务业务路由 (外部可访问的业务接口)
         - id: echoes-service-voice
           uri: lb://echoes-service-voice
           predicates:
@@ -145,18 +144,10 @@ spring:
           metadata:
             connect-timeout: 5000
             response-timeout: 180s
-        # 语音服务路由 (Internal Access Only via Service Discovery, but mapped here for internal services if needed via gateway loopback, though direct feign/webclient is preferred. 
-        # Since we hard blocked /api/voice/** above, this route is effectively unreachable from external world with /api prefix.
-        # However, for internal services accessing via Gateway (if any), we might need a route. 
-        # But per instruction "Gateway externally only routes user+conversation", we keep voice route but it's shadowed by the deny rule for external traffic.
-        # Actually, let's just keep it for completeness but it is blocked by the deny rule above.)
-        - id: echoes-service-voice
-          uri: lb://echoes-service-voice
-          predicates:
-            - Path=/api/internal/voice/**
-          filters:
-            - StripPrefix=1
-          # metadata 中的超时配置不会生效，已移除
+        # 注：此前存在第二个 id=echoes-service-voice 的路由（Path=/api/internal/voice/**），
+        # 与上方业务路由重复 id 导致后者覆盖前者、外部 /api/voice/** 业务路由失效；
+        # 且其路径完全被 deny-internal-routes(/api/internal/**) 遮蔽（内部调用走服务发现直连，不经网关）。
+        # 已删除该死路由，修复重复 id 问题。
         # 管理服务路由
         - id: echoes-service-admin
           uri: lb://echoes-service-admin

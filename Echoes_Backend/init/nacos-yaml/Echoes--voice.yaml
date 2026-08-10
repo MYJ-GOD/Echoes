@@ -8,9 +8,9 @@ spring:
   datasource:
     type: com.alibaba.druid.pool.DruidDataSource
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://${echoes.db.host:localhost}:${echoes.db.port:3306}/${echoes.db.name:echoes}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
-    username: ${echoes.db.username:root}
-    password: ${echoes.db.password:root}
+    url: jdbc:mysql://${echoes.datasource.host:localhost}:${echoes.datasource.port:3306}/${echoes.datasource.database:echoes}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: ${echoes.datasource.username:root}
+    password: ${echoes.datasource.password:root}
     druid:
       # 连接池配置
       initial-size: 5
@@ -55,8 +55,8 @@ echoes:
     max-assets-per-user: 10
     # AI回调认证配置
     callback:
-      api-key-internal: ${VOICE_CALLBACK_API_KEY:change-me-internal-callback-key}
-      allowed-ips: ${echoes.voice.callback.allowed-ips-internal:}
+      internal-api-key: ${VOICE_CALLBACK_API_KEY:change-me-internal-callback-key}
+      allowed-ips-internal: ${VOICE_CALLBACK_ALLOWED_IPS:}
     # 消息队列配置 (Redis Streams)
     mq:
       stream-key: voice-training-tasks
