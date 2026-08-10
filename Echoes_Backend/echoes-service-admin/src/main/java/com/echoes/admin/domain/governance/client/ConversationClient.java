@@ -1,8 +1,8 @@
 package com.echoes.admin.domain.governance.client;
 
-import com.echoes.conversation.domain.chat.entity.po.ConversationTurn;
-import com.echoes.conversation.domain.chat.entity.po.ConversationSession;
-import com.echoes.conversation.domain.chat.entity.po.ConversationSummary;
+import com.echoes.admin.domain.governance.dto.ConversationSessionDTO;
+import com.echoes.admin.domain.governance.dto.ConversationSummaryDTO;
+import com.echoes.admin.domain.governance.dto.ConversationTurnDTO;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -13,8 +13,8 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Conversation Service Feign 客户端
- * 用于 admin 模块只读访问 conversation 服务数据
+ * Conversation Service Feign 客户端（使用 admin 本地 DTO，解耦 conversation jar 依赖）
+ * 注：path 已含 /internal/conversation，方法路径无需重复前缀
  */
 @FeignClient(
         name = "echoes-service-conversation",
@@ -24,47 +24,32 @@ import java.util.UUID;
 )
 public interface ConversationClient {
 
-    /**
-     * 获取会话详情
-     */
-    @GetMapping("/internal/conversation/sessions/{conversationId}")
-    ConversationSession getSession(
+    @GetMapping("/sessions/{conversationId}")
+    ConversationSessionDTO getSession(
             @PathVariable("conversationId") UUID conversationId,
             @RequestHeader(value = "X-INTERNAL", required = false) String internal
     );
 
-    /**
-     * 获取会话列表
-     */
-    @GetMapping("/internal/conversation/sessions")
-    List<ConversationSession> listSessions(
+    @GetMapping("/sessions")
+    List<ConversationSessionDTO> listSessions(
             @RequestParam(value = "userId", required = false) UUID userId,
             @RequestHeader(value = "X-INTERNAL", required = false) String internal
     );
 
-    /**
-     * 获取 Turn 详情
-     */
-    @GetMapping("/internal/conversation/turns/{turnId}")
-    ConversationTurn getTurn(
+    @GetMapping("/turns/{turnId}")
+    ConversationTurnDTO getTurn(
             @PathVariable("turnId") String turnId,
             @RequestHeader(value = "X-INTERNAL", required = false) String internal
     );
 
-    /**
-     * 按会话 ID 获取 Turn 列表
-     */
-    @GetMapping("/internal/conversation/turns")
-    List<ConversationTurn> listTurnsBySessionId(
+    @GetMapping("/turns")
+    List<ConversationTurnDTO> listTurnsBySessionId(
             @RequestParam("conversationId") UUID conversationId,
             @RequestHeader(value = "X-INTERNAL", required = false) String internal
     );
 
-    /**
-     * 获取会话摘要
-     */
-    @GetMapping("/internal/conversation/summary/{conversationId}")
-    ConversationSummary getSummary(
+    @GetMapping("/summary/{conversationId}")
+    ConversationSummaryDTO getSummary(
             @PathVariable("conversationId") UUID conversationId,
             @RequestHeader(value = "X-INTERNAL", required = false) String internal
     );

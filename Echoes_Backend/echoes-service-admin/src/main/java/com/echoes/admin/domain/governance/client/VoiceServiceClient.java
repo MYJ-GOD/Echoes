@@ -1,19 +1,19 @@
 package com.echoes.admin.domain.governance.client;
 
-import com.echoes.voice.domain.voice.entity.po.VoiceAsset;
-import com.echoes.voice.domain.voice.entity.po.VoiceTrainingTask;
-import com.echoes.voice.domain.voice.entity.po.VoiceModel;
+import com.echoes.admin.domain.governance.dto.VoiceAssetDTO;
+import com.echoes.admin.domain.governance.dto.VoiceModelDTO;
+import com.echoes.admin.domain.governance.dto.VoiceTrainingTaskDTO;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 
 import java.util.List;
 import java.util.UUID;
 
 /**
- * Voice Service Feign 客户端
- * 用于 admin 模块只读访问 voice 服务数据
+ * Voice Service Feign 客户端（使用 admin 本地 DTO，解耦 voice jar 依赖）
  */
 @FeignClient(
         name = "echoes-service-voice",
@@ -23,38 +23,41 @@ import java.util.UUID;
 )
 public interface VoiceServiceClient {
 
-    /**
-     * 获取音色资产详情
-     */
-    @GetMapping("/internal/voice/assets/{voiceAssetId}")
-    VoiceAsset getVoiceAsset(
+    @GetMapping("/assets/{voiceAssetId}")
+    VoiceAssetDTO getVoiceAsset(
             @PathVariable("voiceAssetId") UUID voiceAssetId,
             @RequestHeader(value = "X-INTERNAL", required = false) String internal
     );
 
-    /**
-     * 获取音色资产列表
-     */
-    @GetMapping("/internal/voice/assets")
-    List<VoiceAsset> listVoiceAssets(
+    @GetMapping("/assets")
+    List<VoiceAssetDTO> listVoiceAssets(
+            @RequestParam(value = "ownerUserId", required = false) UUID ownerUserId,
+            @RequestParam(value = "status", required = false) String status,
             @RequestHeader(value = "X-INTERNAL", required = false) String internal
     );
 
-    /**
-     * 获取训练任务详情
-     */
-    @GetMapping("/internal/voice/training/tasks/{taskId}")
-    VoiceTrainingTask getTrainingTask(
+    @GetMapping("/training/tasks/{taskId}")
+    VoiceTrainingTaskDTO getTrainingTask(
             @PathVariable("taskId") UUID taskId,
             @RequestHeader(value = "X-INTERNAL", required = false) String internal
     );
 
-    /**
-     * 获取音色最新模型
-     */
-    @GetMapping("/internal/voice/models/latest/{voiceAssetId}")
-    VoiceModel getLatestModel(
+    @GetMapping("/training/tasks")
+    List<VoiceTrainingTaskDTO> listTrainingTasks(
+            @RequestParam(value = "voiceAssetId", required = false) UUID voiceAssetId,
+            @RequestParam(value = "status", required = false) String status,
+            @RequestHeader(value = "X-INTERNAL", required = false) String internal
+    );
+
+    @GetMapping("/models/latest/{voiceAssetId}")
+    VoiceModelDTO getLatestModel(
             @PathVariable("voiceAssetId") UUID voiceAssetId,
+            @RequestHeader(value = "X-INTERNAL", required = false) String internal
+    );
+
+    @GetMapping("/models")
+    List<VoiceModelDTO> listModelsByAssetId(
+            @RequestParam("voiceAssetId") UUID voiceAssetId,
             @RequestHeader(value = "X-INTERNAL", required = false) String internal
     );
 }

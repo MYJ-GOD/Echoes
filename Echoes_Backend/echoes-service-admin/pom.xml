@@ -43,16 +43,8 @@
             <artifactId>echoes-service-common</artifactId>
             <version>0.0.1-SNAPSHOT</version>
         </dependency>
-        <dependency>
-            <groupId>com.echoes</groupId>
-            <artifactId>echoes-service-conversation</artifactId>
-            <version>0.0.1-SNAPSHOT</version>
-        </dependency>
-        <dependency>
-            <groupId>com.echoes</groupId>
-            <artifactId>echoes-service-voice</artifactId>
-            <version>0.0.1-SNAPSHOT</version>
-        </dependency>
+        <!-- 已删除 echoes-service-conversation 和 echoes-service-voice jar 依赖，
+             改用 Feign 调用 internal API + admin 本地 DTO，实现服务边界解耦 (P0-4) -->
         <dependency>
             <groupId>org.mybatis.spring.boot</groupId>
             <artifactId>mybatis-spring-boot-starter</artifactId>

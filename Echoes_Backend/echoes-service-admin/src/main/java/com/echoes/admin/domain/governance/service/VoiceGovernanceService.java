@@ -1,12 +1,9 @@
 package com.echoes.admin.domain.governance.service;
 
 import com.echoes.admin.domain.governance.client.VoiceServiceClient;
-import com.echoes.voice.domain.voice.entity.po.VoiceAsset;
-import com.echoes.voice.domain.voice.entity.po.VoiceModel;
-import com.echoes.voice.domain.voice.entity.po.VoiceTrainingTask;
-import com.echoes.voice.domain.voice.repository.VoiceAssetMapper;
-import com.echoes.voice.domain.voice.repository.VoiceModelMapper;
-import com.echoes.voice.domain.voice.repository.VoiceTrainingTaskMapper;
+import com.echoes.admin.domain.governance.dto.VoiceAssetDTO;
+import com.echoes.admin.domain.governance.dto.VoiceModelDTO;
+import com.echoes.admin.domain.governance.dto.VoiceTrainingTaskDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -14,31 +11,21 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 
 /**
- * 音色治理服务
+ * 音色治理服务（已重构：通过 VoiceServiceClient Feign 调用 voice internal API，不再直连 Mapper）
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class VoiceGovernanceService {
 
-    private final VoiceAssetMapper voiceAssetMapper;
-    private final VoiceModelMapper voiceModelMapper;
-    private final VoiceTrainingTaskMapper trainingTaskMapper;
+    private final VoiceServiceClient voiceServiceClient;
 
     /**
      * 查询音色资产列表
      */
     public Map<String, Object> listVoiceAssets(String userId, String status, String role, int page, int size) {
         UUID ownerUserId = parseUuid(userId);
-        List<VoiceAsset> assets;
-
-        if (ownerUserId != null) {
-            assets = voiceAssetMapper.selectByOwnerUserId(ownerUserId);
-        } else if (status != null && !status.isBlank()) {
-            assets = voiceAssetMapper.selectByStatus(status);
-        } else {
-            assets = voiceAssetMapper.selectAll();
-        }
+        List<VoiceAssetDTO> assets = voiceServiceClient.listVoiceAssets(ownerUserId, status, "1");
 
         // 过滤已删除
         assets = assets.stream()
@@ -66,7 +53,7 @@ public class VoiceGovernanceService {
             return Collections.emptyMap();
         }
 
-        VoiceAsset asset = voiceAssetMapper.selectById(id);
+        VoiceAssetDTO asset = voiceServiceClient.getVoiceAsset(id, "1");
         if (asset == null) {
             return Collections.emptyMap();
         }
@@ -74,7 +61,7 @@ public class VoiceGovernanceService {
         Map<String, Object> result = convertToMap(asset);
 
         // 获取最新模型
-        VoiceModel latestModel = voiceModelMapper.selectLatestSuccessByAssetId(id);
+        VoiceModelDTO latestModel = voiceServiceClient.getLatestModel(id, "1");
         if (latestModel != null) {
             result.put("latestModel", convertModelToMap(latestModel));
         }
@@ -91,13 +78,13 @@ public class VoiceGovernanceService {
             return Collections.emptyMap();
         }
 
-        VoiceAsset asset = voiceAssetMapper.selectById(id);
+        VoiceAssetDTO asset = voiceServiceClient.getVoiceAsset(id, "1");
         if (asset == null) {
             return Collections.emptyMap();
         }
 
         // 获取所有模型（按时间排序）
-        List<VoiceModel> models = voiceModelMapper.selectByAssetId(id);
+        List<VoiceModelDTO> models = voiceServiceClient.listModelsByAssetId(id, "1");
         List<Map<String, Object>> qualityHistory = models.stream()
                 .map(m -> {
                     Map<String, Object> entry = new HashMap<>();
@@ -122,15 +109,7 @@ public class VoiceGovernanceService {
      */
     public Map<String, Object> listTrainingTasks(String voiceAssetId, String status, int page, int size) {
         UUID assetId = parseUuid(voiceAssetId);
-        List<VoiceTrainingTask> tasks;
-
-        if (assetId != null) {
-            tasks = trainingTaskMapper.selectByVoiceAssetId(assetId);
-        } else if (status != null && !status.isBlank()) {
-            tasks = trainingTaskMapper.selectByStatus(status);
-        } else {
-            tasks = trainingTaskMapper.selectAll();
-        }
+        List<VoiceTrainingTaskDTO> tasks = voiceServiceClient.listTrainingTasks(assetId, status, "1");
 
         List<Map<String, Object>> voList = tasks.stream()
                 .map(this::convertTaskToMap)
@@ -153,7 +132,7 @@ public class VoiceGovernanceService {
             return Collections.emptyMap();
         }
 
-        VoiceTrainingTask task = trainingTaskMapper.selectById(id);
+        VoiceTrainingTaskDTO task = voiceServiceClient.getTrainingTask(id, "1");
         if (task == null) {
             return Collections.emptyMap();
         }
@@ -170,7 +149,7 @@ public class VoiceGovernanceService {
             return Collections.emptyMap();
         }
 
-        VoiceTrainingTask task = trainingTaskMapper.selectById(id);
+        VoiceTrainingTaskDTO task = voiceServiceClient.getTrainingTask(id, "1");
         if (task == null || task.getLogPath() == null) {
             return Collections.emptyMap();
         }
@@ -182,13 +161,13 @@ public class VoiceGovernanceService {
         return result;
     }
 
-    private Map<String, Object> convertToMap(VoiceAsset asset) {
+    private Map<String, Object> convertToMap(VoiceAssetDTO asset) {
         Map<String, Object> result = new HashMap<>();
         result.put("voiceAssetId", asset.getVoiceAssetId() != null ? asset.getVoiceAssetId().toString() : null);
         result.put("ownerUserId", asset.getOwnerUserId() != null ? asset.getOwnerUserId().toString() : null);
         result.put("name", asset.getName());
-        result.put("role", asset.getRole() != null ? asset.getRole().getCode() : null);
-        result.put("status", asset.getStatus() != null ? asset.getStatus().getCode() : null);
+        result.put("role", asset.getRole());  // DTO 已是 String，无需 .getCode()
+        result.put("status", asset.getStatus());  // DTO 已是 String，无需 .getCode()
         result.put("qualityScore", asset.getQualityScore());
         result.put("voiceIdExternal", asset.getVoiceIdExternal());
         result.put("createTime", asset.getCreateTime());
@@ -196,7 +175,7 @@ public class VoiceGovernanceService {
         return result;
     }
 
-    private Map<String, Object> convertModelToMap(VoiceModel model) {
+    private Map<String, Object> convertModelToMap(VoiceModelDTO model) {
         Map<String, Object> result = new HashMap<>();
         result.put("voiceModelId", model.getVoiceModelId() != null ? model.getVoiceModelId().toString() : null);
         result.put("modelVersion", model.getModelVersion());
@@ -206,7 +185,7 @@ public class VoiceGovernanceService {
         return result;
     }
 
-    private Map<String, Object> convertTaskToMap(VoiceTrainingTask task) {
+    private Map<String, Object> convertTaskToMap(VoiceTrainingTaskDTO task) {
         Map<String, Object> result = new HashMap<>();
         result.put("taskId", task.getTaskId() != null ? task.getTaskId().toString() : null);
         result.put("voiceAssetId", task.getVoiceAssetId() != null ? task.getVoiceAssetId().toString() : null);
