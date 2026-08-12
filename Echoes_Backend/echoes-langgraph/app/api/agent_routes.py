@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.agent.workflow import get_agent_workflow
+from app.agent.guardrail import check_guardrail
 from app.config import settings
 
 router = APIRouter(prefix="/agent", tags=["Agent"])
@@ -62,8 +63,12 @@ def _thread_config(request: AgentRequest) -> Dict[str, Any]:
 
 @router.post("/chat", response_model=AgentResponse)
 async def agent_chat(request: AgentRequest) -> AgentResponse:
-    """Agent 对话（非流式）：planner → 工具链 → 人格化生成 → 记忆入库"""
+    """Agent 对话（非流式）：Guardrail → ReAct 循环 → 人格化生成 → 记忆入库"""
     start = time.time()
+    # Guardrail 入口安全门禁（第一关）
+    blocked = check_guardrail(request.query)
+    if blocked:
+        return AgentResponse(intent="blocked", plan=[], response=blocked)
     try:
         workflow = await get_agent_workflow()
         result = await workflow.ainvoke(
@@ -86,13 +91,31 @@ async def agent_chat(request: AgentRequest) -> AgentResponse:
 
 @router.post("/chat/stream")
 async def agent_chat_stream(request: AgentRequest):
-    """Agent 对话（流式 NDJSON）；Java 端负责 NDJSON → SSE"""
+    """Agent 对话（流式 NDJSON），封装四种事件类型：
+    - message.delta: 文本回复（逐字/整段）
+    - emotion: 情绪标签
+    - citation: 引用来源（检索到的记忆）
+    - audio: 语音（占位，实际 TTS 由 Java/CosyVoice 侧生成）
+    末尾 end 事件。Java 端负责 NDJSON → SSE。
+    """
     seq = 0
+
+    def _event(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False) + "\n"
 
     async def generate() -> AsyncGenerator[str, None]:
         nonlocal seq
-        # state 在 values 模式下累积，同一字段会在后续事件重复出现，按节点去重
-        yielded = {"intent": False, "emotion": False, "memory": False, "response": False}
+
+        # Guardrail 入口安全门禁：命中直接返回兜底文本 + end，不进入 workflow
+        blocked = check_guardrail(request.query)
+        if blocked:
+            yield _event({"type": "message.delta", "content": blocked, "seq": seq})
+            seq += 1
+            yield _event({"type": "end", "status": "BLOCKED", "seq": seq})
+            return
+
+        # 四事件去重标记
+        yielded = {"emotion": False, "citation": False, "response": False}
         try:
             workflow = await get_agent_workflow()
             async for event in workflow.astream(
@@ -100,54 +123,34 @@ async def agent_chat_stream(request: AgentRequest):
                 config=_thread_config(request),
                 stream_mode="values",
             ):
-                if event.get("intent") and not yielded["intent"]:
-                    yielded["intent"] = True
-                    yield json.dumps({
-                        "type": "intent",
-                        "intent": event["intent"],
-                        "tools": event.get("plan", []),
-                        "seq": seq,
-                    }, ensure_ascii=False) + "\n"
-                    seq += 1
-
+                # 事件2：情绪标签
                 if event.get("emotion") and not yielded["emotion"]:
                     yielded["emotion"] = True
-                    yield json.dumps({
-                        "type": "emotion",
-                        "emotion": event["emotion"],
-                        "seq": seq,
-                    }, ensure_ascii=False) + "\n"
+                    yield _event({"type": "emotion", "emotion": event["emotion"], "seq": seq})
                     seq += 1
 
-                if event.get("memory_hits") and not yielded["memory"]:
-                    yielded["memory"] = True
-                    yield json.dumps({
-                        "type": "memory",
-                        "hits": event["memory_hits"][:3],
-                        "seq": seq,
-                    }, ensure_ascii=False) + "\n"
+                # 事件3：引用来源（检索到的记忆）
+                if event.get("memory_hits") and not yielded["citation"]:
+                    yielded["citation"] = True
+                    citations = [
+                        {"summary": h.get("summary", ""), "score": h.get("score"), "ts": h.get("ts")}
+                        for h in event["memory_hits"][:3]
+                    ]
+                    yield _event({"type": "citation", "sources": citations, "seq": seq})
                     seq += 1
 
+                # 事件1：文本回复
                 if event.get("response") and not yielded["response"]:
                     yielded["response"] = True
-                    yield json.dumps({
-                        "type": "message.delta",
-                        "content": event["response"],
-                        "seq": seq,
-                    }, ensure_ascii=False) + "\n"
+                    yield _event({"type": "message.delta", "content": event["response"], "seq": seq})
+                    seq += 1
+                    # 事件4：语音占位（标记该文本可供 TTS 合成，实际音频由 Java 侧生成）
+                    yield _event({"type": "audio", "text_ref": event["response"], "seq": seq})
                     seq += 1
 
-            yield json.dumps({
-                "type": "end",
-                "status": "SUCCESS",
-                "seq": seq,
-            }, ensure_ascii=False) + "\n"
+            yield _event({"type": "end", "status": "SUCCESS", "seq": seq})
         except Exception as e:
             logger.error("agent/chat/stream 失败: %s", e)
-            yield json.dumps({
-                "type": "error",
-                "message": str(e),
-                "seq": seq,
-            }, ensure_ascii=False) + "\n"
+            yield _event({"type": "error", "message": str(e), "seq": seq})
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")

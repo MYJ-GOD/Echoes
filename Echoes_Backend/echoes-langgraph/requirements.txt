@@ -45,3 +45,4 @@ accelerate>=0.25.0    # 模型加速
 
 # 生产部署
 gunicorn>=21.0.0      # WSGI HTTP 服务器
+motor>=3.3.0

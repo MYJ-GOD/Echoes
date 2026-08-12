@@ -38,6 +38,7 @@ PLANNER_PROMPT = """你是「一闻如故」语音陪伴 Agent 的规划器（Re
 - get_user_profile: 获取用户长期画像（问及用户自身时）
 - update_user_state: 更新用户画像/情绪标签
 - generate_comfort_response: 生成情感安慰回复
+- web_search: 外部搜索（事实查询/最新信息/外部知识）
 
 **判断规则**：
 1. 如果信息已足够回答（闲聊 / 已检索到记忆 / 已分析完情绪）→ 设 is_sufficient=true，无需再调工具
@@ -67,15 +68,25 @@ RESPONSE_PROMPT = """你是「一闻如故」语音陪伴助手。人格模式�
 请用自然温暖、贴合人格模式（温柔/理性/活泼）的语气回复，150 字以内。"""
 
 
-def _build_persona_anchor(personality: str) -> str:
-    """构建 System Prompt 人设锚点（永不参与滑动窗口淘汰，稳定人格）"""
+def _build_persona_anchor(personality: str, static_profile: Dict[str, Any] = None) -> str:
+    """构建 System Prompt 人设锚点（永不参与滑动窗口淘汰，稳定人格）
+
+    静态画像（姓名/关系/长期偏好）锁死在顶层，防止人格漂移。
+    """
     personas = {
         "温柔": "你是一个温柔体贴的陪伴者，善于倾听和理解，说话轻声细语、温暖包容，像一位关心朋友的姐姐/哥哥。",
         "理性": "你是一个理性冷静的陪伴者，逻辑清晰、客观务实，擅长分析问题并给出建设性建议，但不失关怀。",
         "活泼": "你是一个活泼开朗的陪伴者，热情阳光、幽默风趣，用轻松愉快的方式陪伴用户，像一位贴心的闺蜜/兄弟。",
     }
     base = personas.get(personality, personas["温柔"])
-    return f"{base}\n\n核心原则：以用户为中心，尊重其情绪和意愿，提供真诚、温暖、有价值的陪伴。这是你的永恒人格设定，不会因对话内容改变。"
+    anchor = f"{base}\n\n核心原则：以用户为中心，尊重其情绪和意愿，提供真诚、温暖、有价值的陪伴。这是你的永恒人格设定，不会因对话内容改变。"
+
+    # 静态画像锚点：长期不变的用户设定，注入顶层防止人格漂移
+    if static_profile:
+        facts = "；".join([f"{k}：{v}" for k, v in static_profile.items() if k != "user_id" and v])
+        if facts:
+            anchor += f"\n\n【关于用户的长期事实（务必记住，不可遗忘）】{facts}"
+    return anchor
 
 
 # ============== planner ==============
@@ -239,7 +250,11 @@ async def executor_node(state: AgentState) -> AgentState:
             result = emotion
             observation = f"情绪分析：{emotion.get('emotion')}（强度 {emotion.get('intensity')}）"
         elif name == "search_memory":
-            memory_hits = await fn(query=args.get("query", query), user_id=user_id)
+            memory_hits = await fn(
+                query=args.get("query", query),
+                user_id=user_id,
+                conversation_history=state.get("conversation_history", []),
+            )
             result = memory_hits
             observation = f"检索到 {len(memory_hits)} 条相关记忆" if memory_hits else "未检索到达阈值的记忆"
         elif name == "get_user_profile":
@@ -254,6 +269,10 @@ async def executor_node(state: AgentState) -> AgentState:
             )
             result = {"comfort_response": comfort}
             observation = "已生成安慰话术"
+        elif name == "web_search":
+            search_results = await fn(query=args.get("query", query))
+            result = search_results
+            observation = f"外部搜索到 {len(search_results)} 条结果" if search_results else "外部搜索无结果"
         else:
             result = await fn(**args)
             observation = f"工具 {name} 执行完成"
@@ -310,14 +329,15 @@ async def response_generator_node(state: AgentState) -> AgentState:
         intent=intent,
         emotion=json.dumps(emotion, ensure_ascii=False),
         memory_hits=json.dumps(memory_hits[:3], ensure_ascii=False),
-        profile=json.dumps(profile, ensure_ascii=False),
+        profile=json.dumps(profile.get("dynamic", {}), ensure_ascii=False),  # 动态上下文用于生成
         tool_results=json.dumps(tool_results, ensure_ascii=False),
     )
     try:
-        # System Prompt 人设锚点：置于最顶层，独立于用户消息，稳定人格
+        # System Prompt 人设锚点：静态画像锁死顶层，稳定人格
+        static_profile = profile.get("static", {})
         response = await chat_completion(
             [
-                {"role": "system", "content": _build_persona_anchor(personality)},
+                {"role": "system", "content": _build_persona_anchor(personality, static_profile)},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=500,

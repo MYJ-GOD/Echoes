@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     # Agent ReAct 循环最大迭代次数（防止无限循环）
     AGENT_MAX_ITERATIONS: int = 3
 
+    # MongoDB 双写配置（备份原始 JSON + 静态画像持久化）
+    MONGODB_URI: str = "mongodb://localhost:27017"
+    MONGODB_DB: str = "echoes"
+    MONGODB_COLLECTION_MEMORY: str = "conversation_memory"     # 对话记忆备份
+    MONGODB_COLLECTION_STATIC_PROFILE: str = "user_static_profile"  # 静态画像
+
     # CORS 配置
     CORS_ORIGINS: list[str] = ["*"]
 

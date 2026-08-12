@@ -77,11 +77,12 @@ async def save_memory_entry(user_id: str, entry: Dict[str, Any]) -> bool:
         if vector is None:
             logger.warning("记忆保存跳过（向量不可用）: user_id=%s", user_id)
             return False
+        point_id = str(uuid.uuid4())
         client = get_client()
         client.upsert(
             collection_name=COLLECTION_MEMORY,
             points=[qm.PointStruct(
-                id=str(uuid.uuid4()),
+                id=point_id,
                 vector=vector,
                 payload={
                     "user_id": user_id,
@@ -93,6 +94,14 @@ async def save_memory_entry(user_id: str, entry: Dict[str, Any]) -> bool:
             )],
         )
         logger.info("记忆已写入 conversation_history: user_id=%s", user_id)
+
+        # 双写：原始 JSON 备份到 MongoDB（失败不阻断，Qdrant 是主存储）
+        try:
+            from app.services.mongo_service import save_memory_backup
+            await save_memory_backup(user_id, entry, point_id=point_id)
+        except Exception as e:
+            logger.debug("MongoDB 双写跳过: %s", e)
+
         return True
     except Exception as e:
         logger.warning("记忆写入失败: %s", e)
@@ -107,6 +116,32 @@ def _match_entities(payload_entities: List[str], query_entities: List[str]) -> i
         return 0
     p_set = {e.lower() for e in payload_entities}
     return sum(1 for e in query_entities if e.lower() in p_set)
+
+
+async def _rewrite_query(query: str, conversation_history: List[Dict[str, str]] = None) -> str:
+    """Query Rewrite: 指代消解 + 补全省略（提升检索召回）
+
+    用轻量模型（qwen-turbo）把口语化查询转换成适合向量检索的标准表述。
+    对话连续时收益明显（"它怎么样" → "xxx怎么样"）。
+    """
+    if not conversation_history:
+        return query  # 首轮对话无需改写
+
+    context = "\n".join([f"{m['role']}: {m['content']}" for m in conversation_history[-3:]])
+    prompt = f"""对话上下文：
+{context}
+
+用户当前问题：{query}
+
+如果问题中有指代词（它/他/那个）或省略，请补全为完整表述；否则原样返回。只输出改写后的问题，不要解释。"""
+
+    try:
+        rewritten = await chat_completion([{"role": "user", "content": prompt}], max_tokens=100, temperature=0)
+        logger.info("Query Rewrite: '%s' → '%s'", query, rewritten.strip())
+        return rewritten.strip() or query
+    except Exception as e:
+        logger.warning("Query Rewrite 失败，使用原查询: %s", e)
+        return query
 
 
 async def _rerank_memories(
@@ -146,21 +181,25 @@ async def search_memory(
     top_k: int = 3,
     recall_k: int = 30,
     rerank_threshold: float = 0.75,
+    conversation_history: List[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
-    """记忆检索：粗召回 → BGE-Rerank 精排 → Threshold 门禁 → 实体链接增强
+    """记忆检索：Query Rewrite → 粗召回 → BGE-Rerank 精排 → Threshold 门禁 → 实体链接增强
 
-    流程（对齐 V1.0 检索质量工程）：
-    1. 向量粗召回 TopK=recall_k（高召回优先）
-    2. BGE-reranker Cross-Encoder 精排（recall_k → top_k）
-    3. Threshold 门禁：最高 rerank_score < rerank_threshold → 返回空（不注入低质量记忆）
-    4. 实体链接：命中实体的记忆加分
+    完整链路（对齐 V1.0 + V2.0 检索质量工程）：
+    1. Query Rewrite: 指代消解 + 补全省略（提升召回率）
+    2. 向量粗召回 TopK=recall_k（高召回优先）
+    3. BGE-reranker Cross-Encoder 精排（recall_k → top_k）
+    4. Threshold 门禁：最高 rerank_score < rerank_threshold → 返回空（不注入低质量记忆）
+    5. 实体链接：命中实体的记忆加分
 
     返回 [{summary, entities, score, rerank_score, entity_hits, ...}]
     """
-    query_entities = await extract_entities(query)
+    # Step 1: Query Rewrite（指代消解）
+    rewritten_query = await _rewrite_query(query, conversation_history)
+    query_entities = await extract_entities(rewritten_query)
 
-    # 路径 A：向量粗召回 + Rerank 精排
-    vector = await _try_embedding(query)
+    # Step 2: 向量粗召回 + Rerank 精排
+    vector = await _try_embedding(rewritten_query)
     if vector is not None:
         try:
             client = get_client()
@@ -187,15 +226,15 @@ async def search_memory(
             if not candidates:
                 return []
 
-            # BGE-Rerank 精排（recall_k → top_k），带 Threshold 门禁
-            reranked = await _rerank_memories(query, candidates, top_k, rerank_threshold)
+            # Step 3: BGE-Rerank 精排（recall_k → top_k），带 Threshold 门禁
+            reranked = await _rerank_memories(rewritten_query, candidates, top_k, rerank_threshold)
 
-            # Threshold 门禁：无高质量记忆则不注入（防止低质量记忆污染回复）
+            # Step 4: Threshold 门禁：无高质量记忆则不注入（防止低质量记忆污染回复）
             if not reranked:
                 logger.info("记忆检索：rerank 后无记忆达到阈值 %.2f，不注入", rerank_threshold)
                 return []
 
-            # 实体链接增强：命中实体的记忆加分并重排
+            # Step 5: 实体链接增强：命中实体的记忆加分并重排
             for hit in reranked:
                 entity_hits = _match_entities(hit.get("entities", []), query_entities)
                 hit["entity_hits"] = entity_hits
@@ -242,18 +281,37 @@ async def search_memory(
 # ============== 用户画像 ==============
 
 async def get_user_profile(user_id: str = "") -> Dict[str, Any]:
-    """读 user_profile collection（单 point，id=user_id）；无则返回空画像"""
+    """聚合用户画像：静态画像（MongoDB）+ 动态上下文（Qdrant）
+
+    - 静态画像：长期不变的用户设定（姓名/关系/长期偏好），存 MongoDB，注入 System Prompt 顶层
+    - 动态上下文：短期状态（近期情绪/当前话题），存 Qdrant user_profile，走滑动窗口
+    """
     if not user_id:
         return {}
+
+    profile = {}
+    # 1. 读取静态画像（MongoDB）
+    try:
+        from app.services.mongo_service import get_static_profile
+        static = await get_static_profile(user_id)
+        profile["static"] = static
+    except Exception as e:
+        logger.debug("读取静态画像跳过: %s", e)
+        profile["static"] = {}
+
+    # 2. 读取动态上下文（Qdrant）
     try:
         client = get_client()
         res = client.retrieve(collection_name=COLLECTION_PROFILE, ids=[user_id], with_payload=True)
         if res and res[0].payload:
-            return dict(res[0].payload)
-        return {}
+            profile["dynamic"] = dict(res[0].payload)
+        else:
+            profile["dynamic"] = {}
     except Exception as e:
-        logger.warning("读取用户画像失败: %s", e)
-        return {}
+        logger.warning("读取动态上下文失败: %s", e)
+        profile["dynamic"] = {}
+
+    return profile
 
 
 async def update_user_profile(user_id: str = "", **updates: Any) -> Dict[str, Any]:

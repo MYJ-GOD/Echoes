@@ -96,10 +96,37 @@ async def generate_comfort_response(emotion: str = "neutral", intensity: float =
     return templates.get(emotion, templates["neutral"])
 
 
+async def web_search(query: str, max_results: int = 3) -> List[Dict[str, str]]:
+    """外部搜索工具（DuckDuckGo 免费搜索，无需 API key）
+
+    Agent 自主决定何时调用（事实查询/最新信息/外部知识）。
+    返回 [{"title": ..., "snippet": ..., "url": ...}]
+    """
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = []
+            for r in ddgs.text(query, max_results=max_results):
+                results.append({
+                    "title": r.get("title", ""),
+                    "snippet": r.get("body", ""),
+                    "url": r.get("href", ""),
+                })
+            logger.info("web_search: query='%s' found=%d", query, len(results))
+            return results
+    except ImportError:
+        logger.warning("web_search 失败：duckduckgo_search 未安装，返回空")
+        return []
+    except Exception as e:
+        logger.warning("web_search 失败: %s，返回空", e)
+        return []
+
+
 TOOL_REGISTRY: Dict[str, Any] = {
     "analyze_emotion": analyze_emotion,
     "search_memory": search_memory,
     "get_user_profile": get_user_profile,
     "update_user_state": update_user_state,
     "generate_comfort_response": generate_comfort_response,
+    "web_search": web_search,
 }
