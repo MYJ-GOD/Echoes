@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     # Agent ReAct 循环最大迭代次数（防止无限循环）
     AGENT_MAX_ITERATIONS: int = 3
 
+    # 记忆检索 Rerank 门禁阈值（低于此分数不注入记忆，防低质量污染）
+    # 校准依据：bge-reranker-v2-m3 经 sigmoid 归一化后，语义相关记忆实测约 0.60，
+    # 无关记忆显著更低，故门禁取 0.5（放行真实记忆 + 挡低质量）。Stage2 用评测集正式标定。
+    AGENT_RERANK_THRESHOLD: float = 0.5
+
     # MongoDB 双写配置（备份原始 JSON + 静态画像持久化）
     MONGODB_URI: str = "mongodb://localhost:27017"
     MONGODB_DB: str = "echoes"

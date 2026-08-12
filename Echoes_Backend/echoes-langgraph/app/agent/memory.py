@@ -180,7 +180,7 @@ async def search_memory(
     user_id: str = "",
     top_k: int = 3,
     recall_k: int = 30,
-    rerank_threshold: float = 0.75,
+    rerank_threshold: float = None,  # None → 用配置默认（settings.AGENT_RERANK_THRESHOLD）
     conversation_history: List[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """记忆检索：Query Rewrite → 粗召回 → BGE-Rerank 精排 → Threshold 门禁 → 实体链接增强
@@ -194,6 +194,10 @@ async def search_memory(
 
     返回 [{summary, entities, score, rerank_score, entity_hits, ...}]
     """
+    # threshold 默认取配置值（可调，默认 0.75）
+    if rerank_threshold is None:
+        rerank_threshold = getattr(settings, "AGENT_RERANK_THRESHOLD", 0.75)
+
     # Step 1: Query Rewrite（指代消解）
     rewritten_query = await _rewrite_query(query, conversation_history)
     query_entities = await extract_entities(rewritten_query)

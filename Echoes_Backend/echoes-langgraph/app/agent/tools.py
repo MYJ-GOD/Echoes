@@ -69,9 +69,13 @@ async def analyze_emotion(text: str) -> Dict[str, Any]:
         return _rule_based_emotion(text)
 
 
-async def search_memory(query: str, user_id: str = "") -> List[Dict[str, Any]]:
-    """检索历史对话（向量 + 实体链接双信号，记忆图谱）"""
-    return await memory.search_memory(query, user_id=user_id)
+async def search_memory(
+    query: str,
+    user_id: str = "",
+    conversation_history: List[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """检索历史对话（Query Rewrite → 粗召回 → Rerank → Threshold → 实体链接）"""
+    return await memory.search_memory(query, user_id=user_id, conversation_history=conversation_history)
 
 
 async def get_user_profile(user_id: str = "") -> Dict[str, Any]:
