@@ -22,6 +22,7 @@ config/secrets.properties
 .reasonix/
 .cursor/
 改造计划_Agent化.md
+CLAUDE.md
 
 # ---- Agent checkpointer ----
 *.sqlite
@@ -52,6 +53,7 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+.pytest_cache/
 
 # ---- 系统 / 其他 ----
 .DS_Store
