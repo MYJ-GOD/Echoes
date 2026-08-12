@@ -17,7 +17,6 @@
         <module>echoes-service-admin</module>
         <module>echoes-service-voice</module>
         <module>echoes-service-conversation</module>
-        <module>echoes-service-rag</module>
         <module>echoes-service-gateway</module>
     </modules>
     
