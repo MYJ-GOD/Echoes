@@ -1,11 +1,12 @@
 """
-Agent 编排 workflow（Week1-2）
+Agent 编排 workflow（Stage 1: 真 ReAct 循环）
 
-planner → (conditional_edges) → tool_router → executor → response_generator → memory_updater
-纯闲聊走 direct 短路径，任务型走完整工具链。
+Thought(planner) → Action(executor) → Observation → should_continue:
+  - 信息充足 → response_generator
+  - 需更多信息 → 回 planner（形成循环）
+  - 达到 max_iterations → 强制生成
 
-checkpointer：AsyncSqliteSaver（async 图必须用异步实现），惰性初始化——
-首次调用 get_agent_workflow() 时在事件循环内创建连接并编译。
+checkpointer: AsyncSqliteSaver（async 图必须用异步实现）。
 """
 import logging
 
@@ -19,8 +20,7 @@ from app.agent.nodes import (
     memory_updater_node,
     planner_node,
     response_generator_node,
-    route_after_planner,
-    tool_router_node,
+    should_continue,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,12 +62,16 @@ async def close_agent_checkpointer() -> None:
 
 
 def build_agent_workflow() -> StateGraph:
-    """构建 Agent 编排 workflow"""
+    """构建 ReAct 循环 Agent workflow
+
+    START → planner(Thought) → executor(Action) → should_continue:
+      - continue → 回 planner（循环）
+      - generate → response_generator → memory_updater → END
+    """
     workflow = StateGraph(AgentState)
 
     # 节点
     workflow.add_node("planner", planner_node)
-    workflow.add_node("tool_router", tool_router_node)
     workflow.add_node("executor", executor_node)
     workflow.add_node("response_generator", response_generator_node)
     workflow.add_node("memory_updater", memory_updater_node)
@@ -75,19 +79,25 @@ def build_agent_workflow() -> StateGraph:
     # 入口
     workflow.set_entry_point("planner")
 
-    # planner 后条件路由：needs_tools → 工具链；纯闲聊 → 直接生成
+    # planner(Thought) 后条件边：有工具要调 → executor；信息已足够 → 直接生成（跳过空 executor）
     workflow.add_conditional_edges(
         "planner",
-        route_after_planner,
+        should_continue,
         {
-            "tools": "tool_router",
-            "direct": "response_generator",
+            "continue": "executor",            # planner 决定了工具 → 执行
+            "generate": "response_generator",  # 信息充足 → 直接生成
         },
     )
 
-    # 工具链
-    workflow.add_edge("tool_router", "executor")
-    workflow.add_edge("executor", "response_generator")
+    # executor(Action) 后条件边（ReAct 循环核心）
+    workflow.add_conditional_edges(
+        "executor",
+        should_continue,
+        {
+            "continue": "planner",             # 信息不足 → 回 planner，形成 Thought→Action 循环
+            "generate": "response_generator",  # 信息充足 / 迭代超限 → 生成回复
+        },
+    )
 
     # 收尾
     workflow.add_edge("response_generator", "memory_updater")

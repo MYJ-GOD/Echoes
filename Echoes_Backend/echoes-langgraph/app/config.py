@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # Agent 人格模式（温柔/理性/活泼；Nacos 侧 agent.personality_mode 同步）
     AGENT_PERSONALITY_MODE: str = "温柔"
 
+    # Agent ReAct 循环最大迭代次数（防止无限循环）
+    AGENT_MAX_ITERATIONS: int = 3
+
     # CORS 配置
     CORS_ORIGINS: list[str] = ["*"]
 

@@ -49,6 +49,10 @@ def _build_inputs(request: AgentRequest) -> Dict[str, Any]:
         "turn_id": request.turn_id,
         "conversation_history": request.conversation_history or [],
         "personality_mode": request.personality_mode or settings.AGENT_PERSONALITY_MODE,
+        # ReAct 循环控制
+        "iteration": 0,
+        "max_iterations": settings.AGENT_MAX_ITERATIONS,
+        "all_tool_results": [],
     }
 
 
