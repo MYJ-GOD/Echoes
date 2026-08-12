@@ -24,11 +24,14 @@ _embedding_model: SentenceTransformer = None
 
 
 def get_embedding_model() -> SentenceTransformer:
-    """获取 Embedding 模型实例（懒加载）"""
+    """获取 Embedding 模型实例（懒加载）
+
+    local_files_only=True: 只用本地缓存，不联网校验（避免网络超时挂起 / 离线模式硬失败）
+    """
     global _embedding_model
     if _embedding_model is None:
         logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL}")
-        _embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
+        _embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL, local_files_only=True)
         logger.info("Embedding model loaded successfully")
     return _embedding_model
 

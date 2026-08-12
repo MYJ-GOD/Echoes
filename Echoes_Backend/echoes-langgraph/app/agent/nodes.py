@@ -120,6 +120,10 @@ async def planner_node(state: AgentState) -> AgentState:
     max_iterations = state.get("max_iterations", 3)
     all_results = state.get("all_tool_results", [])
 
+    # 【新增】两级快速意图识别（正则+语义向量），命中则跳过 LLM planner
+    from app.agent.intent_router import classify_intent
+    fast_intent = classify_intent(query) if iteration == 0 else None  # 仅首轮快速识别
+
     # 已调用工具摘要（供 planner 避免重复调用）
     called_tools = [r.get("tool_name") for r in all_results]
     tool_results_summary = "; ".join([
@@ -127,6 +131,35 @@ async def planner_node(state: AgentState) -> AgentState:
         for r in all_results[-3:]
     ]) if all_results else "无"
 
+    # 快速识别命中 → 简单决策，跳过 LLM
+    if fast_intent:
+        logger.info("快速意图识别命中: %s（跳过 LLM planner）", fast_intent)
+        # 根据意图决定是否需要工具
+        next_tool = None
+        is_sufficient = True
+
+        if fast_intent == "memory_recall" and not called_tools:
+            # 记忆回忆且未调用工具 → 需要 search_memory
+            next_tool = "search_memory"
+            is_sufficient = False
+        elif fast_intent == "emotional_support" and "analyze_emotion" not in called_tools:
+            # 情绪支持且未分析 → 调情绪分析
+            next_tool = "analyze_emotion"
+            is_sufficient = False
+        elif fast_intent == "profile_query" and "get_user_profile" not in called_tools:
+            # 画像查询 → 获取画像
+            next_tool = "get_user_profile"
+            is_sufficient = False
+
+        return {
+            "intent": fast_intent,
+            "is_sufficient": is_sufficient,
+            "next_tool": next_tool,
+            "tool_args": {"query": query} if next_tool else {},
+            "reasoning": f"快速意图识别：{fast_intent}",
+        }
+
+    # 未命中快速识别 → LLM planner（原逻辑）
     prompt = PLANNER_PROMPT.format(
         query=query,
         iteration=iteration,

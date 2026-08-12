@@ -16,11 +16,14 @@ def _clean_checkpointer_before_session():
     for f in ("agent_checkpoints.sqlite", "agent_checkpoints.sqlite-wal", "agent_checkpoints.sqlite-shm"):
         try:
             os.remove(f)
-        except FileNotFoundError:
-            pass
+        except (FileNotFoundError, PermissionError, OSError):
+            pass  # 文件不存在或被占用（服务运行中）时跳过，不阻断测试
     yield
     # 收尾：关闭连接，避免 aiosqlite 线程阻塞 pytest 进程退出
-    asyncio.run(close_agent_checkpointer())
+    try:
+        asyncio.run(close_agent_checkpointer())
+    except Exception:
+        pass
 
 
 @pytest.fixture

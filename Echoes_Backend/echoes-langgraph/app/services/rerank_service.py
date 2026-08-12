@@ -22,11 +22,14 @@ _rerank_model: CrossEncoder = None
 
 
 def get_rerank_model() -> CrossEncoder:
-    """获取 Rerank 模型实例（懒加载）"""
+    """获取 Rerank 模型实例（懒加载）
+
+    local_files_only=True: 只用本地缓存，不联网校验（避免网络超时挂起 / 离线模式硬失败）
+    """
     global _rerank_model
     if _rerank_model is None:
         logger.info(f"Loading rerank model: {settings.RERANK_MODEL}")
-        _rerank_model = CrossEncoder(settings.RERANK_MODEL)
+        _rerank_model = CrossEncoder(settings.RERANK_MODEL, local_files_only=True)
         logger.info("Rerank model loaded successfully")
     return _rerank_model
 
