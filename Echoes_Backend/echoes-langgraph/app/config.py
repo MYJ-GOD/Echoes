@@ -1,6 +1,7 @@
 """
 Echoes LangGraph Service Configuration
 """
+from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 
 
@@ -59,9 +60,11 @@ class Settings(BaseSettings):
     DEFAULT_TOP_K: int = 5
     DEFAULT_THRESHOLD: float = 0.5
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = ConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore",  # 允许 HF_HOME 等外部环境变量，不报错
+    )
 
 
 settings = Settings()

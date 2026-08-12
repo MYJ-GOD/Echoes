@@ -1,12 +1,23 @@
 """
 FastAPI 应用主入口
 
-Phase 4 优化：
-- 缓存服务集成
-- 模型量化支持
-- 性能监控 API
-- 生产部署配置
+- Agent 编排（ReAct 循环）+ 记忆检索
+- 缓存服务、性能监控、生产部署配置
 """
+# ============== HF 缓存路径（必须在任何 HuggingFace 库导入前设置）==============
+# huggingface_hub 在 import 时读取 HF_HOME 环境变量，而 pydantic Settings 加载晚于模块导入，
+# 故此处从 .env 直接读并写入 os.environ，确保模型从项目 models 目录加载而非 C 盘。
+import os as _os
+from pathlib import Path as _Path
+
+_env_file = _Path(__file__).resolve().parent.parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line.startswith(("HF_HOME=", "HF_ENDPOINT=")) and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            _os.environ[_k.strip()] = _v.strip()  # 强制覆盖，确保生效
+
 import logging
 import time
 from contextlib import asynccontextmanager
