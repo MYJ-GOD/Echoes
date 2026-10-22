@@ -43,10 +43,11 @@ pub fn run() {
         }
         Err(err) => {
           log::error!("{err}");
+          // 壳自身错误（非冻结码表）——前端按 message 渲染；code 仅作定位用
           let _ = app
             .handle()
             .emit(sidecar::SHELL_EVENT, sidecar::ShellEvent::Protocol {
-              code: "PROTOCOL_MISMATCH".into(),
+              code: "SIDECAR_LAUNCH_FAILED".into(),
               message: err,
               fatal: true,
             });
