@@ -1,0 +1,21 @@
+# golden 正例：文档 3.4 消息示例的机器可读镜像（13.2-2）。
+# 修改协议需先改母文档 3.4 并走变更记录；本文件与之双向对拍。
+{"type": "hello", "sidecar_version": "0.1.0", "protocol_version": "1.0", "t": 3, "engines": [{"name": "asr", "ready": false}, {"name": "tts", "ready": false}, {"name": "llm", "ready": false}]}
+{"type": "asr_partial", "session_id": "s-demo", "text": "今天有点累", "t": 1042}
+{"type": "asr_final", "session_id": "s-demo", "text": "今天有点累，陪我聊聊", "is_final": true, "t": 1187}
+{"type": "turn_complete", "session_id": "s-demo", "turn_seq": 7, "status": "SUCCESS", "timings": {"total_ms": 2431, "llm_first_token_ms": 692, "tts_first_audio_ms": 1180}}
+{"type": "turn_complete", "session_id": "s-demo", "turn_seq": 8, "status": "FAILED", "timings": {"total_ms": 512}}
+{"type": "turn_complete", "session_id": "s-demo", "turn_seq": 9, "status": "CANCELLED", "timings": {"total_ms": 88, "tts_first_audio_ms": 40}}
+{"type": "clone_progress", "session_id": "s-demo", "phase": "recording", "pct": 0, "t": 900}
+{"type": "clone_progress", "session_id": "s-demo", "phase": "training", "pct": 42, "t": 5120}
+{"type": "clone_progress", "session_id": "s-demo", "phase": "checking", "pct": 100, "t": 8000}
+{"type": "error", "session_id": "s-demo", "code": "CLONE_QUALITY_LOW", "message": "相似度低于阈值", "fatal": false, "t": 214}
+{"type": "error", "session_id": null, "code": "STORAGE_ERROR", "message": "数据目录不可写", "fatal": true, "t": 9}
+{"type": "state", "session_id": "s-demo", "state": "generating", "t": 68}
+{"type": "state", "session_id": null, "state": "booting", "t": 1}
+{"type": "control", "action": "interrupt", "session_id": "s-demo", "turn_seq": 7}
+{"type": "control", "action": "cancel_turn", "session_id": "s-demo"}
+{"type": "user_text", "session_id": "s-demo", "text": "在吗？"}
+{"type": "user_text", "session_id": "s2", "text": "带未来字段也能解析", "x_future": 1}
+{"type": "clone_start", "session_id": "s-demo", "sample_keys": ["clone:9a3f"]}
+{"type": "clone_cancel", "session_id": "s-demo"}

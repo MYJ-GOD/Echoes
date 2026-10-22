@@ -1,0 +1,13 @@
+# 13.2-1：schema 单一来源——TS 侧 src/lib/ipc_types.ts 由 datamodel-code-generator 生成；
+# CI 重新生成并与入库生成物对拍（git diff --exit-code），漂移即红。
+# 当前为占位：src/lib/ipc_types.ts 尚不存在（Tauri 壳目录随阶段 0 第一周开出，需 Rust 工具链）。
+name: schema-drift
+on: [pull_request]
+
+jobs:
+  guard:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 占位（阶段 0 接 datamodel-code-generator）
+        run: echo 'schema-drift 待接线：sidecar/echoes_sidecar/ipc/schema.py -> src/lib/ipc_types.ts（13.2-1）'

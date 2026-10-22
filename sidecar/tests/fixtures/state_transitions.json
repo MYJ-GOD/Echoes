@@ -1,0 +1,27 @@
+{
+  "说明": "文档 3.5 合法迁移表的机器可读镜像（13.2-4 产品口径）。修改需先改 docs/architecture.md 3.5 并走变更记录，本文件与其对拍。",
+  "legal": [
+    ["booting", "ready"],
+    ["booting", "error"],
+    ["error", "booting"],
+    ["ready", "generating"],
+    ["generating", "speaking"],
+    ["generating", "ready"],
+    ["speaking", "ready"],
+    ["generating", "generating"],
+    ["speaking", "generating"]
+  ],
+  "illegal": [
+    ["ready", "booting"],
+    ["ready", "error"],
+    ["generating", "booting"],
+    ["generating", "error"],
+    ["speaking", "booting"],
+    ["speaking", "error"],
+    ["error", "ready"],
+    ["error", "generating"],
+    ["error", "speaking"],
+    ["booting", "generating"],
+    ["booting", "speaking"]
+  ]
+}

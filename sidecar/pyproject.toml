@@ -1,0 +1,63 @@
+[project]
+name = "echoes-sidecar"
+version = "0.1.0"
+description = "Echoes 桌面版 sidecar：契约定义以 docs/architecture.md 为唯一来源"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.7,<3",
+  "websockets>=12,<15",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "import-linter>=2.0",
+]
+
+# ------------------------------ 工具链（母文档 §15） ------------------------------
+
+[tool.ruff]
+line-length = 100          # §15.3：ruff 100 列
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+# strict 边界 = §15.3 v1.4（engines 实现内部放宽但接口签名 strict；main/tests 不在边界内）
+files = [
+  "echoes_sidecar/core",
+  "echoes_sidecar/ipc",
+  "echoes_sidecar/transport",
+  "echoes_sidecar/audio",
+  "echoes_sidecar/session",
+  "echoes_sidecar/orchestration",
+  "echoes_sidecar/memory",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.importlinter]
+root_package = "echoes_sidecar"
+
+# §15.2 依赖图（v1.4 收口版）：上层只许向下；ipc 是全工程唯一 pydantic 层
+[[tool.importlinter.contracts]]
+name = "15.2 依赖分层（v1.4）"
+type = "layers"
+layers = [
+  "echoes_sidecar.main",
+  "echoes_sidecar.orchestration",
+  "echoes_sidecar.session",
+  "echoes_sidecar.engines | echoes_sidecar.memory",
+  "echoes_sidecar.audio",
+  "echoes_sidecar.transport",
+  "echoes_sidecar.ipc",
+  "echoes_sidecar.core",
+]

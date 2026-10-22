@@ -1,0 +1,12 @@
+# golden 反例：schema 必须拒绝的形态（13.2-2）。
+# 注意：未知「消息类型」由消费者按 3.4 忽略（仅追加兼容）；schema 侧对其拒绝以保持总表纯净。
+{"type": "turn_complete", "session_id": "s", "turn_seq": 1, "status": "PAUSED", "timings": {"total_ms": 1}}
+{"type": "state", "session_id": "s", "state": "listening", "t": 1}
+{"type": "clone_progress", "session_id": "s", "phase": "analyzing", "pct": 50, "t": 1}
+{"type": "error", "session_id": "s", "code": "CONTACT_SUPPORT", "message": "已废弃多租户码", "fatal": false, "t": 1}
+{"type": "error", "session_id": "s", "code": "CLONE_CANCELLED", "message": "缺 t 字段", "fatal": false}
+{"type": "hello", "sidecar_version": "0.1.0", "protocol_version": "2.0", "t": 0, "engines": []}
+{"type": "asr_final", "session_id": "s", "text": "缺少 t 字段"}
+{"type": "user_text", "session_id": "s"}
+{"type": "clone_start", "session_id": "s", "sample_keys": "clone:1"}
+{"type": "voice_delete", "session_id": "s"}
