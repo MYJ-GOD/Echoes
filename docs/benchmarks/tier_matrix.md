@@ -30,7 +30,7 @@
 | 档 | 组件 | 模型 | 占用 | 备注 |
 | --- | --- | --- | --- | --- |
 | 全档 | ASR | faster-whisper small（CPU int8） | RAM ~1GB 级（权重 461MB 下载+int8 缓存） | **第二周-4 装机确认（2026-10-22）**：faster-whisper 1.2.1/ctranslate2 4.8.3，small int8 CPU 路径 warmup+500ms 正弦冒烟全通；显存不入竞争（8GB 档 qwen3:8b 首候选）。真实语音转写延迟待壳侧 PTT 接入实测（第三周）；ASR 引擎产物回填 |
-| 全档 | TTS | CosyVoice2 | TBD | VRAM 大头（阶段 0 搬运后实测） | 
+| 全档 | TTS | CosyVoice2-0.5B（zero-shot/24kHz，fp16 LLM + ORT-CUDA） | VRAM 峰值 ~3.8GB（fp32+ORT-CUDA ~2.8GB） | **搬运冒烟实测（2026-10-22，4060 Laptop）**：TTFA 3.72s / RTF 1.33（fp32 对照 4.77s/1.53）；**RTF>1：不可连续流式跟播**；与 qwen3:8b 共存超 8GB 预算（~9.3GB）；0.5B 权重无内置 sft 音色（zero-shot 为默认面） |
 | 全档 | 嵌入 | bge-small-zh（默认）/ bge-m3（质量档） | ~100MB / TBD | ADR-006 已定 |
 
 ## 实测记录（T-8G：RTX 4060 Laptop 8GB，2026-10-22）
@@ -55,6 +55,31 @@
 - judge 单通道结果（judge=deepseek-flash 温度 0，2026-10-22）：首跑 qwen2.5 0.40 /
   8b-nothink 0.60 / 4b-nothink 0.62 / 云端自评 0.75；**二轮（v2 prompt）8b 0.80 /
   4b 0.70 / 2.5 0.57 —— 8b 过 0.7 门槛，本地默认成立（ADR-001 结论 1 更新）**。
+
+### TTS 通道首跑冒烟（CosyVoice2-0.5B，2026-10-22）
+
+环境：torch 2.7.1+cu126 / ORT-gpu 1.22.0 CUDA EP（1.31 为 CUDA13 build 与 cu126 错配已回退）/
+fp16 LLM / zero-shot（prompt=SAPI Huihui 16k wav 8 秒）/ vendored 上游锚
+（cosyvoice@074ca6d + matcha@dd9105b3，详见 ADR-014）。
+
+| 配置 | TTFA | 总耗时 | 音频时长 | RTF | VRAM 峰值 |
+| --- | --- | --- | --- | --- | --- |
+| fp32 + ORT-CPU | 6.74s | 14.06s | 5.72s | 2.46 | 2763 MiB |
+| fp16 + ORT-CPU | 6.29s | 12.73s | 6.04s | 2.11 | 3818 MiB |
+| fp32 + ORT-CUDA | 4.77s | 10.89s | 7.12s | 1.53 | 2783 MiB |
+| **fp16 + ORT-CUDA（推荐）** | **3.72s** | 7.63s | 5.76s | **1.33** | 3817 MiB |
+
+- 实例化载入（到可推理）：fp32 ~14-19s / fp16 ~15.7s（llm.pt 1.9GB 进 CUDA）。
+- **RTF>1 结论：4060 Laptop 无法连续流式跟播**（每 1s 语音约需 1.33s 合成）——流式逐句
+  合成会有句间断流；三跳预算里 TTS 段的「≤150ms chunk 产出」在本档位不可达，音频帧路径
+  （3.4）不变，但播报口径须按「整句产出、按句播」设计（阶段 0 第三/四周验收点）。
+- **8G 档共存硬冲突**：fp16 TTS 3.8GB + qwen3:8b ~5.5GB ≈ 9.3GB > 8GB。候选路径：
+  ① qwen3:4b（~2.5GB，质量 0.70）+ TTS fp16 ≈ 6.3GB 可共存——**8G 档最可能默认形态**；
+  ② Ollama keep_alive=0 轮换走 8b——每轮冷载 29s，体验不可接收；
+  ③ TTS 回 fp32（2.8GB）+ 8b ≈ 8.3GB 仍超。**最终 8G 档 LLM 归属待三跳实测与 ADR-001 复核**。
+- 离线闭环：wetext 首跑联网拉 fst 数据进 modelscope hub cache（`pengzhendong/wetext`）——
+  一次性预取后可离线，部署面由 7.3 模型管理器 bootstrap 扩面（ADR-014 修订）。
+- wav 样本落盘 `scripts/_smoke_out/`（不入库，gitignore）。
 
 ## 填写协议
 

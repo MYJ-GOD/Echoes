@@ -44,3 +44,9 @@ AST 全包扫描 + 消费子树精扫（数据点）：
 4. **tiktoken 补声明（==0.14.0）**：上游 requirements 漏声明而 `cosyvoice/tokenizer` 代码必需。
 5. **whisper build env 补丁**：uv `tool.uv.extra-build-dependencies: openai-whisper = ["setuptools<81"]`——setuptools ≥81 移除 pkg_resources 模块，whisper setup.py 顶层 import 它。
 6. **uv 状态**：`uv.lock`（104 packages）随仓库入库；venv = `sidecar/.venv`（直引 miniconda base 3.13.5）+ `.python-version = 3.13`；默认 index 走国内镜像（UV_DEFAULT_INDEX 注入），torch 单独经 `tool.uv.sources` 显式映射 pytorch-cu126 官方源。
+
+2026-10-22 冒烟轮补充修订（首跑实测揭出）：
+
+7. **onnxruntime CPU → onnxruntime-gpu==1.22.0**：CPU 版无 CUDA EP，flow/tokenizer 面 RTF 卡 2.1-2.5；1.31.0 是 CUDA 13 build（依赖 cublasLt64_13.dll），与 torch 2.7.1+cu126 生态错配必然静默 fallback；1.22.0 为 CUDA 12 era 终版，经 `os.add_dll_directory(torch/lib)` 注入 torch 自带 cudnn/cublas DLL 后 CUDA EP 激活。**该 DLL 注入是 sidecar boot 的必备动作**（已入 gpu_smoke.py，引擎落位时固化）。
+8. **依赖子集补缺口（matcha 包级触发链侦察盲区）**：`matcha.utils.__init__` 的聚合 import 以及 `cosyvoice2.yaml` 的 `!name` 例化面把以下训练面依赖带回运行时链——`hydra-core==1.3.2`、`lightning==2.2.4`（pytorch-lightning 2.6.6 随 wheel）、`gdown==5.1.0`、`wget==3.2`、`matplotlib`（3.7.5 无 cp313 轮子，升最新）、`librosa==0.10.2`、`pyarrow==18.1.0`、`pyworld`（0.3.4 无 cp313，升 **0.3.5**）——另 `scipy==1.18.1`（hifigan 顶层）、`setuptools<81`（运行时需 pkg_resources，uv venv 默认无 setuptools 且 ≥81 已剥离该模块）。
+9. **wetext fst 数据的首次联网面**：wetext 首跑经 modelscope SDK 拉取 fst 正则化数据（`pengzhendong/wetext`，落 `~/.cache/modelscope/hub/`）——一次性预取后离线可用；**部署面必须由 7.3 模型管理器 bootstrap 预取**（离线红线 ①：首次联网缺口在，运行期不能触发）。

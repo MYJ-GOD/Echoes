@@ -14,7 +14,7 @@ dependencies = [
   # ---- CosyVoice2 inference 依赖子集（ADR-014 决策 4；== 锚取上游 requirements） ----
   "torch==2.7.1",                # cu126 轮子；冒烟失败回上游锚 2.3.1+cu121 走 12.2
   "torchaudio==2.7.1",
-  "onnxruntime==1.31.0",         # 上游锚 1.18.0 无 cp313 轮子，升锁（ADR-014 修订）
+  # 上游锚 1.18.0 无 cp313 轮子，升锁（ADR-014 修订）
   "transformers==4.51.3",
   "conformer==0.3.2",
   "diffusers==0.29.0",
@@ -27,6 +27,17 @@ dependencies = [
   "openai-whisper==20250625",   # 上游锚 20231117 的 setup.py 在 py3.13（PEP 667 locals 快照）下 build 必炸，升锁（ADR-014 修订）
   "soundfile==0.12.1",
   "tiktoken==0.14.0",            # 上游 requirements 漏声明而代码必需（冒烟经过确认）
+  "scipy>=1.18.1",
+  "hydra-core==1.3.2",
+  "lightning==2.2.4",
+  "setuptools<81",
+  "gdown==5.1.0",
+  "wget==3.2",
+  "matplotlib>=3.11.2",
+  "librosa==0.10.2",
+  "pyarrow==18.1.0",
+  "pyworld==0.3.5",
+  "onnxruntime-gpu==1.22.0",
 ]
 
 [project.optional-dependencies]
@@ -113,6 +124,10 @@ forbidden_modules = [
 # （setuptools 新版剥离 pkg_resources），build 时补装
 [tool.uv.extra-build-dependencies]
 openai-whisper = ["setuptools<81"]
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
 
 
 # torch/torchaudio 走 PyTorch 官方 cu126 轮子（15.1「CUDA 12.6 轮子 == 锁」），
