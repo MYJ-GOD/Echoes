@@ -21,3 +21,4 @@ models/*
 # 会话脚手架与本地索引
 .superpowers/
 .codegraph/
+tmp/
