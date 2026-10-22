@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 import pytest
 
 from echoes_sidecar.transport.base import Transport
-from tests.conftest import assert_transport_suite, make_stdio_pair
+from tests.conftest import assert_transport_suite, make_local_ws_pair, make_stdio_pair
 
 TransportFactory = Callable[[], Awaitable[tuple[Transport, Transport]]]
 
@@ -19,9 +19,14 @@ async def _stdio_pair() -> tuple[Transport, Transport]:
     return make_stdio_pair()
 
 
+async def _local_ws_pair() -> tuple[Transport, Transport]:
+    return await make_local_ws_pair()
+
+
 FACTORIES: dict[str, TransportFactory] = {
     # 13.2-3：Stdio 与 LocalWS 必须过同一套用例；WS 实现随阶段 0 第二周接入（§12 步骤 4）
     "stdio": _stdio_pair,
+    "local_ws": _local_ws_pair,
 }
 
 

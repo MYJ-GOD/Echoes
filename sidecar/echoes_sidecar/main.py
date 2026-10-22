@@ -19,7 +19,9 @@ from typing import Any
 
 from echoes_sidecar import __version__
 from echoes_sidecar.core.state_machine import AppState, StateMachine, required_engines_ready
+from echoes_sidecar.engines.asr.base import ASREngine
 from echoes_sidecar.engines.asr.mock import MockASREngine
+from echoes_sidecar.engines.asr.whisper import WhisperASREngine
 from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.llm.ollama import OllamaLLMProvider
@@ -42,6 +44,7 @@ from echoes_sidecar.orchestration.text_clean import clean_for_tts
 from echoes_sidecar.session.manager import SessionManager
 from echoes_sidecar.session.session import Persona, Session
 from echoes_sidecar.transport.base import Transport
+from echoes_sidecar.transport.local_ws import LocalWebSocketTransport
 from echoes_sidecar.transport.stdio import StdioTransport
 
 
@@ -166,7 +169,8 @@ async def _assemble_llm(argv: Sequence[str] | None) -> tuple[LLMProvider, bool]:
     parser.add_argument(
         "--no-think", action="store_true", help="qwen3 系关 thinking（ADR-001 硬前提）"
     )
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    # 组合根可独立组装：各装配器只认领自己的 flag（parse_known_args // 阶段 0 简易拼装）
+    args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
 
     if args.llm == "mock":
         return MockLLMProvider(), True
@@ -184,37 +188,118 @@ async def _assemble_llm(argv: Sequence[str] | None) -> tuple[LLMProvider, bool]:
     return provider, ready
 
 
+def _assemble_asr(argv: Sequence[str] | None) -> tuple[ASREngine, bool]:
+    """组合根 ASR 装配（3.2）：mock 默认；whisper 真路（CPU int8，第二周-4）。
+
+    whisper ready 语义（分级就绪，3.4 v1.4）：首发 ready=False，warmup 完成的
+    后台任务置 True 并重发 hello——重模型加载不阻塞 booting 其余装配；
+    权重缺失时开始下载（7.3 运行时下载边界；镜像 fallback 见 engines.asr.whisper）。
+    """
+    parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
+    parser.add_argument("--asr", choices=["mock", "whisper"], default="mock")
+    parser.add_argument("--asr-model", default="small")
+    args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
+
+    if args.asr == "mock":
+        return MockASREngine(), True
+
+    engine: WhisperASREngine = WhisperASREngine(
+        model_size=args.asr_model, device="cpu", compute_type="int8"
+    )
+    print(
+        f"[sidecar] WhisperASREngine(model={args.asr_model}, CPU int8): 后台 warmup 中",
+        file=sys.stderr,
+    )
+    return engine, False
+
+
+async def _assemble_ws(argv: Sequence[str] | None) -> LocalWebSocketTransport | None:
+    """组合根 WS 音频面装配：off 默认（阶段 0 壳侧接线在第三周拨）；auto 起 server。"""
+    parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
+    parser.add_argument("--ws", choices=["off", "auto"], default="off")
+    args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
+    if args.ws == "off":
+        return None
+
+    transport = LocalWebSocketTransport()
+    port = await transport.start()
+    print(f"[sidecar] WS 音频面监听 ws://127.0.0.1:{port}（壳侧连接即收帧）", file=sys.stderr)
+    return transport
+
+
+async def _gate_asr_ready(
+    transport: Transport,
+    machine: StateMachine,
+    engine: WhisperASREngine,
+    engine_states: list[EngineState],
+    t0: float,
+) -> None:
+    """分级就绪（3.4 v1.4）：warmup 完成 → asr ready=True → 3.5 gate → 重发 hello/state。"""
+    try:
+        await engine.warmup()
+    except Exception as exc:  # noqa: BLE001  权重下载失败等：报错不降级（保持 booting）
+        print(f"[sidecar] ASR warmup 失败: {exc}", file=sys.stderr)
+        return
+    for state in engine_states:
+        if state.name == "asr":
+            state.ready = True
+    if (
+        required_engines_ready((s.name, s.ready) for s in engine_states)
+        and machine.state is not AppState.READY
+    ):
+        machine.transition(AppState.READY)
+    await transport.send(_hello_payload(engine_states, _now_ms(t0)))
+    await transport.send(_state_payload(machine, None, _now_ms(t0)))
+
+
+def _hello_payload(engine_states: list[EngineState], t: int) -> dict[str, Any]:
+    """3.4 hello（v1.4 schema）：首发与分级就绪重发共用同一组装点。"""
+    return HelloMsg(sidecar_version=__version__, t=t, engines=engine_states).model_dump(
+        mode="json"
+    )
+
+
 async def serve(argv: Sequence[str] | None = None) -> None:
     t0 = time.perf_counter()
     session = _default_session()
     SessionManager().create(session)  # 4.6：阶段 0 单会话，按 session_id 查找写
 
-    # 组合根装配清单（3.2）：阶段 0 换真实引擎。asr 在骨架期不走语音路径（WS 未接），
-    # 但必须装配且 hello 声明就绪（🔴-2 修复：3.5 必需引擎集合 = {asr, llm}）。
+    # 组合根装配清单（3.2）：阶段 0 换真实引擎。asr mock = 骨架全绿链；whisper = 真路
+    # 分级就绪（warmup 后台任务完成后重发 hello，3.4 v1.4）。
     llm_provider, llm_ready = await _assemble_llm(argv)
+    asr_engine, asr_ready = _assemble_asr(argv)
+    ws_transport = await _assemble_ws(argv)
     engines_runtime: dict[str, Any] = {
-        "asr": MockASREngine(),
+        "asr": asr_engine,
         "tts": MockTTSEngine(),
         "llm": llm_provider,
     }
+    def _ready_of(name: str) -> bool:
+        if name == "llm":
+            return llm_ready
+        if name == "asr":
+            return asr_ready
+        return True  # tts mock 恒就绪（真 TTS 引擎接入时同 asr 分级就绪模式）
+
     engine_states: list[EngineState] = [
-        EngineState(name=name, ready=(name != "llm" or llm_ready)) for name in engines_runtime
+        EngineState(name=name, ready=_ready_of(name)) for name in engines_runtime
     ]
 
     transport = StdioTransport(_ThreadedReader(), _StdOutWriter())
     machine = StateMachine()
 
     # 3.4 握手：第一行 hello；就绪_changes 时重发 hello（分级就绪载体，3.4 v1.4）
-    await transport.send(
-        HelloMsg(sidecar_version=__version__, t=_now_ms(t0), engines=engine_states)
-        .model_dump(mode="json")
-    )
+    await transport.send(_hello_payload(engine_states, _now_ms(t0)))
     await transport.send(_state_payload(machine, None, _now_ms(t0)))  # booting
     if required_engines_ready((s.name, s.ready) for s in engine_states):
         machine.transition(AppState.READY)
     else:
         print("[sidecar] 必需引擎(asr/llm)未就绪：停在 booting（3.5）", file=sys.stderr)
     await transport.send(_state_payload(machine, None, _now_ms(t0)))
+    if isinstance(asr_engine, WhisperASREngine):
+        asyncio.create_task(
+            _gate_asr_ready(transport, machine, asr_engine, engine_states, t0)
+        )
 
     try:
         while (raw := await transport.recv()) is not None:
@@ -225,6 +310,14 @@ async def serve(argv: Sequence[str] | None = None) -> None:
                 continue
 
             if isinstance(msg, UserTextMsg):
+                if machine.state is not AppState.READY:
+                    # 3.5：booting 期用户请求不可触发 turn（whisper 分级就绪形态下的
+                    # 真实语义缺口——mock 全绿链未覆盖；忽略而非非法迁移崩进程）
+                    print(
+                        f"[sidecar] 状态 {machine.state.value} 收到 user_text，忽略（3.5）",
+                        file=sys.stderr,
+                    )
+                    continue
                 await _mock_turn(
                     transport,
                     machine,
@@ -251,6 +344,8 @@ async def serve(argv: Sequence[str] | None = None) -> None:
                     file=sys.stderr,
                 )
     finally:
+        if ws_transport is not None:
+            await ws_transport.close()
         await transport.close()
 
 

@@ -5,8 +5,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+from typing import Any
+
+import pytest
 
 from echoes_sidecar.transport.base import Transport
+from echoes_sidecar.transport.local_ws import LocalWebSocketTransport
 from echoes_sidecar.transport.stdio import StdioTransport
 
 
@@ -40,6 +46,53 @@ def make_stdio_pair() -> tuple[StdioTransport, StdioTransport]:
     writer_a = _MemWriter(reader_b)  # A 的发送端 → B 的接收端
     writer_b = _MemWriter(reader_a)  # B 的发送端 → A 的接收端
     return StdioTransport(reader_a, writer_a), StdioTransport(reader_b, writer_b)
+
+
+class _WsPeerTransport(Transport):
+    """LocalWS 一致性套件的客户端 peer：真实 ws client 的 Transport 鸭子实现。"""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    async def recv(self) -> dict[str, Any] | None:
+        try:
+            raw = await self._conn.recv()
+        except Exception:  # ConnectionClosed → EOF 语义（4.1）
+            return None
+        return json.loads(raw)
+
+    async def send(self, msg: dict[str, Any]) -> None:
+        await self._conn.send(json.dumps(msg, ensure_ascii=False))
+
+    async def close(self) -> None:
+        with contextlib.suppress(Exception):
+            await self._conn.close()
+
+
+async def make_local_ws_pair() -> tuple[LocalWebSocketTransport, Transport]:
+    """LocalWS pair：sidecar 侧真实 server + 客户端 peer（127.0.0.1 动态端口）。"""
+    import websockets.asyncio.client
+
+    t_sidecar = LocalWebSocketTransport()
+    port = await t_sidecar.start()
+    conn = await websockets.asyncio.client.connect(f"ws://127.0.0.1:{port}")
+    return t_sidecar, _WsPeerTransport(conn)
+
+
+@pytest.fixture
+async def test_server_pair() -> tuple[LocalWebSocketTransport, Any]:
+    """音频面测试用：server + 原始 client 帧连接（不受 Transport 映射限制）。"""
+    import websockets.asyncio.client
+
+    t_sidecar = LocalWebSocketTransport()
+    port = await t_sidecar.start()
+    conn = await websockets.asyncio.client.connect(f"ws://127.0.0.1:{port}")
+    try:
+        yield t_sidecar, conn
+    finally:
+        with contextlib.suppress(Exception):
+            await conn.close()
+        await t_sidecar.close()
 
 
 async def assert_transport_suite(t_sidecar: Transport, t_peer: Transport) -> None:

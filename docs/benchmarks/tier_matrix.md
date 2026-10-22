@@ -29,8 +29,8 @@
 
 | 档 | 组件 | 模型 | 占用 | 备注 |
 | --- | --- | --- | --- | --- |
-| 全档 | ASR | faster-whisper（base/small 级按档） | TBD | CPU 路径可跑（阶段 0 接入） |
-| 全档 | TTS | CosyVoice2 | TBD | VRAM 大头（阶段 0 搬运后实测） |
+| 全档 | ASR | faster-whisper small（CPU int8） | RAM ~1GB 级（权重 461MB 下载+int8 缓存） | **第二周-4 装机确认（2026-10-22）**：faster-whisper 1.2.1/ctranslate2 4.8.3，small int8 CPU 路径 warmup+500ms 正弦冒烟全通；显存不入竞争（8GB 档 qwen3:8b 首候选）。真实语音转写延迟待壳侧 PTT 接入实测（第三周）；ASR 引擎产物回填 |
+| 全档 | TTS | CosyVoice2 | TBD | VRAM 大头（阶段 0 搬运后实测） | 
 | 全档 | 嵌入 | bge-small-zh（默认）/ bge-m3（质量档） | ~100MB / TBD | ADR-006 已定 |
 
 ## 实测记录（T-8G：RTX 4060 Laptop 8GB，2026-10-22）
