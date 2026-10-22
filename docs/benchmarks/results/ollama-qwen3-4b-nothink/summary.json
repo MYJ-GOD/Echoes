@@ -1,0 +1,9 @@
+{
+  "n": 20,
+  "mean_hit_ratio": 0.6167,
+  "p50_first_token_ms": 655.5,
+  "p50_tok_s": 69.875,
+  "judge_n": 20,
+  "human_n": 0,
+  "divergences": []
+}

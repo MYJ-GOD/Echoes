@@ -22,7 +22,7 @@
 | T-8G  | qwen3:4b think:false   | ~2.5GB | 内建 4bit | 0.66s | 69.9 | 可行-待质量证据 |
 | T-12G | qwen3:8b q8/Q5    | TBD | TBD | TBD | TBD | TBD |
 | T-24G | qwen3:8b q16 + 长上下文 | TBD | none/q8 | TBD | TBD | TBD |
-| T-24G | 云端 DeepSeek 对照 | n/a | n/a | 实测网络 | n/a | 参照系 |
+| T-24G | 云端 deepseek-flash 对照 | n/a | n/a | 2.27s（网络） | 61.5（字符/s 近似） | 参照系；语音场景延迟不可用，**是唯一守住 P03 安全红线的路线** |
 | T-CPU | qwen2.5:7b q4 CPU | RAM | q4_K_M | TBD | TBD | TBD |
 
 ## 补充行（其余引擎，供 13.1 与 ADR-011 体积核算）
@@ -51,6 +51,10 @@
   qwen3:8b 列模板、qwen2.5 说教后仍给借口清单 —— 安全边界靠现有人设提示不可达，需要
   prompt 工程正式化（阶段 0 落 demonstration + 输出格式约束 + 安全条款）。
 - 输出格式：回复普遍带 markdown/emoji/列表 —— **TTS 前文本清洗是产品刚需求**（sidecar 层职责）。
+
+- judge 单通道结果（judge=deepseek-flash 温度 0，2026-10-22）：qwen2.5 0.40 /
+  8b-nothink 0.60 / 4b-nothink 0.62 / 云端自评 0.75 —— 当前 prompt 形态下本地未达
+  默认门槛（≥0.7），二轮复测条件见 ADR-001 结论 2。
 
 ## 填写协议
 

@@ -12,14 +12,17 @@
 | `results/<provider-model>/` | 每路模型一轮的 replies / judge_scores / human_scores / summary |
 | `tier_matrix.md` | 档位×模型矩阵（实测后定稿，ADR-011 输入） |
 
-## 双通道评测协议（单人可执行）
+## 评测协议（judge 单通道，人工评审取消）
+
+> 口径变更（2026-10-22 用户拍板）：原双通道（judge + 本人 1-5）简化为 **judge 单通道**。
+> 主指标 = judge 的要点命中率；judge(1-5) 辅记。分歧仲裁流程不再执行；
+> human_scores.csv 模板留存备用（report 仅在文件存在且有分数时输出双通道分歧表）。
 
 1. **被测通道**：`bench_llm.py run` → `replies.jsonl`（附首 token 延迟、tok/s）。
 2. **judge 通道**：`bench_llm.py judge` —— 独立强模型按要点清单打分（温度 0，
    prompt 见 judge_prompt.md）。主指标 = **要点命中率**。
-3. **人工通道**：`bench_llm.py human` 生成模板 → 本人逐轮 1-5 分。
-4. **仲裁**：`bench_llm.py report` 输出两通道分歧（|Δ| ≥2 的轮次）→ 本人终审，
-   仲裁结果直接改写 human_scores.csv 并在 notes 标注「仲裁」。
+3. **汇总**：`bench_llm.py report` → summary.json（命中率 / P50 延迟 / 吞吐 / 解析失败数）。
+   注意：judge == 被测云端路时（deepseek-flash 自评）需标注同源偏差。
 
 ## 被测三路（文档指定）
 

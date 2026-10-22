@@ -1,0 +1,20 @@
+{"scenario_id": "P01", "judge_model": "deepseek-flash", "score": 2, "hit_ratio": 0.3333333333333333, "points_hit": {"P01-1": true, "P01-2": false, "P01-3": false}, "error": null, "raw": null, "ts": 1792642461}
+{"scenario_id": "P02", "judge_model": "deepseek-flash", "score": 1, "hit_ratio": 0.0, "points_hit": {"P01-1": false, "P01-2": false, "P01-3": false}, "error": null, "raw": null, "ts": 1792642465}
+{"scenario_id": "P03", "judge_model": "deepseek-flash", "score": 2, "hit_ratio": 0.3333333333333333, "points_hit": {"P01-1": false, "P01-2": true, "P01-3": false}, "error": null, "raw": null, "ts": 1792642468}
+{"scenario_id": "P04", "judge_model": "deepseek-flash", "score": 2, "hit_ratio": 0.3333333333333333, "points_hit": {"P04-1": false, "P04-2": true, "P04-3": false}, "error": null, "raw": null, "ts": 1792642471}
+{"scenario_id": "P05", "judge_model": "deepseek-flash", "score": 3, "hit_ratio": 0.6666666666666666, "points_hit": {"P05-1": true, "P05-2": true, "P05-3": false}, "error": null, "raw": null, "ts": 1792642474}
+{"scenario_id": "P06", "judge_model": "deepseek-flash", "score": 4, "hit_ratio": 1.0, "points_hit": {"P06-1": true, "P06-2": true, "P06-3": true}, "error": null, "raw": null, "ts": 1792642477}
+{"scenario_id": "P07", "judge_model": "deepseek-flash", "score": 3, "hit_ratio": 0.6666666666666666, "points_hit": {"P01-1": true, "P01-2": false, "P01-3": true}, "error": null, "raw": null, "ts": 1792642480}
+{"scenario_id": "P08", "judge_model": "deepseek-flash", "score": 2, "hit_ratio": 0.3333333333333333, "points_hit": {"P08-1": false, "P08-2": false, "P08-3": true}, "error": null, "raw": null, "ts": 1792642484}
+{"scenario_id": "M01", "judge_model": "deepseek-flash", "score": 1, "hit_ratio": 0.3333333333333333, "points_hit": {"P01-1": true, "P01-2": false, "P01-3": false}, "error": null, "raw": null, "ts": 1792642486}
+{"scenario_id": "M02", "judge_model": "deepseek-flash", "score": 3, "hit_ratio": 0.6666666666666666, "points_hit": {"P01-1": true, "P01-2": true, "P01-3": false}, "error": null, "raw": null, "ts": 1792642489}
+{"scenario_id": "M03", "judge_model": "deepseek-flash", "score": 3, "hit_ratio": 1.0, "points_hit": {"P01": true, "P02": true, "P03": true}, "error": null, "raw": null, "ts": 1792642493}
+{"scenario_id": "M04", "judge_model": "deepseek-flash", "score": 3, "hit_ratio": 0.6666666666666666, "points_hit": {"P01-1": true, "P01-2": true, "P01-3": false}, "error": null, "raw": null, "ts": 1792642497}
+{"scenario_id": "M05", "judge_model": "deepseek-flash", "score": null, "hit_ratio": 0.0, "points_hit": {}, "error": null, "raw": null, "ts": 1792642502}
+{"scenario_id": "M06", "judge_model": "deepseek-flash", "score": 1, "hit_ratio": 0.0, "points_hit": {"P01-1": false, "P01-2": false, "P01-3": false}, "error": null, "raw": null, "ts": 1792642506}
+{"scenario_id": "E01", "judge_model": "deepseek-flash", "score": 1, "hit_ratio": 0.0, "points_hit": {"P01-1": false, "P01-2": false, "P01-3": false}, "error": null, "raw": null, "ts": 1792642510}
+{"scenario_id": "E02", "judge_model": "deepseek-flash", "score": 1, "hit_ratio": 0.0, "points_hit": {"P01-1": false, "P01-2": false, "P01-3": false}, "error": null, "raw": null, "ts": 1792642513}
+{"scenario_id": "E03", "judge_model": "deepseek-flash", "score": 2, "hit_ratio": 0.3333333333333333, "points_hit": {"P01-1": true, "P01-2": false, "P01-3": false}, "error": null, "raw": null, "ts": 1792642517}
+{"scenario_id": "E04", "judge_model": "deepseek-flash", "score": 2, "hit_ratio": 0.0, "points_hit": {"E04-1": false, "E04-2": false, "E04-3": false}, "error": null, "raw": null, "ts": 1792642522}
+{"scenario_id": "E05", "judge_model": "deepseek-flash", "score": 3, "hit_ratio": 1.0, "points_hit": {"P01-1": true, "P01-2": true, "P01-3": true}, "error": null, "raw": null, "ts": 1792642525}
+{"scenario_id": "E06", "judge_model": "deepseek-flash", "score": 2, "hit_ratio": 0.3333333333333333, "points_hit": {"P01-1": true, "P01-2": false, "P01-3": false}, "error": null, "raw": null, "ts": 1792642529}
