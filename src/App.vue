@@ -85,6 +85,30 @@ function handleFrame(frame: SidecarFrame): void {
   }
 }
 
+// 壳侧麦克风采集自检（文档 12.3 首周 · 风险 10 最小验证面）：
+// getUserMedia 拿到轨道即可声明权限/设备可见；48k→16k 重采样与 WS 推送为后续周。
+const micStatus = ref("");
+
+async function micProbe(): Promise<void> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    micStatus.value = "⚠ MIC_NOT_AVAILABLE：WebView 无 getUserMedia";
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const track = stream.getAudioTracks()[0];
+    const settings = track.getSettings();
+    micStatus.value = `✅ ${track.label.slice(0, 36)} @ ${settings.sampleRate ?? "?"}Hz`;
+    stream.getTracks().forEach((t) => t.stop());
+  } catch (err) {
+    const name = (err as DOMException).name;
+    micStatus.value =
+      name === "NotFoundError"
+        ? "⚠ MIC_NOT_AVAILABLE：未检测到麦克风"
+        : `⚠ ${name}：${(err as Error).message}`;
+  }
+}
+
 async function send(): Promise<void> {
   const text = input.value.trim();
   if (!text || busy.value) return;
@@ -119,6 +143,7 @@ async function send(): Promise<void> {
       <input v-model="input" type="text" placeholder="输入消息…" @keyup.enter="send" />
       <button :disabled="busy" @click="send">发送</button>
       <button class="ptt" disabled title="阶段 0 接入麦克风采集">按住说话</button>
+      <button class="mic" @click="micProbe">{{ micStatus || "麦克风自检" }}</button>
     </footer>
   </main>
 </template>
@@ -209,7 +234,15 @@ footer button {
 footer button:disabled {
   opacity: 0.4;
 }
-footer .ptt {
+footer .ptt,
+footer .mic {
   background: #36343b;
+}
+footer .mic {
+  font-size: 12px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
