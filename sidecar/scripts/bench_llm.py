@@ -104,7 +104,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     model = args.model or ("mock" if args.provider == "mock" else None)
     if not model:
         raise SystemExit("run 需要 --model")
-    out_dir = RESULTS_ROOT / (_slug(args.provider, model) + ("-nothink" if args.no_think else ""))
+    out_dir = RESULTS_ROOT / (
+        _slug(args.provider, model)
+        + "".join(
+            f"-{t}" for t in (args.tag, "nothink" if args.no_think else "") if t
+        )
+    )
     provider = _make_provider(args.provider, model, args.base_url, no_think=args.no_think)
     records = asyncio.run(
         run_scenarios(provider, data, model=model, out_path=out_dir / "replies.jsonl")
@@ -205,6 +210,7 @@ def main() -> int:
     run.add_argument("--provider", choices=["mock", "ollama", "openai"], required=True)
     run.add_argument("--model", default=None)
     run.add_argument("--base-url", default=None)
+    run.add_argument("--tag", default="", help="轮次标（复测轮目录后缀，如 v2）")
     run.add_argument("--no-think", action="store_true", help="关闭 thinking（语音场景口径）")
 
     judge = sub.add_parser("judge")

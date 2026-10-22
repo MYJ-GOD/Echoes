@@ -30,13 +30,22 @@ async def run_scenarios(
     model: str,
     out_path: Path,
 ) -> list[dict[str, Any]]:
-    """对全部场景跑被测 provider，一行一轮写 replies.jsonl，返回记录列表。"""
+    """对全部场景跑被测 provider，一行一轮写 replies.jsonl，返回记录列表。
+
+    二轮复测口径（ADR-001）：每轮 messages 前插题集 persona_system_prompt
+    （与产品单一来源常量对拍，tests/test_bench_scenarios 锁定）——
+    首跑无 system 为裸跑基线，二轮即「prompt 工程层」自变量。
+    """
+    system_prompt = scenarios.get("persona_system_prompt")
     records: list[dict[str, Any]] = []
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
         for scenario in scenarios["scenarios"]:
+            context = list(scenario.get("context", []))
+            if system_prompt:
+                context = [{"role": "system", "content": system_prompt}, *context]
             result = await provider.chat(
-                scenario.get("context", []),
+                context,
                 scenario["user"],
                 model=model,
             )

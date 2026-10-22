@@ -1,0 +1,7 @@
+{
+  "n": 20,
+  "mean_hit_ratio": 0.8,
+  "p50_first_token_ms": 264.5,
+  "p50_tok_s": 44.025,
+  "judge_n": 20
+}

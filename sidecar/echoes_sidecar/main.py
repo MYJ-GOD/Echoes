@@ -23,6 +23,7 @@ from echoes_sidecar.engines.asr.mock import MockASREngine
 from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.llm.ollama import OllamaLLMProvider
+from echoes_sidecar.engines.llm.persona import PERSONA_SYSTEM_PROMPT
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
 from echoes_sidecar.ipc import (
     AssistantTextMsg,
@@ -37,6 +38,7 @@ from echoes_sidecar.ipc import (
     UserTextMsg,
     parse_obj,
 )
+from echoes_sidecar.orchestration.text_clean import clean_for_tts
 from echoes_sidecar.session.manager import SessionManager
 from echoes_sidecar.session.session import Persona, Session
 from echoes_sidecar.transport.base import Transport
@@ -79,12 +81,12 @@ def _now_ms(t0: float) -> int:
 
 
 def _default_session() -> Session:
-    """阶段 0 固定 default 人设/会话（4.6/5.1）。"""
+    """阶段 0 固定 default 人设/会话（4.6/5.1）；prompt 单一来源 persona.py（v2）。"""
     now = time.time()
     persona = Persona(
         id="default",
         name="默认人设",
-        system_prompt="你是 Echoes，一个温柔的语音陪伴。简短回复、记得用户说过的事实。",
+        system_prompt=PERSONA_SYSTEM_PROMPT,
         created_at=now,
         updated_at=now,
     )
@@ -134,8 +136,9 @@ async def _mock_turn(
     await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
 
     voice_id = session.voice_id or "builtin:default"  # 2.5 未克隆绑定内置音色
-    async for _chunk in tts.synthesize(reply, voice_id):
-        pass  # 音频经 WS 出壳侧播放（3.4）——阶段 0 第二周接线；骨架只走通消息面
+    speakable = clean_for_tts(reply)  # 5.2：音频吃清洗后文本；assistant_text 帧保持原样
+    async for _chunk in tts.synthesize(speakable, voice_id):
+        pass  # 音频经 WS 出壳侧播放（3.4）——阶段 0 第二周尾部接线；骨架只走通消息面
 
     session.turn_seq += 1
     await transport.send(
@@ -158,7 +161,8 @@ async def _assemble_llm(argv: Sequence[str] | None) -> tuple[LLMProvider, bool]:
     """
     parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
     parser.add_argument("--llm", choices=["mock", "ollama"], default="mock")
-    parser.add_argument("--model", default="qwen2.5:7b-instruct")
+    # ADR-001 二轮判定：T-8G 本地默认首候选 qwen3:8b(no-think, 0.80)
+    parser.add_argument("--model", default="qwen3:8b")
     parser.add_argument(
         "--no-think", action="store_true", help="qwen3 系关 thinking（ADR-001 硬前提）"
     )

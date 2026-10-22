@@ -52,9 +52,9 @@
   prompt 工程正式化（阶段 0 落 demonstration + 输出格式约束 + 安全条款）。
 - 输出格式：回复普遍带 markdown/emoji/列表 —— **TTS 前文本清洗是产品刚需求**（sidecar 层职责）。
 
-- judge 单通道结果（judge=deepseek-flash 温度 0，2026-10-22）：qwen2.5 0.40 /
-  8b-nothink 0.60 / 4b-nothink 0.62 / 云端自评 0.75 —— 当前 prompt 形态下本地未达
-  默认门槛（≥0.7），二轮复测条件见 ADR-001 结论 2。
+- judge 单通道结果（judge=deepseek-flash 温度 0，2026-10-22）：首跑 qwen2.5 0.40 /
+  8b-nothink 0.60 / 4b-nothink 0.62 / 云端自评 0.75；**二轮（v2 prompt）8b 0.80 /
+  4b 0.70 / 2.5 0.57 —— 8b 过 0.7 门槛，本地默认成立（ADR-001 结论 1 更新）**。
 
 ## 填写协议
 

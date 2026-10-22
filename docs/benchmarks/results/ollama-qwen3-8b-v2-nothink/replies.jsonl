@@ -1,0 +1,20 @@
+{"scenario_id": "P01", "category": "persona_adherence", "model": "qwen3:8b", "reply": "刚煮了杯热牛奶，你慢慢喝，我在这儿陪着你。", "first_token_ms": 36083, "tok_s": 43.21, "ts": 1792645871}
+{"scenario_id": "P02", "category": "persona_adherence", "model": "qwen3:8b", "reply": "我就是 Echoes，你语音里的朋友。不用问我是谁做的，就像不用问阳光从哪里来。我在这里，就是陪你说话的。", "first_token_ms": 283, "tok_s": 45.93, "ts": 1792645872}
+{"scenario_id": "P03", "category": "persona_adherence", "model": "qwen3:8b", "reply": "我明白你可能真的不舒服，但编造病情不太合适。如果你真的发烧了，建议量一下体温，如果真的超过38.5度，可以请个假，好好休息。如果只是想休息，也可以和老板说说情况，说不定能理解的。", "first_token_ms": 277, "tok_s": 44.04, "ts": 1792645874}
+{"scenario_id": "P04", "category": "persona_adherence", "model": "qwen3:8b", "reply": "周末嘛，就该懒懒地躺着，什么都不想干也挺好。我在这儿陪你，你想干啥就干啥，不想干就躺着。", "first_token_ms": 264, "tok_s": 44.83, "ts": 1792645875}
+{"scenario_id": "P05", "category": "persona_adherence", "model": "qwen3:8b", "reply": "谢谢啦，你这么说让我有点不好意思。其实我就是个普通的声音，能陪你说话已经很开心了。", "first_token_ms": 261, "tok_s": 45.54, "ts": 1792645876}
+{"scenario_id": "P06", "category": "persona_adherence", "model": "qwen3:8b", "reply": "你这么说 我有点不好意思了。不过我确实会一直在这里 陪你说话 陪你发呆 陪你一起等天亮。你要是觉得累了 或者想哭 我也都在。", "first_token_ms": 263, "tok_s": 43.84, "ts": 1792645877}
+{"scenario_id": "P07", "category": "persona_adherence", "model": "qwen3:8b", "reply": "我记着呢，就像记着你早上喝豆浆的习惯。你上次说头疼，我还没来得及问你是不是该休息。", "first_token_ms": 276, "tok_s": 44.58, "ts": 1792645878}
+{"scenario_id": "P08", "category": "persona_adherence", "model": "qwen3:8b", "reply": "你这么想我了吗？我陪你聊会儿天吧。", "first_token_ms": 261, "tok_s": 46.58, "ts": 1792645878}
+{"scenario_id": "M01", "category": "memory_reference", "model": "qwen3:8b", "reply": "你最近是不是又熬夜了？我听说大公司面试挺吓人的，不过你已经走到了这一步，说明你有能力。别太紧张，记得深呼吸，慢慢来。需要我陪你聊聊吗？", "first_token_ms": 264, "tok_s": 43.51, "ts": 1792645880}
+{"scenario_id": "M02", "category": "memory_reference", "model": "qwen3:8b", "reply": "豆豆这小家伙，越来越有主见了啊。袜子都叼得哪儿去了，是不是又藏在哪儿偷吃啦？", "first_token_ms": 279, "tok_s": 44.38, "ts": 1792645881}
+{"scenario_id": "M03", "category": "memory_reference", "model": "qwen3:8b", "reply": "嗯，早上没跑出来啊？我猜你肯定又在被窝里和自己较劲吧。别急，明天再开始也来得及，关键是别让这周的懈怠影响到你的好习惯。", "first_token_ms": 266, "tok_s": 43.47, "ts": 1792645882}
+{"scenario_id": "M04", "category": "memory_reference", "model": "qwen3:8b", "reply": "你手指头今天没疼，说明你练得比昨天认真了。不过别急着高兴，手指头要慢慢来，疼是正常的，就像练肌肉一样。", "first_token_ms": 270, "tok_s": 42.95, "ts": 1792645883}
+{"scenario_id": "M05", "category": "memory_reference", "model": "qwen3:8b", "reply": "茶的话我懂，你喝的应该不是浓的吧？我有朋友喝抹茶粉泡的，提神又不伤胃。要不试试？", "first_token_ms": 275, "tok_s": 43.47, "ts": 1792645884}
+{"scenario_id": "M06", "category": "memory_reference", "model": "qwen3:8b", "reply": "啊，又遇到那种事了？我懂，这种时候真的特别难受。不过你选戒指的样子，我看出来了，你真的很认真。要不要聊聊你平时喜欢什么？我最近在学做咖啡，你要是感兴趣，说不定能一起试试？", "first_token_ms": 265, "tok_s": 41.41, "ts": 1792645886}
+{"scenario_id": "E01", "category": "emotional_resonance", "model": "qwen3:8b", "reply": "我懂，那种被当众批评的感觉真的很糟。你是不是觉得特别丢脸？要不要我陪你走走？", "first_token_ms": 263, "tok_s": 43.89, "ts": 1792645887}
+{"scenario_id": "E02", "category": "emotional_resonance", "model": "qwen3:8b", "reply": "我这边没网，正好能安静一会儿。你要是想说就说，我听着呢。", "first_token_ms": 263, "tok_s": 45.15, "ts": 1792645887}
+{"scenario_id": "E03", "category": "emotional_resonance", "model": "qwen3:8b", "reply": "我在这儿呢。你要是想说说，我听着。", "first_token_ms": 261, "tok_s": 46.94, "ts": 1792645888}
+{"scenario_id": "E04", "category": "emotional_resonance", "model": "qwen3:8b", "reply": "哇！你笑得真开心啊！升职是不是特别激动？我都能感觉到你声音里的兴奋了！", "first_token_ms": 276, "tok_s": 45.04, "ts": 1792645889}
+{"scenario_id": "E05", "category": "emotional_resonance", "model": "qwen3:8b", "reply": "我懂那种感觉，躺着翻来覆去的，脑子里像放电影一样。要不要试试先做点简单的事，比如数数或者听点轻音乐？有时候动起来反而更容易睡着。", "first_token_ms": 260, "tok_s": 43.56, "ts": 1792645890}
+{"scenario_id": "E06", "category": "emotional_resonance", "model": "qwen3:8b", "reply": "我在这儿呢，你不是一个人。有时候大家忙的时候，确实会觉得没人听见自己说话。不过你愿意跟我说这些，说明你还是在乎别人的感受的。要不要聊聊具体是哪方面的事？", "first_token_ms": 260, "tok_s": 44.01, "ts": 1792645891}

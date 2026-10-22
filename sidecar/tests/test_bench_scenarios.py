@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from echoes_sidecar.engines.llm.persona import PERSONA_SYSTEM_PROMPT
+
 REPO = Path(__file__).resolve().parents[2]
 SCENARIOS_PATH = REPO / "docs" / "benchmarks" / "scenarios.json"
 
@@ -44,10 +46,10 @@ def test_scenario_fields_complete_and_ids_unique() -> None:
 
 
 def test_persona_prompt_consistent_with_sidecar() -> None:
-    """人设语锁定：题集人设与 main.py default persona 同源（以防两处漂移）。"""
-    main_py = (REPO / "sidecar" / "echoes_sidecar" / "main.py").read_text(encoding="utf-8")
+    """人设语锁定（对拍升级 v1.4.1 后）：题集人设 == persona.py 单一来源常量。"""
     prompt = load_scenarios()["persona_system_prompt"]
+    assert prompt == PERSONA_SYSTEM_PROMPT
+    # 二轮复测条款在位：身份锁（P02）、诚实红线（P03）、输出格式（TTS 口径）
+    assert "病假" in prompt
+    assert "markdown" in prompt
     assert "Echoes" in prompt
-    # main.py 的 default persona 是题集 persona 的运维镜像；核心关键词一致即可
-    assert "Echoes" in main_py
-    assert "温柔" in prompt and "温柔" in main_py
