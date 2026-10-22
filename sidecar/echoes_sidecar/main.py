@@ -1,8 +1,8 @@
 """组合根（文档 3.2「组装归组合根」/3.3）：具体引擎只在这里实例化，其余代码只接收 ABC。
 
-骨架运行形态（stdio）：hello（分级就绪）→ state(booting) → 必需引擎 gate（3.5，
-required_engines_ready；不过则停 booting）→ state(ready)；user_text → mock turn
-（generating→assistant_text 逐片→speaking→turn_complete→ready；v1.4.1）。
+运行形态（stdio）：hello（分级就绪）→ state(booting) → 必需引擎 gate（3.5）→
+state(ready)；user_text → turn（generating→assistant_text 逐片→speaking→TTS
+chunk 逐帧 WS send_audio→turn_complete→ready；ws=off 时 chunk 丢弃只走消息面）。
 
 运行（cwd=sidecar）：`..\\.venv\\Scripts\\python -m echoes_sidecar.main`
 （🔴-1 修复：脚本直跑无包路径；stdin 用线程阻塞读，EOF→recv None 正常退出）。
@@ -15,9 +15,10 @@ import asyncio
 import sys
 import time
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal, Protocol
 
 from echoes_sidecar import __version__
+from echoes_sidecar.core.errors import EchoesError
 from echoes_sidecar.core.state_machine import AppState, StateMachine, required_engines_ready
 from echoes_sidecar.engines.asr.base import ASREngine
 from echoes_sidecar.engines.asr.mock import MockASREngine
@@ -26,6 +27,8 @@ from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.llm.ollama import OllamaLLMProvider
 from echoes_sidecar.engines.llm.persona import PERSONA_SYSTEM_PROMPT
+from echoes_sidecar.engines.tts.base import TTSEngine
+from echoes_sidecar.engines.tts.cosyvoice2 import CosyVoice2TtsEngine
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
 from echoes_sidecar.ipc import (
     AssistantTextMsg,
@@ -107,13 +110,18 @@ async def _mock_turn(
     machine: StateMachine,
     session: Session,
     provider: LLMProvider,
-    tts: MockTTSEngine,
+    tts: TTSEngine,
     text: str,
     t0: float,
+    ws_transport: LocalWebSocketTransport | None = None,
 ) -> None:
-    """turn：→generating→(LLM 流式)→speaking→turn_complete→ready（3.5 全合法）。
+    """turn：→generating→(LLM 流式)→speaking→(TTS chunk 逐帧 WS)→turn_complete→ready。
 
-    作战注释：真实打断/在途取消在三跳协议（3.4 阶段 0 第四周）；骨架期 turn 同步执行。
+    音频真链（第二周尾部）：synthesize 逐段 chunk 经 WS 出壳（0x02 帧、24k PCM，
+    3.4）；ws=off/无连接时 chunk 静默丢弃（send_audio 既有语义），消息面不受影响。
+    TTS 引擎错误（MODEL_NOT_LOADED 等）→ turn FAILED 收束（3.4.1 报错不降级；
+    非致命不进 3.5 error 态）。真实打断/在途取消在三跳协议（3.4 阶段 0 第四周）；
+    骨架期 turn 同步执行。
     """
     machine.transition(AppState.GENERATING)
     await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
@@ -140,15 +148,23 @@ async def _mock_turn(
 
     voice_id = session.voice_id or "builtin:default"  # 2.5 未克隆绑定内置音色
     speakable = clean_for_tts(reply)  # 5.2：音频吃清洗后文本；assistant_text 帧保持原样
-    async for _chunk in tts.synthesize(speakable, voice_id):
-        pass  # 音频经 WS 出壳侧播放（3.4）——阶段 0 第二周尾部接线；骨架只走通消息面
+    turn_status: Literal["SUCCESS", "FAILED"] = "SUCCESS"
+    try:
+        async for chunk in tts.synthesize(speakable, voice_id):
+            # 音频经 WS 出壳侧播放（3.4）；ws=off 或无连接 → send_audio 内静默丢弃
+            if ws_transport is not None:
+                await ws_transport.send_audio(chunk)
+    except EchoesError as exc:
+        # 引擎错误不静默不降级（3.4.1）：turn FAILED 收束，状态机照常回 ready
+        print(f"[sidecar] TTS 合成失败，turn FAILED: {exc}", file=sys.stderr)
+        turn_status = "FAILED"
 
     session.turn_seq += 1
     await transport.send(
         TurnCompleteMsg(
             session_id=session.session_id,
             turn_seq=session.turn_seq,
-            status="SUCCESS",
+            status=turn_status,
             timings=Timings(total_ms=_now_ms(t0)),
         ).model_dump(mode="json")
     )
@@ -213,6 +229,25 @@ def _assemble_asr(argv: Sequence[str] | None) -> tuple[ASREngine, bool]:
     return engine, False
 
 
+def _assemble_tts(argv: Sequence[str] | None) -> tuple[TTSEngine, bool]:
+    """组合根 TTS 装配（3.2）：mock 默认（契约链）；cosyvoice2 真路（第二周尾部）。
+
+    分级就绪同 whisper：ready=False 首发，vendored 权重 warmup 完成后才置 True
+    并重发 hello（3.4 v1.4）；权重缺失时 warmup 任务报 MODEL_NOT_LOADED
+    （7.3：下载归部署 bootstrap，运行时不联网补救——ADR-014）。
+    """
+    parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
+    parser.add_argument("--tts", choices=["mock", "cosyvoice2"], default="mock")
+    args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
+
+    if args.tts == "mock":
+        return MockTTSEngine(), True
+
+    engine: CosyVoice2TtsEngine = CosyVoice2TtsEngine()  # fp16 默认（tier_matrix 定档）
+    print("[sidecar] CosyVoice2TtsEngine(fp16): 后台 warmup 中", file=sys.stderr)
+    return engine, False
+
+
 async def _assemble_ws(argv: Sequence[str] | None) -> LocalWebSocketTransport | None:
     """组合根 WS 音频面装配：off 默认（阶段 0 壳侧接线在第三周拨）；auto 起 server。"""
     parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
@@ -227,21 +262,35 @@ async def _assemble_ws(argv: Sequence[str] | None) -> LocalWebSocketTransport | 
     return transport
 
 
-async def _gate_asr_ready(
+class _Warmable(Protocol):
+    """分级就绪引擎的最小面（whisper / CosyVoice2 的 warmup 载荷，3.4 v1.4）。
+
+    组合根 _gate_engine_ready 只认 warmup() 能力，不耦合具体引擎类型。
+    """
+
+    async def warmup(self) -> None: ...
+
+
+async def _gate_engine_ready(
     transport: Transport,
     machine: StateMachine,
-    engine: WhisperASREngine,
+    engine_name: str,
+    engine: _Warmable,
     engine_states: list[EngineState],
     t0: float,
 ) -> None:
-    """分级就绪（3.4 v1.4）：warmup 完成 → asr ready=True → 3.5 gate → 重发 hello/state。"""
+    """分级就绪（3.4 v1.4）：warmup 完成 → 该引擎 ready=True → gate → 重发 hello/state。
+
+    必需引擎（asr/llm，3.5 v1.4）gate 决定 booting→ready；tts 属分级就绪，
+    就绪与否对状态机透明（就绪变化由 hello 重发承载）。
+    """
     try:
         await engine.warmup()
-    except Exception as exc:  # noqa: BLE001  权重下载失败等：报错不降级（保持 booting）
-        print(f"[sidecar] ASR warmup 失败: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001  权重下载失败等：报错不降级（保持现状）
+        print(f"[sidecar] {engine_name} warmup 失败: {exc}", file=sys.stderr)
         return
     for state in engine_states:
-        if state.name == "asr":
+        if state.name == engine_name:
             state.ready = True
     if (
         required_engines_ready((s.name, s.ready) for s in engine_states)
@@ -264,14 +313,15 @@ async def serve(argv: Sequence[str] | None = None) -> None:
     session = _default_session()
     SessionManager().create(session)  # 4.6：阶段 0 单会话，按 session_id 查找写
 
-    # 组合根装配清单（3.2）：阶段 0 换真实引擎。asr mock = 骨架全绿链；whisper = 真路
-    # 分级就绪（warmup 后台任务完成后重发 hello，3.4 v1.4）。
+    # 组合根装配清单（3.2）：whisper/cosyvoice2 均走真路分级就绪（warmup 后台任务
+    # 完成后重发 hello，3.4 v1.4）；mock 保留为无模型契约链。
     llm_provider, llm_ready = await _assemble_llm(argv)
     asr_engine, asr_ready = _assemble_asr(argv)
+    tts_engine, tts_ready = _assemble_tts(argv)
     ws_transport = await _assemble_ws(argv)
     engines_runtime: dict[str, Any] = {
         "asr": asr_engine,
-        "tts": MockTTSEngine(),
+        "tts": tts_engine,
         "llm": llm_provider,
     }
     def _ready_of(name: str) -> bool:
@@ -279,7 +329,9 @@ async def serve(argv: Sequence[str] | None = None) -> None:
             return llm_ready
         if name == "asr":
             return asr_ready
-        return True  # tts mock 恒就绪（真 TTS 引擎接入时同 asr 分级就绪模式）
+        if name == "tts":
+            return tts_ready
+        return True
 
     engine_states: list[EngineState] = [
         EngineState(name=name, ready=_ready_of(name)) for name in engines_runtime
@@ -298,7 +350,15 @@ async def serve(argv: Sequence[str] | None = None) -> None:
     await transport.send(_state_payload(machine, None, _now_ms(t0)))
     if isinstance(asr_engine, WhisperASREngine):
         asyncio.create_task(
-            _gate_asr_ready(transport, machine, asr_engine, engine_states, t0)
+            _gate_engine_ready(
+                transport, machine, "asr", asr_engine, engine_states, t0
+            )
+        )
+    if isinstance(tts_engine, CosyVoice2TtsEngine):
+        asyncio.create_task(
+            _gate_engine_ready(
+                transport, machine, "tts", tts_engine, engine_states, t0
+            )
         )
 
     try:
@@ -326,6 +386,7 @@ async def serve(argv: Sequence[str] | None = None) -> None:
                     engines_runtime["tts"],
                     msg.text,
                     t0,
+                    ws_transport,
                 )
             elif isinstance(msg, ControlMsg):
                 print(
