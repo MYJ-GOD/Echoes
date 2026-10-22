@@ -10,15 +10,19 @@ required_engines_ready；不过则停 booting）→ state(ready)；user_text →
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from echoes_sidecar import __version__
 from echoes_sidecar.core.state_machine import AppState, StateMachine, required_engines_ready
 from echoes_sidecar.engines.asr.mock import MockASREngine
+from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
+from echoes_sidecar.engines.llm.ollama import OllamaLLMProvider
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
 from echoes_sidecar.ipc import (
     AssistantTextMsg,
@@ -97,12 +101,12 @@ async def _mock_turn(
     transport: Transport,
     machine: StateMachine,
     session: Session,
-    provider: MockLLMProvider,
+    provider: LLMProvider,
     tts: MockTTSEngine,
     text: str,
     t0: float,
 ) -> None:
-    """骨架 turn：→generating→(LLM 组装)→speaking→turn_complete→ready（3.5 全合法）。
+    """turn：→generating→(LLM 流式)→speaking→turn_complete→ready（3.5 全合法）。
 
     作战注释：真实打断/在途取消在三跳协议（3.4 阶段 0 第四周）；骨架期 turn 同步执行。
     """
@@ -146,20 +150,51 @@ async def _mock_turn(
     await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
 
 
-async def serve() -> None:
+async def _assemble_llm(argv: Sequence[str] | None) -> tuple[LLMProvider, bool]:
+    """组合根 LLM 装配（3.2）：mock 默认（无模型依赖的契约链），ollama 真路（第二周）。
+
+    Ollama 不可达时 ready=False → hello 声明不就绪 → 3.5 必需引擎 gate 停 booting
+    （报错而非降级：不静默换 mock）。
+    """
+    parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
+    parser.add_argument("--llm", choices=["mock", "ollama"], default="mock")
+    parser.add_argument("--model", default="qwen2.5:7b-instruct")
+    parser.add_argument(
+        "--no-think", action="store_true", help="qwen3 系关 thinking（ADR-001 硬前提）"
+    )
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.llm == "mock":
+        return MockLLMProvider(), True
+
+    provider = OllamaLLMProvider(
+        model=args.model,
+        think=False if args.no_think else None,
+    )
+    ready = await provider.health()
+    if not ready:
+        print(
+            f"[sidecar] Ollama 不可达（model={args.model}）：llm ready=False（3.5 gate）",
+            file=sys.stderr,
+        )
+    return provider, ready
+
+
+async def serve(argv: Sequence[str] | None = None) -> None:
     t0 = time.perf_counter()
     session = _default_session()
     SessionManager().create(session)  # 4.6：阶段 0 单会话，按 session_id 查找写
 
     # 组合根装配清单（3.2）：阶段 0 换真实引擎。asr 在骨架期不走语音路径（WS 未接），
     # 但必须装配且 hello 声明就绪（🔴-2 修复：3.5 必需引擎集合 = {asr, llm}）。
+    llm_provider, llm_ready = await _assemble_llm(argv)
     engines_runtime: dict[str, Any] = {
         "asr": MockASREngine(),
         "tts": MockTTSEngine(),
-        "llm": MockLLMProvider(),
+        "llm": llm_provider,
     }
     engine_states: list[EngineState] = [
-        EngineState(name=name, ready=True) for name in engines_runtime
+        EngineState(name=name, ready=(name != "llm" or llm_ready)) for name in engines_runtime
     ]
 
     transport = StdioTransport(_ThreadedReader(), _StdOutWriter())
@@ -217,6 +252,6 @@ async def serve() -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(serve())
+        asyncio.run(serve(sys.argv[1:]))
     except KeyboardInterrupt:
         print("[sidecar] 收到中断，退出", file=sys.stderr)
