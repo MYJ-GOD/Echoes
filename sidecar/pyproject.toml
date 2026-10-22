@@ -27,6 +27,8 @@ dev = [
 [tool.ruff]
 line-length = 100          # §15.3：ruff 100 列
 target-version = "py311"
+# vendored 上游原样代码不参与本仓 lint（ADR-014）
+extend-exclude = ["vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
