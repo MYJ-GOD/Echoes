@@ -5,6 +5,8 @@
 **变更记录**
 
 - **v1.4.1 相对 v1.4**（阶段 0 第一周实施中发现的契约缺口，走 12.2 冻结层变更）：3.4 stdio 事件清单追加 `assistant_text` 帧——v1.4 的控制面只有用户侧转写（`asr_partial`/`asr_final`），LLM 回复文本无承载帧，第一周验收「文本→LLM→文本」的文本侧在壳/前端没有数据源。新帧 `{type, session_id, text, t}`：`text` = 截至当前的全量回复文本，流式期间逐帧递增（UI 直接替换渲染），收尾边界由同 turn 的 `turn_complete` 界定；不携带 `turn_seq`（归属当前在途 turn，3.5 单会话单在途 turn）。schema/golden/壳侧解析同 patch 落地；纯追加，旧端 extra=ignore 兼容（3.4 兼容规则）。
+
+- **v1.4.2 相对 v1.4.1**（CosyVoice2 搬运专项启动，新增 ADR-014，不动冻结契约）：15.1 CosyVoice2 行钉死上游锚——FunAudioLLM/CosyVoice main `074ca6d`（2026-05-26）+ Matcha-TTS 子模块 pin `dd9105b3`，vendored 落位 `sidecar/vendor/cosyvoice2/`。ADR-014 收敛搬运环境决策：Windows 裸装 + uv（Docker/WSL 不进基准与交付）；pynini/WeTextProcessing 依赖链经上游 main 全包 AST 侦察确认已消失（TextNorm 换 `regex`+`inflect`+`wetext`，无需 conda 特例，此前处置预案作废）；推理依赖取子集而非上游 requirements 全集（deepspeed/tensorrt/vllm/gradio/fastapi/grpcio/pyarrow/pyworld/librosa 等训练/部署面不进 venv）；torch 先试 2.7.x+cu126（冒烟失败回上游锚 2.3.1+cu121 并走变更）；权重走 modelscope（`iic/CosyVoice2-0.5B`）运行时下载，ttsfrd 闭源前端资源不下载（try/except fallback 成立）。
 - **v1.4 相对 v1.3**（依独立架构评审修复：3 blocking + 7 important + 2 nit + 3 suggestion，全部采纳；评审框架 source：code-review-skill 架构评审指南）：① 3.4 补控制面消息与控制流定案（`user_text` / `clone_start` / `clone_cancel`、WS 帧 `bit2 = clone_sample`、`interrupt` 与 `cancel_turn` 语义边界及停止按钮映射、设置改为拉取式生效）；② 3.5 状态集合补 `error` 吸收态（含唯一迁出路径），3.4 枚举同步；③ 15.2 依赖图补 `audio/` `ipc/` 两层，AudioChunk 定家 `core/`，15.3 strict 边界同步；④ 分级就绪信号：`hello` 允许重发，`booting→ready` 必需引擎集合定死为 {ASR, LLM}；⑤ 阶段 -1 评测改「本人评分 + LLM-as-judge 双通道」（单人可执行）；⑥ 14.1 补重启后 Session 重建语义；⑦ chunker 职责定案：纯函数句切模块，策略由引擎注入；⑧ 3.2 资产路径原则收敛为资产层内相对路径；⑨ `llama_cpp` 按 YAGNI 移出目录（条件引入条款交给 ADR-001）；⑩ 新增 5.3 数据目录与磁盘治理（AppData 落点、Windows 路径自检、模型删除）；⑪ 错误码表补 `CLONE_CANCELLED`；4.x 签名注解与 `Persona` 定义补全；交叉引用修正两处；音色资产量级条件化。
 - **v1.3 相对 v1.2**：① 新增 3.5 统一应用状态机（合法迁移表 + 用户动作矩阵 + `hello` 握手）；② 3.4 固化观测字段（`t` 时间戳、turn 生命周期耗时），供第 13 节自动测量；③ 新增 13 测试与质量保障（含 IPC schema 单一来源、记忆抽取评测门禁）；④ 新增 14 故障与恢复语义；⑤ 新增 15 工程规范与技术选型（版本锚定、依赖方向 import-linter）；⑥ 新增 16 隐私边界与数据可携带；⑦ 7.1 体积表按 torch 现实修正（ADR-011）+ PyInstaller 探测前置到阶段 0；⑧ ADR-009 写入兜底决策规则（zero-shot 保底）；⑨ 7.3 模型清单支持多下载源；⑩ 阶段 -1 评测方法学修订（交叉评分）并新增「档位×模型矩阵」交付物；⑪ 新增风险 12；ADR 索引补 ADR-011/012/013。
 - v1.2 相对 v1.1：音色状态机、权威错误码总表、打断协议、壳侧采集、ADR-009 升格、上下文预算归属、分阶段验收修订（详见 git 历史）。
@@ -771,6 +773,7 @@ strategy:
 | ADR-011 | 打包分体策略（torch 运行时包 vs 大安装包） | 决策待定，默认建议分体；依据 7.1 + 阶段 0 探测 | 阶段 0 第一周 |
 | ADR-012 | 阶段 0 阈值校准记录（就绪/延迟 ±20%） | 占位 | 阶段 0 第四周 |
 | ADR-013 | 用户数据导出/删除语义 | 已定：见 16.2 | v1.3 |
+| ADR-014 | CosyVoice2 搬运环境（裸装 uv + vendored 范围 + torch 口径 + 权重通路） | 已定：见 docs/decisions/ADR-014；pynini 侦察闭环已过 | v1.4.2 |
 
 ---
 
@@ -864,7 +867,7 @@ strategy:
 | --- | --- | --- | --- |
 | sidecar | Python | **3.11.x** | CosyVoice2/ML 依赖兼容最稳 |
 | sidecar | 环境与锁 | **uv**（`uv.lock` 入库） | 禁用 floating range：ML 依赖一律 `==` 精确锁 |
-| sidecar | CosyVoice2 | 上游 commit 钉死（vendored 或 git 锁定 URL） | 不追上游 HEAD |
+| sidecar | CosyVoice2 | vendored 钉死：上游 main `074ca6d` + Matcha-TTS pin `dd9105b3`（ADR-014） | 不追上游 HEAD；落位 `sidecar/vendor/cosyvoice2/` |
 | sidecar | faster-whisper + ctranslate2 | `==` 锁定 | |
 | sidecar | torch | CUDA 12.6 轮子，`==` 锁定（manifest 与锁文件同源） | 打包口径见 ADR-011 |
 | sidecar | IPC/配置 | pydantic 2.x、websockets（**不引入 FastAPI**——sidecar 无 REST 面，纯 asyncio 足够，减少打包体积和依赖面） | |
