@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import struct
+import sys
+import types
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -174,3 +176,62 @@ async def test_worker_thread_error_bridges_tts_engine_error() -> None:
     with pytest.raises(EchoesError) as exc_info:
         await _collect(engine, "你好", BUILTIN_DEFAULT_VOICE)
     assert exc_info.value.code == ErrorCode.TTS_ENGINE_ERROR
+
+
+def _seed_wetext_cache(monkeypatch: pytest.MonkeyPatch, base: Path) -> None:
+    """临时 MODELSCOPE_CACHE 下按需建 4 个 fst（或假装缺失）供缓存校验用。"""
+    monkeypatch.setenv("MODELSCOPE_CACHE", str(base))
+    for rel in cosyvoice2_module._WETEXT_SNAPSHOT_FILES:
+        (base / "hub" / "pengzhendong" / "wetext" / rel).parent.mkdir(
+            parents=True, exist_ok=True
+        )
+
+
+def test_wetext_cache_missing_raises_model_not_loaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """wetext fst 缓存缺件 → MODEL_NOT_LOADED（boot 报错不降级，绝不联网补拉）。"""
+    _seed_wetext_cache(monkeypatch, tmp_path)  # 目录在但 fst 一个都没有
+    with pytest.raises(EchoesError) as exc_info:
+        cosyvoice2_module._install_wetext_offline_snapshot()
+    assert exc_info.value.code == ErrorCode.MODEL_NOT_LOADED
+
+
+def test_wetext_offline_patch_forces_local_files_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """缓存齐备时补丁生效：wetext 的 snapshot_download 调用强制 local_files_only。"""
+    _seed_wetext_cache(monkeypatch, tmp_path)
+    for rel in cosyvoice2_module._WETEXT_SNAPSHOT_FILES:
+        (tmp_path / "hub" / "pengzhendong" / "wetext" / rel).touch()
+
+    calls: list[dict[str, Any]] = []
+
+    def _spy(model_id: str, **kwargs: Any) -> str:
+        calls.append({"model_id": model_id, **kwargs})
+        return "Z:/stub/root"
+
+    inner = types.SimpleNamespace(snapshot_download=_spy)
+    monkeypatch.setitem(sys.modules, "wetext", types.SimpleNamespace(wetext=inner))
+
+    cosyvoice2_module._install_wetext_offline_snapshot()
+
+    assert inner.snapshot_download is not _spy  # 已被离线包装替换
+    inner.snapshot_download("pengzhendong/wetext")
+    assert calls == [{"model_id": "pengzhendong/wetext", "local_files_only": True}]
+
+
+def test_load_engine_weights_gate_precedes_wetext_patch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """权重缺失时在 wetext 安装面之前截断（离线红线①先于②，宁缺毋联网）。"""
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        cosyvoice2_module,
+        "_install_wetext_offline_snapshot",
+        lambda: calls.append(True),
+    )
+    engine = CosyVoice2TtsEngine(model_dir=tmp_path / "absent-weights")
+    with pytest.raises(EchoesError):
+        engine._load_engine()
+    assert not calls

@@ -6,6 +6,9 @@
 - 权重（7.3 运行时下载边界）：~/.cache/echoes/models/CosyVoice2-0.5B；缺失 =
   EchoesError(MODEL_NOT_LOADED) 报错不降级——先查目录再实例化，vendored 的
   snapshot_download 联网回退绝不触发（离线红线①，下载归部署 bootstrap）。
+  同红线延伸：wetext 快照（vendor frontend 正则化依赖）载入时钉成
+  local_files_only 零网 + 缓存预校验（vendored 的裸 except 会把 Normalizer
+  构造失败吞成 silent no-frontend 文本面，R20 探针实证联网态可载入期假死）。
 - boot 硬序（ADR-014 修订 7）：sys.path 注入 vendor → import torch →
   os.add_dll_directory(torch/lib)（cudnn/cublas 供 onnxruntime-gpu 的 CUDA EP；
   ort 静默回 CPU 必须显式 get_providers() 验证，DLL 缺失 GPUs 上直接掉速）→
@@ -54,6 +57,17 @@ BUILTIN_DEFAULT_PROMPT_WAV = (
 )
 _DEFAULT_MODEL_DIR = Path.home() / ".cache" / "echoes" / "models" / "CosyVoice2-0.5B"
 
+# wetext（vendored frontend 文本正则化依赖）在 modelscope 的快照仓：
+# 运行时一律 local_files_only 零网（R20 实证：联网补拉在匿名限频 403 +
+# stdin=PIPE 进程形态下级联成载入期假死）；补齐归部署 bootstrap（7.3）。
+_WETEXT_REPO = "pengzhendong/wetext"
+_WETEXT_SNAPSHOT_FILES = (
+    "en/tn/tagger.fst",
+    "en/tn/verbalizer.fst",
+    "zh/tn/tagger.fst",  # frontend.py zh_tn_model 实际加载面
+    "zh/tn/verbalizer.fst",
+)
+
 _VENDOR_BOOTED = False
 
 
@@ -94,6 +108,54 @@ def _ensure_vendor_boot() -> None:
     _VENDOR_BOOTED = True
 
 
+def _wetext_cache_dir() -> Path:
+    """modelscope 缓存根（MODELSCOPE_CACHE 优先）→ wetext 快照目录。
+
+    布局为 modelscope 1.20 的 {root}/hub/{repo_id}（snapshot_download 内部同式
+    拼接）；与运行时间的事实缓存路径一致。
+    """
+    root = os.environ.get("MODELSCOPE_CACHE") or Path.home() / ".cache" / "modelscope"
+    return Path(root) / "hub" / _WETEXT_REPO
+
+
+def _require_wetext_cache() -> None:
+    """wetext fst 本地缓存预校验（缺件 → boot 报错不降级）。
+
+    vendored frontend 的裸 except 会把 Normalizer 构造失败静默吞成
+    no-frontend 文本面（正则化无声消失）；报错不降级（3.4.1）必须在进入
+    vendored 构造前把缺件截断为显式报错。
+    """
+    base = _wetext_cache_dir()
+    missing = [
+        rel for rel in _WETEXT_SNAPSHOT_FILES if not (base / rel).is_file()
+    ]
+    if missing:
+        raise EchoesError(
+            ErrorCode.MODEL_NOT_LOADED,
+            f"wetext fst 缓存缺失（{base}）: {', '.join(missing)}"
+            "（补齐归部署 bootstrap，运行时不联网补救，7.3/离线红线）",
+        )
+
+
+def _install_wetext_offline_snapshot() -> None:
+    """把 wetext 的 modelscope 快照下载钉成 local_files_only=True（零网）。
+
+    modelscope 1.20 语义：True ⇒ 零网络、缓存目录非空即返回根路径，不碰
+    文件清单 API；联网路径会打印下载并逐文件补拉（今日实证可级联成载入期
+    假死）。缓存完整性由 _require_wetext_cache() 前置保证。
+    """
+    _require_wetext_cache()
+    import wetext  # wetext 包本体（构造 Normalizer 才触发下载面）
+
+    snapshot = wetext.wetext.snapshot_download  # wetext 无类型 stub，Any 口
+
+    def _offline(model_id: str, **kwargs: Any) -> Any:
+        kwargs["local_files_only"] = True
+        return snapshot(model_id, **kwargs)
+
+    wetext.wetext.snapshot_download = _offline
+
+
 class CosyVoice2TtsEngine(TTSEngine):
     """CosyVoice2 zero-shot 流式合成引擎（lazy 加载；输出 24kHz mono PCM16）。"""
 
@@ -117,6 +179,7 @@ class CosyVoice2TtsEngine(TTSEngine):
                 "（7.3 下载边界外，部署 bootstrap 预取，运行时不联网补救）",
             )
         _ensure_vendor_boot()
+        _install_wetext_offline_snapshot()  # 离线红线②：wetext 快照零网 + 缓存预校验
         import logging
         import warnings
 
