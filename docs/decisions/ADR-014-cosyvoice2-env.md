@@ -33,3 +33,14 @@ AST 全包扫描 + 消费子树精扫（数据点）：
 - vendored 完成后入库 commit 必须与本章 hash 至一一对应可回溯（源码 per-file 与上游 diff = 0）。
 - 首装冒烟：`import cosyvoice.cli.cosyvoice` + CosyVoice2 类实例化（权重下载后）延迟/显存实测回填 tier_matrix。
 - 三件失败不降级原则贯穿：权重下载失败、模块缺失、CUDA 装载失败均必爆 error（3.4.1 语义）。
+
+## 实施修订记录（12.2 同步）
+
+2026-10-22 实施第一笔（vendored `ca869fb` + uv 迁移）中探明并修订：
+
+1. **Python 锚 3.11.x → 3.13.x**：仓库既有 venv 实为 miniconda base 3.13.5——15.1 的 3.11 是纸面锚；92 tests / heavy 冒烟的全部真机证据链出自该解释器，torch 2.7.x 官方 cp313 轮子在位。pyproject 收紧 `requires-python = ">=3.13"`、mypy `python_version = "3.13"`；15.1 Python 行同步。
+2. **onnxruntime 1.18.0 → 1.31.0**：上游锚无 cp313 轮子；CosyVoice 使用面仅 `InferenceSession`（speech tokenizer），高版本向前兼容。
+3. **openai-whisper 20231117 → 20250625**：20231117 的 setup.py 在 py3.13 下 build 必炸——PEP 667 的 `locals()` 独立快照使 `exec()` 后 `locals()["__version__"]` 取值 KeyError；sdist 里 `whisper/version.py` 存在，病灶在 setup.py 本身；20250625 已修。
+4. **tiktoken 补声明（==0.14.0）**：上游 requirements 漏声明而 `cosyvoice/tokenizer` 代码必需。
+5. **whisper build env 补丁**：uv `tool.uv.extra-build-dependencies: openai-whisper = ["setuptools<81"]`——setuptools ≥81 移除 pkg_resources 模块，whisper setup.py 顶层 import 它。
+6. **uv 状态**：`uv.lock`（104 packages）随仓库入库；venv = `sidecar/.venv`（直引 miniconda base 3.13.5）+ `.python-version = 3.13`；默认 index 走国内镜像（UV_DEFAULT_INDEX 注入），torch 单独经 `tool.uv.sources` 显式映射 pytorch-cu126 官方源。

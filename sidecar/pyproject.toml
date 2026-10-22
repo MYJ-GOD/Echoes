@@ -2,7 +2,7 @@
 name = "echoes-sidecar"
 version = "0.1.0"
 description = "Echoes 桌面版 sidecar：契约定义以 docs/architecture.md 为唯一来源"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
   "pydantic>=2.7,<3",
   "websockets>=12,<15",
@@ -11,6 +11,22 @@ dependencies = [
   "faster-whisper==1.2.1",
   "ctranslate2==4.8.3",
   "numpy==2.5.4",
+  # ---- CosyVoice2 inference 依赖子集（ADR-014 决策 4；== 锚取上游 requirements） ----
+  "torch==2.7.1",                # cu126 轮子；冒烟失败回上游锚 2.3.1+cu121 走 12.2
+  "torchaudio==2.7.1",
+  "onnxruntime==1.31.0",         # 上游锚 1.18.0 无 cp313 轮子，升锁（ADR-014 修订）
+  "transformers==4.51.3",
+  "conformer==0.3.2",
+  "diffusers==0.29.0",
+  "hyperpyyaml==1.2.3",
+  "omegaconf==2.3.0",
+  "inflect==7.3.1",
+  "wetext==0.0.4",
+  "x-transformers==2.11.24",
+  "modelscope==1.20.0",
+  "openai-whisper==20250625",   # 上游锚 20231117 的 setup.py 在 py3.13（PEP 667 locals 快照）下 build 必炸，升锁（ADR-014 修订）
+  "soundfile==0.12.1",
+  "tiktoken==0.14.0",            # 上游 requirements 漏声明而代码必需（冒烟经过确认）
 ]
 
 [project.optional-dependencies]
@@ -34,7 +50,7 @@ extend-exclude = ["vendor"]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 # strict 边界 = §15.3 v1.4 + 修复轮扩展（评审 🟡-2）：三个 engines base.py 与 main.py 纳入；
 # engines 的 mock/未来实现内部放宽，tests 不在边界内
@@ -90,3 +106,22 @@ forbidden_modules = [
   "echoes_sidecar.engines.tts.mock",
   "echoes_sidecar.engines.llm.mock",
 ]
+
+# ------------------------------ uv 项目锁（15.1；ADR-014） ------------------------------
+
+# whisper 20231117 的 setup.py 用 pkg_resources 却未声明 build 依赖
+# （setuptools 新版剥离 pkg_resources），build 时补装
+[tool.uv.extra-build-dependencies]
+openai-whisper = ["setuptools<81"]
+
+
+# torch/torchaudio 走 PyTorch 官方 cu126 轮子（15.1「CUDA 12.6 轮子 == 锁」），
+# 其余包走默认 index（国内镜像由 UV_DEFAULT_INDEX 注入，见 progress.md 记账）
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126" }]
+torchaudio = [{ index = "pytorch-cu126" }]
