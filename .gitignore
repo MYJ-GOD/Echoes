@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 构建/依赖产物
+node_modules/
+dist/
+target/
+src-tauri/binaries/
+sidecar/build/
+
+# 模型权重与本地数据（文档 7.3：运行时下载；5.3：业务数据在 %LOCALAPPDATA% / ~/.cache/echoes）
+models/*
+!models/.gitkeep
+
+# 会话脚手架与本地索引
+.superpowers/
+.codegraph/
