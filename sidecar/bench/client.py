@@ -17,14 +17,26 @@ import httpx
 class OllamaClient:
     """Ollama /api/chat 流式（NDJSON）。"""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:11434") -> None:
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:11434",
+        *,
+        no_think: bool = False,
+        temperature: float | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.no_think = no_think
+        self.temperature = temperature  # None = Ollama 默认；judge 通道传 0（复现口径）
 
     async def chat(
         self, context: list[dict[str, str]], user: str, *, model: str
     ) -> dict[str, Any]:
         messages = [*context, {"role": "user", "content": user}]
         body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        if self.no_think:
+            body["think"] = False  # qwen3 等推理模型：语音场景须关 thinking（延迟）
+        if self.temperature is not None:
+            body["options"] = {"temperature": self.temperature}
         reply_parts: list[str] = []
         first_token_ms: int | None = None
         tok_s: float | None = None
@@ -66,15 +78,19 @@ class OpenAICompatClient:
         self,
         base_url: str = "https://api.deepseek.com",
         api_key: str | None = None,
+        temperature: float | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
+        self.temperature = temperature  # None = API 默认；judge 通道传 0
 
     async def chat(
         self, context: list[dict[str, str]], user: str, *, model: str
     ) -> dict[str, Any]:
         messages = [*context, {"role": "user", "content": user}]
         body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        if self.temperature is not None:
+            body["temperature"] = self.temperature
         reply_parts: list[str] = []
         first_token_ms: int | None = None
         tok_s: float | None = None

@@ -71,13 +71,27 @@ class _MockJudge:
         return {"reply": reply, "first_token_ms": 10, "tok_s": 100.0, "model": model}
 
 
-def _make_provider(name: str, model: str | None, base_url: str | None) -> ProviderClient:
+def _make_provider(
+    name: str,
+    model: str | None,
+    base_url: str | None,
+    *,
+    no_think: bool = False,
+    temperature: float | None = None,
+) -> ProviderClient:
     if name == "mock":
         return _MockProvider("mock")
     if name == "ollama":
-        return OllamaClient(base_url=base_url or "http://127.0.0.1:11434")
+        return OllamaClient(
+            base_url=base_url or "http://127.0.0.1:11434",
+            no_think=no_think,
+            temperature=temperature,
+        )
     if name == "openai":
-        return OpenAICompatClient(base_url=base_url or "https://api.deepseek.com")
+        return OpenAICompatClient(
+            base_url=base_url or "https://api.deepseek.com",
+            temperature=temperature,
+        )
     raise SystemExit(f"未知 provider: {name}（候选 mock|ollama|openai）")
 
 
@@ -90,8 +104,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     model = args.model or ("mock" if args.provider == "mock" else None)
     if not model:
         raise SystemExit("run 需要 --model")
-    out_dir = RESULTS_ROOT / _slug(args.provider, model)
-    provider = _make_provider(args.provider, model, args.base_url)
+    out_dir = RESULTS_ROOT / (_slug(args.provider, model) + ("-nothink" if args.no_think else ""))
+    provider = _make_provider(args.provider, model, args.base_url, no_think=args.no_think)
     records = asyncio.run(
         run_scenarios(provider, data, model=model, out_path=out_dir / "replies.jsonl")
     )
@@ -107,7 +121,10 @@ def cmd_judge(args: argparse.Namespace) -> int:
     if args.provider == "mock":
         judge = _MockJudge()
     else:
-        judge = _make_provider(args.provider, args.model, args.base_url)
+        # judge 复现口径：温度 0（judge_prompt.md 约定）
+        judge = _make_provider(
+            args.provider, args.model, args.base_url, temperature=0.0
+        )
     rows = asyncio.run(
         run_judge_channel(
             judge,
@@ -188,6 +205,7 @@ def main() -> int:
     run.add_argument("--provider", choices=["mock", "ollama", "openai"], required=True)
     run.add_argument("--model", default=None)
     run.add_argument("--base-url", default=None)
+    run.add_argument("--no-think", action="store_true", help="Ollama 推理模型关 thinking（语音场景口径）")
 
     judge = sub.add_parser("judge")
     judge.add_argument("--provider", choices=["mock", "ollama", "openai"], required=True)
