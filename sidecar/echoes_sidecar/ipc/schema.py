@@ -56,6 +56,20 @@ class AsrFinalMsg(_Msg):
     t: int
 
 
+class AssistantTextMsg(_Msg):
+    """assistant 回复文本（v1.4.1 追加，12.2 变更记录）。
+
+    text = 截至当前的全量回复文本：流式期间逐帧递增（UI 直接替换渲染），
+    收尾边界由同 turn 的 turn_complete 界定；不携带 turn_seq（归属当前
+    在途 turn，3.5 单会话单在途 turn）。
+    """
+
+    type: Literal["assistant_text"] = "assistant_text"
+    session_id: str
+    text: str
+    t: int
+
+
 class Timings(_Msg):
     """turn_complete.timings（3.4 观测字段；13.4 自动测量的唯一数据来源）。
 
@@ -150,6 +164,7 @@ Message = Annotated[
     HelloMsg
     | AsrPartialMsg
     | AsrFinalMsg
+    | AssistantTextMsg
     | TurnCompleteMsg
     | CloneProgressMsg
     | ErrorMsg

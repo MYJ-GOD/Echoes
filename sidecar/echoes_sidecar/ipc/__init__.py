@@ -8,6 +8,7 @@ from __future__ import annotations
 from echoes_sidecar.ipc.schema import (
     AsrFinalMsg,
     AsrPartialMsg,
+    AssistantTextMsg,
     CloneCancelMsg,
     CloneProgressMsg,
     CloneStartMsg,
@@ -27,6 +28,7 @@ from echoes_sidecar.ipc.schema import (
 __all__ = [
     "AsrFinalMsg",
     "AsrPartialMsg",
+    "AssistantTextMsg",
     "CloneCancelMsg",
     "CloneProgressMsg",
     "CloneStartMsg",

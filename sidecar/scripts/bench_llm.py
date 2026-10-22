@@ -205,7 +205,7 @@ def main() -> int:
     run.add_argument("--provider", choices=["mock", "ollama", "openai"], required=True)
     run.add_argument("--model", default=None)
     run.add_argument("--base-url", default=None)
-    run.add_argument("--no-think", action="store_true", help="Ollama 推理模型关 thinking（语音场景口径）")
+    run.add_argument("--no-think", action="store_true", help="关闭 thinking（语音场景口径）")
 
     judge = sub.add_parser("judge")
     judge.add_argument("--provider", choices=["mock", "ollama", "openai"], required=True)

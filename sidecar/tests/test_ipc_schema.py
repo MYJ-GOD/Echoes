@@ -36,6 +36,7 @@ def test_golden_positive_roundtrip() -> None:
         "hello",
         "asr_partial",
         "asr_final",
+        "assistant_text",
         "turn_complete",
         "clone_progress",
         "error",

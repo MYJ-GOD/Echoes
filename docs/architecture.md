@@ -1,9 +1,10 @@
-# Echoes 重构开发文档 v1.4
+# Echoes 重构开发文档 v1.4.1
 
 本文档是重构的唯一执行依据。所有讨论中已收敛的决策直接写入，不再重复论证过程；未决事项标注为「决策待定」并给出收敛路径。文档本身随阶段推进迭代，但第 4 节的接口契约在阶段 0 冻结后，后续变更需走变更记录。
 
 **变更记录**
 
+- **v1.4.1 相对 v1.4**（阶段 0 第一周实施中发现的契约缺口，走 12.2 冻结层变更）：3.4 stdio 事件清单追加 `assistant_text` 帧——v1.4 的控制面只有用户侧转写（`asr_partial`/`asr_final`），LLM 回复文本无承载帧，第一周验收「文本→LLM→文本」的文本侧在壳/前端没有数据源。新帧 `{type, session_id, text, t}`：`text` = 截至当前的全量回复文本，流式期间逐帧递增（UI 直接替换渲染），收尾边界由同 turn 的 `turn_complete` 界定；不携带 `turn_seq`（归属当前在途 turn，3.5 单会话单在途 turn）。schema/golden/壳侧解析同 patch 落地；纯追加，旧端 extra=ignore 兼容（3.4 兼容规则）。
 - **v1.4 相对 v1.3**（依独立架构评审修复：3 blocking + 7 important + 2 nit + 3 suggestion，全部采纳；评审框架 source：code-review-skill 架构评审指南）：① 3.4 补控制面消息与控制流定案（`user_text` / `clone_start` / `clone_cancel`、WS 帧 `bit2 = clone_sample`、`interrupt` 与 `cancel_turn` 语义边界及停止按钮映射、设置改为拉取式生效）；② 3.5 状态集合补 `error` 吸收态（含唯一迁出路径），3.4 枚举同步；③ 15.2 依赖图补 `audio/` `ipc/` 两层，AudioChunk 定家 `core/`，15.3 strict 边界同步；④ 分级就绪信号：`hello` 允许重发，`booting→ready` 必需引擎集合定死为 {ASR, LLM}；⑤ 阶段 -1 评测改「本人评分 + LLM-as-judge 双通道」（单人可执行）；⑥ 14.1 补重启后 Session 重建语义；⑦ chunker 职责定案：纯函数句切模块，策略由引擎注入；⑧ 3.2 资产路径原则收敛为资产层内相对路径；⑨ `llama_cpp` 按 YAGNI 移出目录（条件引入条款交给 ADR-001）；⑩ 新增 5.3 数据目录与磁盘治理（AppData 落点、Windows 路径自检、模型删除）；⑪ 错误码表补 `CLONE_CANCELLED`；4.x 签名注解与 `Persona` 定义补全；交叉引用修正两处；音色资产量级条件化。
 - **v1.3 相对 v1.2**：① 新增 3.5 统一应用状态机（合法迁移表 + 用户动作矩阵 + `hello` 握手）；② 3.4 固化观测字段（`t` 时间戳、turn 生命周期耗时），供第 13 节自动测量；③ 新增 13 测试与质量保障（含 IPC schema 单一来源、记忆抽取评测门禁）；④ 新增 14 故障与恢复语义；⑤ 新增 15 工程规范与技术选型（版本锚定、依赖方向 import-linter）；⑥ 新增 16 隐私边界与数据可携带；⑦ 7.1 体积表按 torch 现实修正（ADR-011）+ PyInstaller 探测前置到阶段 0；⑧ ADR-009 写入兜底决策规则（zero-shot 保底）；⑨ 7.3 模型清单支持多下载源；⑩ 阶段 -1 评测方法学修订（交叉评分）并新增「档位×模型矩阵」交付物；⑪ 新增风险 12；ADR 索引补 ADR-011/012/013。
 - v1.2 相对 v1.1：音色状态机、权威错误码总表、打断协议、壳侧采集、ADR-009 升格、上下文预算归属、分阶段验收修订（详见 git 历史）。
@@ -193,6 +194,7 @@ echoes/
 {"type": "hello", "sidecar_version": "0.1.0", "protocol_version": "1.0", "t": 3, "engines": [{"name": "asr", "ready": false}, {"name": "tts", "ready": false}, {"name": "llm", "ready": false}]}
 {"type": "asr_partial", "session_id": "...", "text": "...", "t": 1042}
 {"type": "asr_final", "session_id": "...", "text": "...", "is_final": true, "t": 1187}
+{"type": "assistant_text", "session_id": "...", "text": "...", "t": 1320}
 {"type": "turn_complete", "session_id": "...", "turn_seq": 7, "status": "SUCCESS | CANCELLED | FAILED", "timings": {"total_ms": 2431, "llm_first_token_ms": 692, "tts_first_audio_ms": 1180}}
 {"type": "clone_progress", "session_id": "...", "phase": "recording | training | checking", "pct": 42, "t": 5120}
 {"type": "error", "session_id": "...", "code": "CLONE_QUALITY_LOW", "message": "...", "fatal": false, "t": 214}
@@ -213,6 +215,7 @@ echoes/
 - `interrupt` = 取消当前 turn 的生成与播放，随后立即回到可采集状态（PTT 打断专用）。
 - `cancel_turn` = 仅丢弃当前 turn 且**不进入采集**（停止播放按钮映射为它，3.5）。两者收尾一致：`turn_complete(status=CANCELLED)`，播放缓冲清理由壳负责。
 - **文本输入** = `user_text`：与 `asr_final` 等价触发新 turn（12.3 首周「文本→LLM→文本」即用）。
+- **回复文本** = `assistant_text`（v1.4.1 追加）：LLM 流式回复的文本承载帧，`text` 截至当前全量、逐帧递增，前端直接替换渲染当前 assistant 气泡；turn 收尾以 `turn_complete` 界定（UI 将其定稿）。仅走 stdio 控制面，不走 WS 音频信道。
 - **克隆** = 录制样本经 WS 二进制帧上送（`flags bit2 = clone_sample`），收尾帧后发 `clone_start`，SessionManager 由此触发 `TTSEngine.clone`；`clone_cancel` 中途取消 → 取消克隆协程 + `CloneError(CLONE_CANCELLED)` → 音色落 `failed`（2.5，已绑定会话的绑定关系不受影响）。样本仅在资产目录暂存，不进业务库。
 - **设置生效** = 拉取语义：sidecar 在**每个 turn 开始前**从 `setting` 表读取 provider/隐私模式等配置；壳写入 SQLite 即完成传播，协议不设推送消息。API key 仅由 provider 进程内读取（4.4）。
 

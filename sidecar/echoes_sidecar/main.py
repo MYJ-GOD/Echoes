@@ -2,7 +2,7 @@
 
 骨架运行形态（stdio）：hello（分级就绪）→ state(booting) → 必需引擎 gate（3.5，
 required_engines_ready；不过则停 booting）→ state(ready)；user_text → mock turn
-（generating→speaking→turn_complete→ready）。
+（generating→assistant_text 逐片→speaking→turn_complete→ready；v1.4.1）。
 
 运行（cwd=sidecar）：`..\\.venv\\Scripts\\python -m echoes_sidecar.main`
 （🔴-1 修复：脚本直跑无包路径；stdin 用线程阻塞读，EOF→recv None 正常退出）。
@@ -21,6 +21,7 @@ from echoes_sidecar.engines.asr.mock import MockASREngine
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
 from echoes_sidecar.ipc import (
+    AssistantTextMsg,
     CloneCancelMsg,
     CloneStartMsg,
     ControlMsg,
@@ -115,6 +116,14 @@ async def _mock_turn(
     pieces: list[str] = []
     async for piece in provider.generate(messages):
         pieces.append(piece)
+        # v1.4.1：回复文本逐片回传（text=截至当前全量；收尾由 turn_complete 界定）
+        await transport.send(
+            AssistantTextMsg(
+                session_id=session.session_id,
+                text="".join(pieces),
+                t=_now_ms(t0),
+            ).model_dump(mode="json")
+        )
     reply = "".join(pieces)
 
     machine.transition(AppState.SPEAKING)

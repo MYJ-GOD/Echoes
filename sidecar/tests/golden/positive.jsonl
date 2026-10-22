@@ -3,6 +3,7 @@
 {"type": "hello", "sidecar_version": "0.1.0", "protocol_version": "1.0", "t": 3, "engines": [{"name": "asr", "ready": false}, {"name": "tts", "ready": false}, {"name": "llm", "ready": false}]}
 {"type": "asr_partial", "session_id": "s-demo", "text": "今天有点累", "t": 1042}
 {"type": "asr_final", "session_id": "s-demo", "text": "今天有点累，陪我聊聊", "is_final": true, "t": 1187}
+{"type": "assistant_text", "session_id": "s-demo", "text": "怎么啦？慢慢说，我在听。", "t": 1320}
 {"type": "turn_complete", "session_id": "s-demo", "turn_seq": 7, "status": "SUCCESS", "timings": {"total_ms": 2431, "llm_first_token_ms": 692, "tts_first_audio_ms": 1180}}
 {"type": "turn_complete", "session_id": "s-demo", "turn_seq": 8, "status": "FAILED", "timings": {"total_ms": 512}}
 {"type": "turn_complete", "session_id": "s-demo", "turn_seq": 9, "status": "CANCELLED", "timings": {"total_ms": 88, "tts_first_audio_ms": 40}}
