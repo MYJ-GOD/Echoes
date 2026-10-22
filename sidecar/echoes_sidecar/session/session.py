@@ -2,21 +2,17 @@
 
 重启后的重建语义（14.1 v1.4）：依 DB 最近 session 记录（profile_id/persona_id/voice_id）
 重建并沿用原 session_id；丢失的仅为未落库 turn 与滚动上下文。
+
+Persona 权威定义归 core/types（4.6 v1.4 修复轮：core 级零依赖类型）；本模块 re-export
+以维持「session 层持有聚合」的导入习惯不变。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from echoes_sidecar.core.types import Persona
 
-@dataclass
-class Persona:
-    """人设卡（4.6；与 5.1 persona 表字段一一映射；同为 core 级零依赖类型——4.6 v1.4）。"""
-
-    id: str
-    name: str
-    system_prompt: str
-    created_at: float
-    updated_at: float
+__all__ = ["Persona", "Session"]
 
 
 @dataclass

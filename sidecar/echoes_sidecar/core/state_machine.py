@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from enum import StrEnum
 
 
@@ -18,7 +19,6 @@ class AppState(StrEnum):
     ERROR = "error"
 
 
-# booting→ready 的必需引擎集合 = {ASR, LLM}；TTS 就绪不改状态机（3.5 v1.4）
 LEGAL_TRANSITIONS: dict[AppState, frozenset[AppState]] = {
     AppState.BOOTING: frozenset({AppState.READY, AppState.ERROR}),
     AppState.ERROR: frozenset({AppState.BOOTING}),  # 唯一出口：壳按 14.1 重启→hello→booting
@@ -28,6 +28,9 @@ LEGAL_TRANSITIONS: dict[AppState, frozenset[AppState]] = {
     ),
     AppState.SPEAKING: frozenset({AppState.READY, AppState.GENERATING}),  # 播完 / 重入
 }
+
+# 3.5 v1.4：booting→ready 的必需引擎集合；TTS 就绪不改变状态机（分级就绪 hello）
+REQUIRED_ENGINES_FOR_READY: frozenset[str] = frozenset({"asr", "llm"})
 
 
 class IllegalTransitionError(Exception):
@@ -44,10 +47,20 @@ def is_legal(from_state: AppState, to_state: AppState) -> bool:
     return to_state in LEGAL_TRANSITIONS.get(from_state, frozenset())
 
 
+def required_engines_ready(engines: Iterable[tuple[str, bool]]) -> bool:
+    """分级就绪 gate（3.5 v1.4）：必需引擎集合全部就绪才允许 booting→ready。
+
+    输入 = hello.engines 的 (name, ready) 视图；清单缺必需条目或为空 = 未就绪
+    （防半张清单混过 gate）。就绪变化时重发 hello（3.4）。
+    """
+    states = dict(engines)
+    return all(states.get(name, False) for name in REQUIRED_ENGINES_FOR_READY)
+
+
 class StateMachine:
     """sidecar 状态机：transition() 校验合法迁移，非法抛 IllegalTransitionError。
 
-    非致命错误不进状态机（只发 error 事件，见 3.5 v1.4 error 吸收态定义）。
+    非致命错误不进状态机（只发 error 事件，见 3.5 error 吸收态定义）。
     """
 
     def __init__(self) -> None:

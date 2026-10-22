@@ -29,7 +29,8 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-# strict 边界 = §15.3 v1.4（engines 实现内部放宽但接口签名 strict；main/tests 不在边界内）
+# strict 边界 = §15.3 v1.4 + 修复轮扩展（评审 🟡-2）：三个 engines base.py 与 main.py 纳入；
+# engines 的 mock/未来实现内部放宽，tests 不在边界内
 files = [
   "echoes_sidecar/core",
   "echoes_sidecar/ipc",
@@ -38,6 +39,10 @@ files = [
   "echoes_sidecar/session",
   "echoes_sidecar/orchestration",
   "echoes_sidecar/memory",
+  "echoes_sidecar/engines/asr/base.py",
+  "echoes_sidecar/engines/tts/base.py",
+  "echoes_sidecar/engines/llm/base.py",
+  "echoes_sidecar/main.py",
 ]
 
 [tool.pytest.ini_options]
@@ -47,17 +52,29 @@ asyncio_mode = "auto"
 [tool.importlinter]
 root_package = "echoes_sidecar"
 
-# §15.2 依赖图（v1.4 收口版）：上层只许向下；ipc 是全工程唯一 pydantic 层
+# §15.2 依赖图（v1.4 收口版 + 修复轮重排，评审 🟡-3）：上层只许向下；
+# 同层兄弟（| 分隔）互不 import；ipc 是全工程唯一 pydantic 层。
+# key: main → orchestration → session|transport → engines|memory → audio|ipc → core
 [[tool.importlinter.contracts]]
 name = "15.2 依赖分层（v1.4）"
 type = "layers"
 layers = [
   "echoes_sidecar.main",
   "echoes_sidecar.orchestration",
-  "echoes_sidecar.session",
+  "echoes_sidecar.session | echoes_sidecar.transport",
   "echoes_sidecar.engines | echoes_sidecar.memory",
-  "echoes_sidecar.audio",
-  "echoes_sidecar.transport",
-  "echoes_sidecar.ipc",
+  "echoes_sidecar.audio | echoes_sidecar.ipc",
   "echoes_sidecar.core",
+]
+
+# 3.2「组装归组合根」：编排只依赖引擎 ABC（engines.*.base），
+# 具体引擎实现（mock/未来 faster_whisper/cosyvoice2/ollama/cloud_api——阶段 0 落地时追加）
+[[tool.importlinter.contracts]]
+name = "编排不 import 具体引擎（3.2，修复轮）"
+type = "forbidden"
+source_modules = ["echoes_sidecar.orchestration"]
+forbidden_modules = [
+  "echoes_sidecar.engines.asr.mock",
+  "echoes_sidecar.engines.tts.mock",
+  "echoes_sidecar.engines.llm.mock",
 ]

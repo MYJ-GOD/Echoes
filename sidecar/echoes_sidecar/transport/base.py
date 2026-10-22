@@ -2,6 +2,10 @@
 
 「所有 Transport 实现必须通过同一套一致性测试（13.2 第 3 条）」——
 远程大脑只需换 Transport（文档 8.1）的证明义务挂在 tests/test_transport_conformance.py。
+
+义务注记（评审修复轮）：背压（写端阻塞/读端慢时的流控）未在本骨架实现——
+随 LocalWebSocketTransport 于阶段 0 第二周接入（§12 步骤 4）；13.2-5 的三维
+（schema 双向 / transport 一致性 / 状态机对拍）未齐前不得宣称「契约全绿」。
 """
 from __future__ import annotations
 

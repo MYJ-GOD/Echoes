@@ -8,6 +8,9 @@
 
 ## 快速开始（当前阶段：sidecar 冻结契约骨架）
 
+依赖清单**唯一来源** = `sidecar/pyproject.toml`（`dependencies` + `dev` 组，15.1）；
+以下命令与之同步维护。锁定文件（uv.lock）随阶段 0 的 15.1 依赖锁定引入，骨架期不预留。
+
 ```powershell
 # 仓库根目录
 python -m venv .venv
@@ -18,4 +21,5 @@ cd sidecar
 ..\.venv\Scripts\ruff check .              # lint（100 列）
 ..\.venv\Scripts\python -m mypy            # mypy strict（15.3 边界）
 ..\.venv\Scripts\lint-imports              # 15.2 依赖分层强制
+..\.venv\Scripts\python -m echoes_sidecar.main   # 组合根运行（交互 / 管道；见 3.4）
 ```

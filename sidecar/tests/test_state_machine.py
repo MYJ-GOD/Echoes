@@ -11,10 +11,12 @@ import pytest
 
 from echoes_sidecar.core.state_machine import (
     LEGAL_TRANSITIONS,
+    REQUIRED_ENGINES_FOR_READY,
     AppState,
     IllegalTransitionError,
     StateMachine,
     is_legal,
+    required_engines_ready,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "state_transitions.json"
@@ -63,3 +65,33 @@ def test_state_machine_raises_and_keeps_state() -> None:
     with pytest.raises(IllegalTransitionError):
         machine.transition(AppState.ERROR)
     assert machine.state is AppState.READY
+
+
+# ---------------- 修复轮（评审 🔴-2）：booting→READY 的必需引擎 gate ----------------
+
+
+def test_required_engine_set_frozen() -> None:
+    """3.5 v1.4：booting→ready 的必需引擎集合 = {ASR, LLM}，冻结值。"""
+    assert set(REQUIRED_ENGINES_FOR_READY) == {"asr", "llm"}
+
+
+def test_required_engines_ready_full_set_passes() -> None:
+    """必需集合全就绪 → True（TTS 未就绪不阻塞 READY，3.5 v1.4）。"""
+    assert required_engines_ready([("asr", True), ("tts", False), ("llm", True)]) is True
+
+
+def test_required_engines_ready_missing_asr_blocks() -> None:
+    assert required_engines_ready([("asr", False), ("tts", True), ("llm", True)]) is False
+
+
+def test_required_engines_ready_missing_llm_blocks() -> None:
+    assert required_engines_ready([("asr", True), ("llm", False)]) is False
+
+
+def test_required_engines_ready_missing_entry_blocks() -> None:
+    """hello 引擎清单缺必需条目 = 未就绪（防半张清单混过 gate）。"""
+    assert required_engines_ready([("llm", True)]) is False
+
+
+def test_required_engines_ready_empty_blocks() -> None:
+    assert required_engines_ready([]) is False

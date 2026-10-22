@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from uuid import uuid4
 
 from echoes_sidecar.audio.stream import AudioInputStream
 from echoes_sidecar.core.types import AudioChunk
@@ -16,8 +17,11 @@ class MockTTSEngine(TTSEngine):
         yield AudioChunk(data=b"\x00\x00", seq=0, is_final=True)
 
     async def clone(self, sample: AudioInputStream) -> str:
+        """克隆语义闭环（4.5 mocked）：返回**非保留 ID**（builtin:default 是 2.5
+        none 保留 ID 且不落库，5.1）——否则「克隆成功」与「从未克隆」不可区分。
+        voice:mock-<短尾> 仅骨架内可识别，不暗示资产文件存在。"""
         _ = sample
-        return "builtin:default"
+        return f"voice:mock-{uuid4().hex[:8]}"
 
 
 __all__ = ["MockTTSEngine"]

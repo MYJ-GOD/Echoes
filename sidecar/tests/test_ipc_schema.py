@@ -4,6 +4,7 @@ golden 文件是文档 3.4 示例的镜像；改协议先改 docs/architecture.m
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import get_args
 
@@ -29,7 +30,21 @@ def _lines(name: str) -> list[str]:
 def test_golden_positive_roundtrip() -> None:
     """每条正例可解析，且 dump→再解析 双向稳定（3.4 兼容规则）。"""
     lines = _lines("positive.jsonl")
-    assert len(lines) >= 14  # 3.4 事件 7 类 + 控制 4 类 + boot 态 + 兼容未知字段
+    # 13.2-2「每类消息至少一条正例」机器化：删任一类型即红（比数量下限更严）
+    types = {str(json.loads(line)["type"]) for line in lines}
+    assert types == {
+        "hello",
+        "asr_partial",
+        "asr_final",
+        "turn_complete",
+        "clone_progress",
+        "error",
+        "state",
+        "control",
+        "user_text",
+        "clone_start",
+        "clone_cancel",
+    }
     for line in lines:
         msg = parse_line(line)
         again = msg.model_dump_json()
