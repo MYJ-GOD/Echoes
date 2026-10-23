@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -14,12 +14,17 @@ type ShellEventPayload =
   | { kind: "protocol"; code: string; message: string; fatal: boolean };
 
 type SidecarFrame =
-  | { type: "hello"; sidecar_version: string; protocol_version: string }
+  | {
+      type: "hello";
+      sidecar_version: string;
+      protocol_version: string;
+      engines?: { name: string; ready: boolean }[];
+    }
   | { type: "state"; state: string }
+  | { type: "asr_final"; session_id: string; text: string; is_final: boolean }
   | { type: "assistant_text"; session_id: string; text: string }
   | { type: "turn_complete"; session_id: string; turn_seq: number; status: string }
-  | { type: "error"; session_id: string | null; code: string; message: string }
-  | Record<string, unknown>;
+  | { type: "error"; session_id: string | null; code: string; message: string };
 
 // 阶段 0 第一周：文本→LLM→文本 经 StdioTransport 打通；
 // 麦克风（PTT）与音频播放为壳侧采集验证（风险 10），后续接入。
@@ -27,6 +32,8 @@ const messages = ref<ChatMessage[]>([]);
 const input = ref("");
 const busy = ref(false);
 const engineState = ref("connecting");
+// hello.engines 分级就绪（3.4 v1.4）：ASR 未就绪前 PTT 不可用。
+const asrReady = ref(false);
 // assistant 流式气泡边界：true=最后一条 assistant 气泡在途（assistant_text 全量替换渲染），
 // 收尾由 turn_complete（或 error）复位 —— v1.4.1 语义。
 const streaming = ref(false);
@@ -54,8 +61,18 @@ onUnmounted(() => {
 
 function handleFrame(frame: SidecarFrame): void {
   switch (frame.type) {
+    case "hello":
+      asrReady.value =
+        frame.engines?.some((e) => e.name === "asr" && e.ready) ?? false;
+      break;
     case "state":
       engineState.value = String(frame.state);
+      break;
+    case "asr_final":
+      // 语音面输入：sidecar 随后立即进入 turn（asr_final 与 user_text 等价）。
+      messages.value.push({ role: "user", text: String(frame.text) });
+      busy.value = true;
+      micStatus.value = "麦克风就绪";
       break;
     case "assistant_text": {
       const text = String(frame.text);
@@ -85,8 +102,8 @@ function handleFrame(frame: SidecarFrame): void {
   }
 }
 
-// 壳侧麦克风采集自检（文档 12.3 首周 · 风险 10 最小验证面）：
-// getUserMedia 拿到轨道即可声明权限/设备可见；48k→16k 重采样与 WS 推送为后续周。
+// 壳侧麦克风自检（文档 12.3 首周 · 风险 10 最小验证面）：
+// 拿轨道即声明权限/设备可见；真正采集在下方 PTT（48k → Rust 重采样 16k → WS）。
 const micStatus = ref("");
 
 async function micProbe(): Promise<void> {
@@ -108,6 +125,151 @@ async function micProbe(): Promise<void> {
         : `⚠ ${name}：${(err as Error).message}`;
   }
 }
+
+// ---- 按住说话（§12 步骤 4）：getUserMedia 48k PCM16 分片 → Rust 重采样 16k → WS ----
+const PTT_CHUNK = 4800; // 100ms @48k
+const pttHeld = ref(false);
+const listening = ref(false);
+const pttEnabled = computed(
+  () => !busy.value && engineState.value === "ready" && asrReady.value,
+);
+
+let micStream: MediaStream | null = null;
+let micCtx: AudioContext | null = null;
+let micSource: MediaStreamAudioSourceNode | null = null;
+let micProcessor: ScriptProcessorNode | null = null;
+let micMute: GainNode | null = null;
+let pendingSamples: number[] = [];
+// 串行化分片上行：Tauri IPC 保序，但 Promise 链保证「尾片 → is_final」严格在后。
+let sendChain: Promise<unknown> = Promise.resolve();
+
+function enqueueChunk(samples: number[]): void {
+  sendChain = sendChain
+    .then(() => invoke("ptt_push", { samples }))
+    .catch((err) => {
+      micStatus.value = `⚠ 音频发送失败：${String(err)}`;
+    });
+}
+
+function cleanupMic(): void {
+  if (micProcessor) {
+    micProcessor.onaudioprocess = null;
+    micProcessor.disconnect();
+  }
+  micSource?.disconnect();
+  micMute?.disconnect();
+  micStream?.getTracks().forEach((track) => track.stop());
+  if (micCtx && micCtx.state !== "closed") {
+    void micCtx.close();
+  }
+  micProcessor = null;
+  micSource = null;
+  micMute = null;
+  micStream = null;
+  micCtx = null;
+  pendingSamples = [];
+  listening.value = false;
+}
+
+function micErrorMessage(err: unknown): string {
+  const name = (err as DOMException).name;
+  if (name === "NotFoundError") return "MIC_NOT_AVAILABLE：未检测到麦克风";
+  if (name === "NotAllowedError") return "MIC_NOT_AVAILABLE：麦克风权限被拒绝";
+  return `${name}：${(err as Error).message}`;
+}
+
+async function pttStart(): Promise<void> {
+  if (!pttEnabled.value || pttHeld.value) return;
+  pttHeld.value = true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    });
+    if (!pttHeld.value) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    // 先 flush 在途播放（打断首跳）并复位重采样器，再开始送分片。
+    await invoke("ptt_start");
+    if (!pttHeld.value) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+
+    const ctx = new AudioContext({ sampleRate: 48000 });
+    if (Math.round(ctx.sampleRate) !== 48000) {
+      const actual = ctx.sampleRate;
+      await ctx.close();
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error(`采集采样率非 48k（${actual}Hz）`);
+    }
+    await ctx.resume();
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    pendingSamples = [];
+    processor.onaudioprocess = (event) => {
+      const data = event.inputBuffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) {
+        const value = Math.max(-1, Math.min(1, data[i]));
+        pendingSamples.push(Math.round(value < 0 ? value * 0x8000 : value * 0x7fff));
+      }
+      while (pendingSamples.length >= PTT_CHUNK) {
+        enqueueChunk(pendingSamples.splice(0, PTT_CHUNK));
+      }
+    };
+    source.connect(processor);
+    // ScriptProcessor 需挂到 destination 才会被驱动；零增益避免麦克风回放啸叫。
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    processor.connect(mute);
+    mute.connect(ctx.destination);
+
+    micStream = stream;
+    micCtx = ctx;
+    micSource = source;
+    micProcessor = processor;
+    micMute = mute;
+    listening.value = true;
+    micStatus.value = "🎙 录音中…";
+  } catch (err) {
+    pttHeld.value = false;
+    cleanupMic();
+    micStatus.value = `⚠ ${micErrorMessage(err)}`;
+  }
+}
+
+async function pttStop(): Promise<void> {
+  if (!pttHeld.value) return;
+  pttHeld.value = false;
+  if (!micStream) return; // getUserMedia 尚未返回：pttStart 会自行清理
+  const rest = pendingSamples;
+  pendingSamples = [];
+  cleanupMic();
+  try {
+    await sendChain;
+    if (rest.length > 0) {
+      await invoke("ptt_push", { samples: rest });
+    }
+    await invoke("ptt_stop");
+    micStatus.value = "识别中…";
+  } catch (err) {
+    micStatus.value = `⚠ ${String(err)}`;
+  }
+}
+
+function onWindowBlur(): void {
+  void pttStop();
+}
+
+onMounted(() => {
+  window.addEventListener("blur", onWindowBlur);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("blur", onWindowBlur);
+  pttHeld.value = false;
+  cleanupMic();
+});
 
 async function send(): Promise<void> {
   const text = input.value.trim();
@@ -142,7 +304,20 @@ async function send(): Promise<void> {
     <footer>
       <input v-model="input" type="text" placeholder="输入消息…" @keyup.enter="send" />
       <button :disabled="busy" @click="send">发送</button>
-      <button class="ptt" disabled title="阶段 0 接入麦克风采集">按住说话</button>
+      <button
+        class="ptt"
+        :class="{ recording: listening }"
+        :disabled="!pttEnabled"
+        :title="asrReady ? '按住说话（松开结束）' : 'ASR 就绪后可用'"
+        @mousedown.prevent="pttStart"
+        @mouseup="pttStop"
+        @mouseleave="pttStop"
+        @touchstart.prevent="pttStart"
+        @touchend.prevent="pttStop"
+        @touchcancel="pttStop"
+      >
+        {{ listening ? "松开结束" : "按住说话" }}
+      </button>
       <button class="mic" @click="micProbe">{{ micStatus || "麦克风自检" }}</button>
     </footer>
   </main>
@@ -237,6 +412,9 @@ footer button:disabled {
 footer .ptt,
 footer .mic {
   background: #36343b;
+}
+footer .ptt.recording {
+  background: #b3261e;
 }
 footer .mic {
   font-size: 12px;

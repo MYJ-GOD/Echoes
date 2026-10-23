@@ -1,7 +1,7 @@
 //! sidecar 子进程生命周期 + stdio JSON 行协议壳侧执行点（3.3/3.4）。
 //!
-//! 首周范围（12.3）：spawn → `hello` 握手校验（protocol_version 大版本）→
-//! `user_text` 下行 / 事件流转发（emit 到前端）；WS 音频通道后续周接入。
+//! 范围：spawn → `hello` 握手校验（protocol_version 大版本）→ 事件流转发（emit
+//! 到前端）；stderr 转发并解析 WS 音频面端口（`ws://127.0.0.1:PORT`，3.4）。
 //! 事件模型对齐 sidecar 冻结契约 v1.4.1（13.2-1 单一来源 `echoes_sidecar/ipc/schema.py`），
 //! serde 默认忽略未知字段 = 3.4 兼容规则的壳侧执行点；未知消息行忽略不崩。
 
@@ -123,6 +123,43 @@ fn forward_events<R: BufRead>(mut reader: R, sink: &mut dyn FnMut(ShellEvent)) {
 
 pub const SHELL_EVENT: &str = "sidecar://event";
 const PROTOCOL_MAJOR: &str = "1";
+const WS_PORT_MARKER: &str = "ws://127.0.0.1:";
+
+/// stderr 逐行转发 + WS 端口提取。
+///
+/// Python 在 Windows 控制台的 stderr 编码是 GBK，必须按字节读再 lossy 解码；
+/// 若用 `lines()`（要求 UTF-8）会在首条中文日志处中断，端口行永远读不到。
+fn forward_stderr<R: BufRead>(mut reader: R, mut on_ws_port: Box<dyn FnMut(u16) + Send>) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        log::debug!("sidecar stderr: {line}");
+        if let Some(port) = parse_ws_port(line) {
+            log::info!("sidecar WS 音频面端口: {port}");
+            on_ws_port(port);
+        }
+    }
+}
+
+/// 从 sidecar stderr 行提取 `ws://127.0.0.1:PORT`（无正则依赖）。
+fn parse_ws_port(line: &str) -> Option<u16> {
+    let start = line.find(WS_PORT_MARKER)? + WS_PORT_MARKER.len();
+    let digits: String = line[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
 
 /// sidecar 子进程：stdin 写入端常驻，Drop 时杀进程（3.3 sidecar.rs 职责的最小面）。
 pub struct Sidecar {
@@ -133,9 +170,14 @@ pub struct Sidecar {
 impl Sidecar {
     /// dev 形态：`<仓库根>/sidecar/.venv/Scripts/python -m echoes_sidecar.main`
     /// （cwd=sidecar/，与终端运行形态一致；生产 split-binary 由 ADR-011 定稿后替换）。
+    ///
+    /// `args` 为引擎装配参数（真路/ mock 由组合根决定，12.3）；`on_ws_port` 在
+    /// stderr 出现 WS 端口行时回调一次（`--ws auto` 时；便携形态见 lib.rs）。
     pub fn spawn(
         sidecar_dir: &Path,
+        args: &[String],
         sink: Box<dyn FnMut(ShellEvent) + Send>,
+        on_ws_port: Box<dyn FnMut(u16) + Send>,
     ) -> Result<Self, String> {
         let python = sidecar_dir
             .parent()
@@ -145,10 +187,11 @@ impl Sidecar {
             .join("python.exe");
         let mut child = Command::new(&python)
             .args(["-m", "echoes_sidecar.main"])
+            .args(args)
             .current_dir(sidecar_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("sidecar 启动失败 ({}): {e}", python.display()))?;
 
@@ -156,6 +199,10 @@ impl Sidecar {
             .stdout
             .take()
             .ok_or_else(|| "sidecar stdout 管道不可用".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "sidecar stderr 管道不可用".to_string())?;
         let stdin = child
             .stdin
             .take()
@@ -163,6 +210,7 @@ impl Sidecar {
 
         let mut sink = sink;
         std::thread::spawn(move || forward_events(BufReader::new(stdout), &mut sink));
+        std::thread::spawn(move || forward_stderr(BufReader::new(stderr), on_ws_port));
 
         Ok(Self {
             child,
@@ -215,9 +263,11 @@ mod tests {
         let (tx, rx) = mpsc::channel::<ShellEvent>();
         let sidecar = Sidecar::spawn(
             &sidecar_dir(),
+            &[],
             Box::new(move |event| {
                 let _ = tx.send(event);
             }),
+            Box::new(|_| {}),
         )
         .expect("sidecar 启动");
 
@@ -276,5 +326,94 @@ mod tests {
                 return ev;
             }
         }
+    }
+
+    #[test]
+    fn parse_ws_port_extracts_listen_line() {
+        let line = "[sidecar] WS 音频面监听 ws://127.0.0.1:49692（壳侧连接即收帧）";
+        assert_eq!(parse_ws_port(line), Some(49692));
+        assert_eq!(parse_ws_port("no ws endpoint"), None);
+        assert_eq!(parse_ws_port("ws://127.0.0.1:"), None);
+    }
+
+    /// §12 步骤 4 壳侧自动化形态：真进程 + WS 音频面（mock 引擎）→ 上行 PTT 帧 →
+    /// asr_final → turn_complete(SUCCESS) → 下行 0x02 帧。播放设备不参与（回调收帧）。
+    #[test]
+    fn ptt_audio_end_to_end() {
+        use crate::ws_audio::{pcm16_le, WsAudioClient};
+
+        let (tx, rx) = mpsc::channel::<ShellEvent>();
+        let (port_tx, port_rx) = mpsc::channel::<u16>();
+        let args: Vec<String> = [
+            "--llm", "mock", "--asr", "mock", "--tts", "mock", "--ws", "auto",
+        ]
+        .map(String::from)
+        .to_vec();
+        let _sidecar = Sidecar::spawn(
+            &sidecar_dir(),
+            &args,
+            Box::new(move |event| {
+                let _ = tx.send(event);
+            }),
+            Box::new(move |port| {
+                let _ = port_tx.send(port);
+            }),
+        )
+        .expect("sidecar 启动");
+
+        let hello = recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::Hello { .. })),
+            Duration::from_secs(20),
+        );
+        assert!(matches!(
+            hello,
+            ShellEvent::Sidecar(SidecarEvent::Hello { .. })
+        ));
+        let port = port_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("WS 端口回调");
+
+        let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>();
+        let client = WsAudioClient::connect(port, move |pcm| {
+            let _ = pcm_tx.send(pcm);
+        });
+        // 400ms 16k mono（内容无关：mock ASR 恒定文本）+ is_final 空帧
+        let pcm: Vec<i16> = (0..6400)
+            .map(|n| ((n as f64 * 0.4).sin() * 4000.0) as i16)
+            .collect();
+        for chunk in pcm.chunks(1600) {
+            client.send_input(pcm16_le(chunk), false);
+        }
+        client.send_input(Vec::new(), true);
+
+        let asr = recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::AsrFinal { .. })),
+            Duration::from_secs(20),
+        );
+        match asr {
+            ShellEvent::Sidecar(SidecarEvent::AsrFinal { text, .. }) => {
+                assert_eq!(text, "（mock）今天有点累，陪我聊聊");
+            }
+            other => panic!("应为 asr_final，实得 {other:?}"),
+        }
+
+        let done = recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::TurnComplete { .. })),
+            Duration::from_secs(20),
+        );
+        match done {
+            ShellEvent::Sidecar(SidecarEvent::TurnComplete { status, .. }) => {
+                assert_eq!(status, "SUCCESS");
+            }
+            other => panic!("应为 turn_complete，实得 {other:?}"),
+        }
+
+        let downstream = pcm_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("下行 0x02 音频帧");
+        assert!(!downstream.is_empty());
     }
 }
