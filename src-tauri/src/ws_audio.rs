@@ -8,7 +8,9 @@
 //! 与下行 TTS 帧并行），而壳内调用点是同步的 Tauri 命令/专用线程。专用线程内
 //! `block_on(select!(读, 写))` 与 Tauri runtime 解耦，也便于无 Tauri 的单测对拍。
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -19,6 +21,72 @@ pub const DIR_OUTPUT: u8 = 0x02;
 pub const FLAG_FINAL: u8 = 0x01;
 /// bit2：克隆样本分片（3.4）；与 IS_FINAL 可叠加，sidecar 侧按此分流不进 ASR。
 pub const FLAG_CLONE_SAMPLE: u8 = 0x04;
+
+/// 下行帧闸门（三跳第二跳的壳侧执行点，3.4）。
+///
+/// PTT 打断时壳先 `shut()`（丢掉打断前已在管道里的旧 turn 帧），再等 sidecar 的
+/// `turn_complete(CANCELLED)` 确认后 `open()`。为什么不能只 flush 播放缓冲：
+/// WS 线程与 Tauri 事件线程是两条线，flush 之后仍可能有**旧 turn** 的帧到达，
+/// 那些帧必须丢——否则被打断的那句话会接着念出来。
+///
+/// 自释放兜底：打断时若 sidecar 那边其实已无在途 turn，就不会有 `turn_complete`
+/// 来开门，闸门会永久关闭（等于全场静音）。所以闸门最多关 `MAX_SHUT`，超时自动
+/// 放行并记 warn——宁可漏一帧旧音，不可整体失声。
+#[derive(Clone)]
+pub struct OutputGate {
+    shut: Arc<AtomicBool>,
+    since: Arc<Mutex<Option<Instant>>>,
+}
+
+const MAX_SHUT: Duration = Duration::from_millis(1500);
+
+impl OutputGate {
+    /// 新会话/新连接：放行。
+    pub fn new() -> Self {
+        Self {
+            shut: Arc::new(AtomicBool::new(false)),
+            since: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// 关闭闸门（丢弃下行帧）——打断按下时调用，必须先于 `control` 发出。
+    pub fn shut(&self) {
+        if let Ok(mut since) = self.since.lock() {
+            *since = Some(Instant::now());
+        }
+        self.shut.store(true, Ordering::SeqCst);
+    }
+
+    /// 打开闸门（恢复播放）——`turn_complete` / `error` 到达时调用。
+    pub fn open(&self) {
+        self.shut.store(false, Ordering::SeqCst);
+    }
+
+    /// 闸门是否关闭中（超时自释放，见类型注释）。
+    pub fn is_shut(&self) -> bool {
+        if !self.shut.load(Ordering::SeqCst) {
+            return false;
+        }
+        let expired = self
+            .since
+            .lock()
+            .ok()
+            .and_then(|since| *since)
+            .is_none_or(|at| at.elapsed() > MAX_SHUT);
+        if expired {
+            log::warn!("下行闸门关闭超过 {MAX_SHUT:?} 未收到收尾事件，自动放行");
+            self.open();
+            return false;
+        }
+        true
+    }
+}
+
+impl Default for OutputGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// 解析后的音频帧（payload 借用原始缓冲区）。
 #[derive(Debug, PartialEq, Eq)]
@@ -84,7 +152,12 @@ pub struct WsAudioClient {
 impl WsAudioClient {
     /// 连接 sidecar 的 WS 音频面；输出帧回调在 WS 线程上执行（实现必须快速返回）。
     /// 连接失败重试 5s（端口由 stderr 解析，正常时序下首连即成功）。
-    pub fn connect(port: u16, on_output: impl FnMut(Vec<i16>) + Send + 'static) -> Self {
+    /// `gate` 关闭期间下行帧直接丢弃并记 seq（三跳第二跳，见 `OutputGate`）。
+    pub fn connect(
+        port: u16,
+        gate: OutputGate,
+        on_output: impl FnMut(Vec<i16>) + Send + 'static,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         std::thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -97,7 +170,7 @@ impl WsAudioClient {
                     return;
                 }
             };
-            runtime.block_on(run(port, rx, on_output));
+            runtime.block_on(run(port, gate, rx, on_output));
         });
         Self { tx }
     }
@@ -126,6 +199,7 @@ impl WsAudioClient {
 
 async fn run(
     port: u16,
+    gate: OutputGate,
     mut rx: mpsc::UnboundedReceiver<InputChunk>,
     mut on_output: impl FnMut(Vec<i16>),
 ) {
@@ -169,6 +243,11 @@ async fn run(
                 match inbound {
                     Some(Ok(Message::Binary(data))) => match decode_frame(&data) {
                         Ok(frame) if frame.direction == DIR_OUTPUT => {
+                            if gate.is_shut() {
+                                // 三跳：打断前已在管道里的旧 turn 帧，丢弃不播（记 seq 便于对账）
+                                log::debug!("闸门关闭中，丢弃下行帧 seq={}", frame.seq);
+                                continue;
+                            }
                             if frame.is_final() {
                                 log::debug!("TTS 末帧 seq={}", frame.seq);
                             }
@@ -286,7 +365,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("server port");
         let (out_tx, out_rx) = std_mpsc::channel::<Vec<i16>>();
-        let client = WsAudioClient::connect(port, move |pcm| {
+        let client = WsAudioClient::connect(port, OutputGate::new(), move |pcm| {
             let _ = out_tx.send(pcm);
         });
         client.send_input(pcm16_le(&[1, 2]), false);
@@ -296,6 +375,54 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("下行音频回调");
         assert_eq!(pcm, vec![9, 8]);
+        server.join().expect("server");
+    }
+
+    /// 三跳第二跳：闸门关闭期间到达的下行帧必须丢弃（旧 turn 的音不许再播）。
+    #[test]
+    fn shut_gate_drops_downstream_frames() {
+        let (port_tx, port_rx) = std_mpsc::channel::<u16>();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind");
+                port_tx
+                    .send(listener.local_addr().expect("addr").port())
+                    .expect("port");
+                let (tcp, _) = listener.accept().await.expect("accept");
+                let mut ws = tokio_tungstenite::accept_async(tcp).await.expect("ws 握手");
+                for (seq, payload) in [(0u32, vec![1u8, 0]), (1, vec![2, 0]), (2, vec![3, 0])] {
+                    ws.send(Message::Binary(
+                        encode_frame(DIR_OUTPUT, seq, FLAG_FINAL, &payload).into(),
+                    ))
+                    .await
+                    .expect("下行帧");
+                }
+                // 主动关闭：客户端读到 Close 即退出读循环，用例不会卡在 join
+                let _ = ws.close(None).await;
+            });
+        });
+
+        let gate = OutputGate::new();
+        gate.shut();
+        let port = port_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server port");
+        let (out_tx, out_rx) = std_mpsc::channel::<Vec<i16>>();
+        let _client = WsAudioClient::connect(port, gate.clone(), move |pcm| {
+            let _ = out_tx.send(pcm);
+        });
+
+        assert!(
+            out_rx.recv_timeout(Duration::from_millis(600)).is_err(),
+            "闸门关闭期间不得有任何帧进入播放"
+        );
+        gate.open();
         server.join().expect("server");
     }
 }

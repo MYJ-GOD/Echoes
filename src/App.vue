@@ -6,6 +6,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 interface ChatMessage {
   role: "user" | "assistant";
   text: string;
+  /** 被打断的 assistant 气泡（3.4 三跳：turn_complete(status=CANCELLED)） */
+  interrupted?: boolean;
 }
 
 // 壳事件侧车帧（结对 sidecar.rs 的 ShellEvent；未知 kind 忽略 —— 3.4 兼容规则）
@@ -86,9 +88,19 @@ function handleFrame(frame: SidecarFrame): void {
       asrReady.value =
         frame.engines?.some((e) => e.name === "asr" && e.ready) ?? false;
       break;
-    case "state":
-      engineState.value = String(frame.state);
+    case "state": {
+      // 3.5：state 归 sidecar 所有，壳只是渲染者——busy 以状态机为准，
+      // 不再靠本地标志推断（打断/失败都要能可靠解锁）
+      const next = String(frame.state);
+      engineState.value = next;
+      if (next === "ready") {
+        busy.value = false;
+        streaming.value = false;
+      } else if (next === "generating" || next === "speaking") {
+        busy.value = true;
+      }
       break;
+    }
     case "asr_final":
       // 语音面输入：sidecar 随后立即进入 turn（asr_final 与 user_text 等价）。
       messages.value.push({ role: "user", text: String(frame.text) });
@@ -106,10 +118,16 @@ function handleFrame(frame: SidecarFrame): void {
       }
       break;
     }
-    case "turn_complete":
+    case "turn_complete": {
+      const status = String(frame.status);
+      const last = messages.value[messages.value.length - 1];
+      if (status === "CANCELLED" && last?.role === "assistant") {
+        last.interrupted = true; // 被打断的半句留痕，而不是悄悄丢掉
+      }
       streaming.value = false;
       busy.value = false;
       break;
+    }
     case "clone_progress":
       // recording → training → checking（4.5）：progress 缺失即「假死」，所以这里必须驱动 UI
       clonePhase.value =
@@ -171,13 +189,16 @@ const PTT_CHUNK = 4800; // 100ms @48k
 const captureHeld = ref(false);
 const listening = ref(false);
 const cloneSeconds = ref(0);
+/** 3.5 动作矩阵：generating/speaking 期 PTT 可用，按下即打断（不是禁用）。 */
 const pttEnabled = computed(
   () =>
-    !busy.value &&
-    engineState.value === "ready" &&
     asrReady.value &&
-    clonePhase.value === null,
+    clonePhase.value === null &&
+    (engineState.value === "ready" ||
+      engineState.value === "generating" ||
+      engineState.value === "speaking"),
 );
+
 // 3.5 用户动作矩阵：克隆入口只在 ready 可用，且不与 turn / 在途克隆并发
 const cloneEnabled = computed(
   () =>
@@ -256,6 +277,12 @@ async function startCapture(mode: CaptureMode): Promise<void> {
     clonePhase.value = "recording";
     clonePct.value = 0;
     cloneSeconds.value = 0;
+  } else if (busy.value) {
+    // 三跳首跳：按下即关闸门 + 清播放缓冲 + 通知 sidecar 取消（≤100ms 内静音，
+    // 不等 sidecar 确认）。必须先于 getUserMedia——权限/设备协商可能要几百毫秒。
+    void invoke("interrupt_turn").catch((err) => {
+      micStatus.value = `⚠ 打断失败：${String(err)}`;
+    });
   }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -398,9 +425,20 @@ onUnmounted(() => {
   cleanupMic();
 });
 
+/** 停止播放（3.5 动作矩阵）：丢弃当前 turn 但不进入采集 → `control(cancel_turn)`。 */
+function stopTurn(): void {
+  void invoke("cancel_turn").catch((err) => {
+    micStatus.value = `⚠ 停止失败：${String(err)}`;
+  });
+}
+
 async function send(): Promise<void> {
   const text = input.value.trim();
-  if (!text || busy.value) return;
+  if (!text) return;
+  if (busy.value) {
+    // 3.5：文本输入 = 打断并发起新 turn（旧 turn 收尾为 CANCELLED）
+    void invoke("interrupt_turn").catch(() => {});
+  }
   messages.value.push({ role: "user", text });
   input.value = "";
   busy.value = true;
@@ -424,6 +462,7 @@ async function send(): Promise<void> {
     <ul class="history">
       <li v-for="(m, i) in messages" :key="i" :class="m.role">
         <span v-if="m.text !== ''" class="bubble">{{ m.text }}</span>
+        <span v-if="m.interrupted" class="cut">已打断</span>
       </li>
       <li v-if="messages.length === 0" class="empty">和 Echoes 说点什么…</li>
     </ul>
@@ -440,12 +479,19 @@ async function send(): Promise<void> {
 
     <footer>
       <input v-model="input" type="text" placeholder="输入消息…" @keyup.enter="send" />
-      <button :disabled="busy" @click="send">发送</button>
+      <button @click="send">发送</button>
+      <button v-if="busy" class="stop" title="停止本次回复" @click="stopTurn">停止</button>
       <button
         class="ptt"
         :class="{ recording: listening }"
         :disabled="!pttEnabled"
-        :title="asrReady ? '按住说话（松开结束）' : 'ASR 就绪后可用'"
+        :title="
+          !asrReady
+            ? 'ASR 就绪后可用'
+            : busy
+              ? '按住说话（会打断当前回复）'
+              : '按住说话（松开结束）'
+        "
         @mousedown.prevent="pttStart"
         @mouseup="pttStop"
         @mouseleave="pttStop"
@@ -453,7 +499,7 @@ async function send(): Promise<void> {
         @touchend.prevent="pttStop"
         @touchcancel="pttStop"
       >
-        {{ listening ? "松开结束" : "按住说话" }}
+        {{ listening ? "松开结束" : busy ? "打断并说话" : "按住说话" }}
       </button>
       <button
         class="clone"
@@ -541,6 +587,11 @@ h1 {
 .user .bubble {
   background: #4a4458;
 }
+.cut {
+  margin-left: 6px;
+  font-size: 11px;
+  color: #8a8494;
+}
 .empty {
   color: #6f6a7a;
   font-size: 13px;
@@ -572,7 +623,8 @@ footer button:disabled {
 }
 footer .ptt,
 footer .clone,
-footer .mic {
+footer .mic,
+footer .stop {
   background: #36343b;
 }
 footer .clone.recording {

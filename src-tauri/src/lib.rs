@@ -2,7 +2,8 @@
 //!
 //! 语音链路（3.4）：前端 getUserMedia 48k PCM16 → `ptt_*` 命令 → capture 重采样
 //! 16k → WS 0x01 帧 → sidecar ASR；下行 0x02 帧 → rodio 播放（ADR-010）。
-//! PTT 按下先 flush 本地播放（壳侧打断首跳；三跳完整协议在阶段 0 第四周）。
+//! 三跳打断（3.4）：PTT 按下 → 关下行闸门 + flush 播放缓冲（≤100ms）→
+//! `control(interrupt)`；sidecar 回 `turn_complete(CANCELLED)` 后开门。
 
 mod audio;
 mod capture;
@@ -16,22 +17,48 @@ use audio::AudioPlayer;
 use capture::CaptureResampler;
 use sidecar::Sidecar;
 use tauri::{Emitter, Manager};
-use ws_audio::{pcm16_le, WsAudioClient};
+use ws_audio::{pcm16_le, OutputGate, WsAudioClient};
 
 /// 壳独占持有的 sidecar 句柄（命令经 State 取用）。
 struct SidecarState(Sidecar);
 
-/// 音频面状态：播放线程 + PTT 重采样器 + WS 上行端（端口解析后装配）。
+/// 音频面状态：播放线程 + PTT 重采样器 + WS 上行端（端口解析后装配）+ 下行闸门。
 struct AudioState {
     player: AudioPlayer,
     capture: Mutex<CaptureResampler>,
     ws: Mutex<Option<WsAudioClient>>,
+    gate: OutputGate,
 }
 
 /// 前端文本输入 → sidecar `user_text`（12.3 首周「文本→LLM→文本」壳侧入口）。
 #[tauri::command]
 fn send_user_text(state: tauri::State<SidecarState>, text: String) -> Result<(), String> {
     state.0.send_user_text("default", &text)
+}
+
+/// 打断在途 turn（3.4 三跳第二跳）：关闸门 → 清播放缓冲 → `control(interrupt)`。
+///
+/// 顺序不可颠倒：先关闸门，打断前已在 WS 管道里的旧 turn 帧才不会漏进来；
+/// 先清缓冲，用户感知的静音就 ≤100ms（不等 sidecar 确认）。
+#[tauri::command]
+fn interrupt_turn(
+    audio: tauri::State<AudioState>,
+    sidecar: tauri::State<SidecarState>,
+) -> Result<(), String> {
+    audio.gate.shut();
+    audio.player.flush();
+    sidecar.0.send_control("default", "interrupt")
+}
+
+/// 停止播放（3.5 动作矩阵）：只丢弃当前 turn，不进入采集 → `control(cancel_turn)`。
+#[tauri::command]
+fn cancel_turn(
+    audio: tauri::State<AudioState>,
+    sidecar: tauri::State<SidecarState>,
+) -> Result<(), String> {
+    audio.gate.shut();
+    audio.player.flush();
+    sidecar.0.send_control("default", "cancel_turn")
 }
 
 /// PTT 按下：中断本地在途播放（打断首跳）+ 重置重采样器。
@@ -182,10 +209,12 @@ pub fn run() {
       }
 
       // 音频面先装配：端口回调里要 clone AudioPlayer 给 WS 下行帧。
+      let gate = OutputGate::new();
       app.manage(AudioState {
         player: AudioPlayer::start(),
         capture: Mutex::new(CaptureResampler::new()),
         ws: Mutex::new(None),
+        gate: gate.clone(),
       });
 
       // 阶段 0 dev 形态：仓库根 sidecar/（.venv Python）。
@@ -198,16 +227,35 @@ pub fn run() {
 
       let emit_handle = app.handle().clone();
       let port_handle = app.handle().clone();
+      // 下行闸门何时开门（三跳第二跳的收尾条件）：
+      // - turn_complete / error：被打断或失败的 turn 已被 sidecar 界定；
+      // - state=ready|generating：一次 turn 的生命周期边界（新轮起步也在这里）。
+      // 刻意**不**在 state=speaking 开门：那正是"打断还没生效、旧 turn 仍在产音频"
+      // 的窗口，此时开门就会漏出旧音。闸门自身另有超时自释放兜底（ws_audio）。
+      let gate_for_events = gate.clone();
       let spawn_result = Sidecar::spawn(
         &sidecar_dir,
         &args,
         &[],
         Box::new(move |event| {
+          let turn_ended = match &event {
+            sidecar::ShellEvent::Sidecar(sidecar::SidecarEvent::TurnComplete { .. })
+            | sidecar::ShellEvent::Sidecar(sidecar::SidecarEvent::Error { .. }) => true,
+            sidecar::ShellEvent::Sidecar(sidecar::SidecarEvent::State { state, .. }) => {
+              state == "ready" || state == "generating"
+            }
+            sidecar::ShellEvent::Protocol { .. } => true,
+            _ => false,
+          };
+          if turn_ended {
+            gate_for_events.open();
+          }
           let _ = emit_handle.emit(sidecar::SHELL_EVENT, event);
         }),
         Box::new(move |port| {
           let player = port_handle.state::<AudioState>().player.clone();
-          let client = WsAudioClient::connect(port, move |pcm| player.push_pcm16(&pcm));
+          let gate = port_handle.state::<AudioState>().gate.clone();
+          let client = WsAudioClient::connect(port, gate, move |pcm| player.push_pcm16(&pcm));
           match port_handle.state::<AudioState>().ws.lock() {
             Ok(mut slot) => *slot = Some(client),
             Err(err) => log::error!("音频通道状态锁损坏: {err}"),
@@ -238,6 +286,8 @@ pub fn run() {
       ptt_start,
       ptt_push,
       ptt_stop,
+      interrupt_turn,
+      cancel_turn,
       clone_record_start,
       clone_push,
       clone_record_stop,

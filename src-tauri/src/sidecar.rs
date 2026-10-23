@@ -235,6 +235,18 @@ impl Sidecar {
         }))
     }
 
+    /// 壳→sidecar：打断在途 turn（3.4 三跳第二跳）。
+    ///
+    /// `interrupt` 与 `cancel_turn` 在 sidecar 侧收尾一致（`turn_complete(CANCELLED)`），
+    /// 差异在壳：interrupt 之后立即开采集，cancel_turn 不采集（3.4 控制动词定案）。
+    pub fn send_control(&self, session_id: &str, action: &str) -> Result<(), String> {
+        self.send_line(&serde_json::json!({
+            "type": "control",
+            "action": action,
+            "session_id": session_id,
+        }))
+    }
+
     /// 壳→sidecar：样本已通过 WS bit2 帧上送完毕，请开始克隆（3.4/4.6）。
     pub fn send_clone_start(
         &self,
@@ -288,6 +300,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("echoes-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.to_string_lossy().into_owned()
+    }
+
+    /// mock 全链参数（无模型验收/开发形态，与 lib.rs 的 ECHOES_SIDECAR_MOCK 口径一致）。
+    fn mock_args() -> Vec<String> {
+        ["--llm", "mock", "--asr", "mock", "--tts", "mock"]
+            .map(String::from)
+            .to_vec()
     }
 
     fn sidecar_dir() -> PathBuf {
@@ -418,9 +437,13 @@ mod tests {
             .expect("WS 端口回调");
 
         let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>();
-        let client = WsAudioClient::connect(port, move |pcm| {
-            let _ = pcm_tx.send(pcm);
-        });
+        let client = WsAudioClient::connect(
+            port,
+            crate::ws_audio::OutputGate::new(),
+            move |pcm| {
+                let _ = pcm_tx.send(pcm);
+            },
+        );
         // 400ms 16k mono（内容无关：mock ASR 恒定文本）+ is_final 空帧
         let pcm: Vec<i16> = (0..6400)
             .map(|n| ((n as f64 * 0.4).sin() * 4000.0) as i16)
@@ -458,5 +481,115 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("下行 0x02 音频帧");
         assert!(!downstream.is_empty());
+    }
+
+    /// 三跳打断（3.4）真进程形态：turn 生成中发 `control(interrupt)` →
+    /// `turn_complete(status=CANCELLED)`，且往返远小于 mock 注入的片间时延
+    /// （证明是"取消插队"而不是"等引擎吐完"）。
+    #[test]
+    fn interrupt_cancels_in_flight_turn() {
+        const DELAY_MS: u64 = 1500;
+
+        let (tx, rx) = mpsc::channel::<ShellEvent>();
+        let sidecar = Sidecar::spawn(
+            &sidecar_dir(),
+            &mock_args(),
+            &[
+                ("ECHOES_DATA_DIR", temp_data_dir("interrupt")),
+                // 13.3：mock 片间时延 = 打断窗口（不注入就抢不到在途 turn）
+                ("ECHOES_MOCK_CHUNK_DELAY_MS", DELAY_MS.to_string()),
+            ],
+            Box::new(move |event| {
+                let _ = tx.send(event);
+            }),
+            Box::new(|_| {}),
+        )
+        .expect("sidecar 启动");
+
+        recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::Hello { .. })),
+            Duration::from_secs(20),
+        );
+
+        sidecar.send_user_text("default", "测试打断").expect("user_text");
+        // 首片到达 = turn 已在 generating；此刻 mock 正卡在片间时延里
+        recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::AssistantText { .. })),
+            Duration::from_secs(20),
+        );
+
+        let started = std::time::Instant::now();
+        sidecar
+            .send_control("default", "interrupt")
+            .expect("control(interrupt)");
+
+        let done = recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::TurnComplete { .. })),
+            Duration::from_secs(20),
+        );
+        let elapsed = started.elapsed();
+
+        match done {
+            ShellEvent::Sidecar(SidecarEvent::TurnComplete { status, turn_seq, .. }) => {
+                assert_eq!(status, "CANCELLED");
+                assert_eq!(turn_seq, 1, "被打断的 turn 仍然占一个 turn_seq");
+            }
+            other => panic!("应为 turn_complete，实得 {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_millis(DELAY_MS),
+            "打断应插队到片间时延之前（实测 {elapsed:?}）"
+        );
+
+        // 收尾后状态机回 ready（壳侧按钮解锁的唯一依据）
+        let state = recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::State { state, .. }) if state == "ready"),
+            Duration::from_secs(10),
+        );
+        assert!(matches!(state, ShellEvent::Sidecar(SidecarEvent::State { .. })));
+    }
+
+    /// 无在途 turn 时的 `control` 是可容忍的协议噪声：不得产生 turn_complete，
+    /// 进程也不得因此失联（打断自释放依赖这一点）。
+    #[test]
+    fn control_without_in_flight_turn_is_ignored() {
+        let (tx, rx) = mpsc::channel::<ShellEvent>();
+        let sidecar = Sidecar::spawn(
+            &sidecar_dir(),
+            &mock_args(),
+            &[("ECHOES_DATA_DIR", temp_data_dir("control-idle"))],
+            Box::new(move |event| {
+                let _ = tx.send(event);
+            }),
+            Box::new(|_| {}),
+        )
+        .expect("sidecar 启动");
+
+        recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::Hello { .. })),
+            Duration::from_secs(20),
+        );
+        sidecar
+            .send_control("default", "cancel_turn")
+            .expect("control(cancel_turn)");
+
+        // 之后仍能正常跑完一轮 = 进程没被 protocol 噪声带歪
+        sidecar.send_user_text("default", "还在吗").expect("user_text");
+        let done = recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::TurnComplete { .. })),
+            Duration::from_secs(20),
+        );
+        match done {
+            ShellEvent::Sidecar(SidecarEvent::TurnComplete { status, .. }) => {
+                assert_eq!(status, "SUCCESS");
+            }
+            other => panic!("应为 turn_complete，实得 {other:?}"),
+        }
     }
 }
