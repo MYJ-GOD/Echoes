@@ -1,4 +1,4 @@
-"""turn 音频真链（3.4）：_mock_turn 的 TTS chunk 逐帧 send_audio（第二周尾部接线）。
+"""turn 音频真链（3.4）：_run_turn 的 TTS chunk 逐帧 send_audio（第二周尾部接线）。
 
 帧格式（1B 方向 / 4B seq LE / 1B flags / PCM16）由 test_transport_local_ws_audio
 与 encode/decode 对拍背书；本文件锁编排面：synthesize 产出的每个 chunk 都进 WS
@@ -17,7 +17,7 @@ from echoes_sidecar.core.types import AudioChunk, Persona
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.tts.base import TTSEngine
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
-from echoes_sidecar.main import _mock_turn
+from echoes_sidecar.main import _run_turn
 from echoes_sidecar.session.session import Session
 
 
@@ -68,7 +68,7 @@ async def test_turn_pushes_tts_chunks_to_ws() -> None:
     machine.transition(AppState.READY)
     session = _session()
 
-    await _mock_turn(
+    await _run_turn(
         transport,
         machine,
         session,
@@ -97,7 +97,7 @@ async def test_turn_tts_error_marks_failed() -> None:
     machine.transition(AppState.READY)
     session = _session()
 
-    await _mock_turn(
+    await _run_turn(
         transport,
         machine,
         session,

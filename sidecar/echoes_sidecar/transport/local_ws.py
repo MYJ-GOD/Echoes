@@ -139,6 +139,19 @@ class LocalWebSocketTransport(Transport):
         """壳→sidecar 音频流（每个 turn 由编排层消费一次，PTT 整段形态）。"""
         return _WsAudioInputStream(self._audio_in)
 
+    async def next_utterance(self) -> bytes | None:
+        """收集一整段 PTT 输入（至 is_final 帧）的 PCM16；连接中断返回 None。
+
+        与 audio_stream() 同源队列，每次调用消费一段。EOF（壳断开/重连）时
+        未收 final 的半段不构成有效输入 → None（由调用方丢弃，防半句进 ASR）。
+        """
+        parts: list[bytes] = []
+        async for chunk in self.audio_stream():
+            parts.append(chunk.data)
+            if chunk.is_final:
+                return b"".join(parts)
+        return None
+
     async def send_audio(self, chunk: AudioChunk) -> None:
         """sidecar→壳音频帧（3.4：tts_chunk 24k PCM 口径由上层保证）。"""
         if self._conn is None:

@@ -14,12 +14,14 @@ import argparse
 import asyncio
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, Literal, Protocol
 
 from echoes_sidecar import __version__
-from echoes_sidecar.core.errors import EchoesError
+from echoes_sidecar.audio.stream import AudioInputStream
+from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.state_machine import AppState, StateMachine, required_engines_ready
+from echoes_sidecar.core.types import AudioChunk
 from echoes_sidecar.engines.asr.base import ASREngine
 from echoes_sidecar.engines.asr.mock import MockASREngine
 from echoes_sidecar.engines.asr.whisper import WhisperASREngine
@@ -31,11 +33,13 @@ from echoes_sidecar.engines.tts.base import TTSEngine
 from echoes_sidecar.engines.tts.cosyvoice2 import CosyVoice2TtsEngine
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
 from echoes_sidecar.ipc import (
+    AsrFinalMsg,
     AssistantTextMsg,
     CloneCancelMsg,
     CloneStartMsg,
     ControlMsg,
     EngineState,
+    ErrorMsg,
     HelloMsg,
     StateMsg,
     Timings,
@@ -105,7 +109,7 @@ def _state_payload(machine: StateMachine, session_id: str | None, t: int) -> dic
     )
 
 
-async def _mock_turn(
+async def _run_turn(
     transport: Transport,
     machine: StateMachine,
     session: Session,
@@ -117,11 +121,12 @@ async def _mock_turn(
 ) -> None:
     """turn：→generating→(LLM 流式)→speaking→(TTS chunk 逐帧 WS)→turn_complete→ready。
 
-    音频真链（第二周尾部）：synthesize 逐段 chunk 经 WS 出壳（0x02 帧、24k PCM，
-    3.4）；ws=off/无连接时 chunk 静默丢弃（send_audio 既有语义），消息面不受影响。
+    输入文本来自 user_text（文本面）或 asr_final（PTT 语音面），二者等价（3.4）。
+    音频真链：synthesize 逐段 chunk 经 WS 出壳（0x02 帧、24k PCM，3.4）；
+    ws=off/无连接时 chunk 静默丢弃（send_audio 既有语义），消息面不受影响。
     TTS 引擎错误（MODEL_NOT_LOADED 等）→ turn FAILED 收束（3.4.1 报错不降级；
     非致命不进 3.5 error 态）。真实打断/在途取消在三跳协议（3.4 阶段 0 第四周）；
-    骨架期 turn 同步执行。
+    骨架期 turn 同步执行（与 PTT 入口共用 turn_lock 串行化）。
     """
     machine.transition(AppState.GENERATING)
     await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
@@ -170,6 +175,131 @@ async def _mock_turn(
     )
     machine.transition(AppState.READY)
     await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
+
+
+class _PcmStream(AudioInputStream):
+    """单段 PTT PCM16（16k mono）→ 4.2 输入流（整段转写形态）。"""
+
+    def __init__(self, pcm: bytes) -> None:
+        self._pcm = pcm
+
+    def __aiter__(self) -> AsyncIterator[AudioChunk]:
+        async def _gen() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(data=self._pcm, seq=0, is_final=True)
+
+        return _gen()
+
+
+async def _transcribe_pcm(asr: ASREngine, pcm: bytes) -> str:
+    """PTT 整段 PCM → 文本（4.5 transcribe 整段形态；final 段按序拼接）。"""
+    texts: list[str] = []
+    async for seg in asr.transcribe(_PcmStream(pcm)):
+        if seg.get("is_final") and seg.get("text"):
+            texts.append(str(seg["text"]))
+    return "".join(texts)
+
+
+async def _send_error(
+    transport: Transport, session: Session, exc: EchoesError, t0: float
+) -> None:
+    """3.4 error 事件（引擎错误不静默；fatal 语义透传）。"""
+    await transport.send(
+        ErrorMsg(
+            session_id=session.session_id,
+            code=exc.code,
+            message=exc.message,
+            fatal=exc.fatal,
+            t=_now_ms(t0),
+        ).model_dump(mode="json")
+    )
+
+
+async def _asr_turn_from_pcm(
+    pcm: bytes,
+    transport: Transport,
+    machine: StateMachine,
+    session: Session,
+    asr: ASREngine,
+    provider: LLMProvider,
+    tts: TTSEngine,
+    t0: float,
+    ws_transport: LocalWebSocketTransport | None,
+) -> bool:
+    """一段 PTT 音频 → ASR → asr_final → turn（3.4：asr_final 与 user_text 等价）。
+
+    返回是否形成 turn。booting 期/空转写/ASR 失败不形成 turn；ASR 失败经 error
+    事件上报（ASR_ENGINE_ERROR，非致命不进 3.5 error 态——3.4.1 报错不降级）。
+    """
+    if not pcm:
+        print("[sidecar] 收到空 PTT 段，忽略", file=sys.stderr)
+        return False
+    if machine.state is not AppState.READY:
+        print(
+            f"[sidecar] 状态 {machine.state.value} 收到 PTT 音频，忽略（3.5）",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        text = await _transcribe_pcm(asr, pcm)
+    except EchoesError as exc:
+        print(f"[sidecar] ASR 失败: {exc}", file=sys.stderr)
+        await _send_error(transport, session, exc, t0)
+        return False
+    except Exception as exc:  # noqa: BLE001  引擎实现异常统一落 ASR_ENGINE_ERROR
+        print(f"[sidecar] ASR 异常: {exc}", file=sys.stderr)
+        await _send_error(
+            transport, session, EchoesError(ErrorCode.ASR_ENGINE_ERROR, str(exc)), t0
+        )
+        return False
+    if not text:
+        print("[sidecar] ASR 空转写，忽略本段", file=sys.stderr)
+        return False
+    await transport.send(
+        AsrFinalMsg(
+            session_id=session.session_id, text=text, is_final=True, t=_now_ms(t0)
+        ).model_dump(mode="json")
+    )
+    await _run_turn(transport, machine, session, provider, tts, text, t0, ws_transport)
+    return True
+
+
+async def _asr_loop(
+    ws_transport: LocalWebSocketTransport,
+    transport: Transport,
+    machine: StateMachine,
+    session: Session,
+    asr: ASREngine,
+    provider: LLMProvider,
+    tts: TTSEngine,
+    t0: float,
+    turn_lock: asyncio.Lock,
+) -> None:
+    """PTT 语音入口（3.4/§12 步骤 4）：WS 整段音频 → ASR → turn。
+
+    next_utterance 在锁外等待（不阻塞文本面 user_text）；转写+turn 在锁内串行，
+    与 user_text 共用同一状态机，避免并发迁移。
+    """
+    while True:
+        try:
+            pcm = await ws_transport.next_utterance()
+        except Exception as exc:  # noqa: BLE001  连接级异常不杀 PTT 循环
+            print(f"[sidecar] WS 音频段收集失败: {exc}", file=sys.stderr)
+            await asyncio.sleep(0.2)
+            continue
+        if pcm is None:
+            continue  # 壳断开/重连：半段丢弃（不构成有效输入）
+        async with turn_lock:
+            await _asr_turn_from_pcm(
+                pcm,
+                transport,
+                machine,
+                session,
+                asr,
+                provider,
+                tts,
+                t0,
+                ws_transport,
+            )
 
 
 async def _assemble_llm(argv: Sequence[str] | None) -> tuple[LLMProvider, bool]:
@@ -367,6 +497,7 @@ async def serve(argv: Sequence[str] | None = None) -> None:
 
     transport = StdioTransport(_ThreadedReader(), _StdOutWriter())
     machine = StateMachine()
+    turn_lock = asyncio.Lock()  # 文本面/语音面 turn 串行化（3.5 单会话单在途 turn）
 
     # 3.4 握手：第一行 hello；就绪_changes 时重发 hello（分级就绪载体，3.4 v1.4）
     await transport.send(_hello_payload(engine_states, _now_ms(t0)))
@@ -392,6 +523,23 @@ async def serve(argv: Sequence[str] | None = None) -> None:
             )
         )
 
+    # PTT 语音入口（3.4/§12 步骤 4）：WS 整段音频 → ASR → asr_final → turn。
+    # ws=off 时无音频面；mock ASR 下也接线（壳侧无模型验收用）。
+    if ws_transport is not None:
+        asyncio.create_task(
+            _asr_loop(
+                ws_transport,
+                transport,
+                machine,
+                session,
+                asr_engine,
+                llm_provider,
+                tts_engine,
+                t0,
+                turn_lock,
+            )
+        )
+
     try:
         while (raw := await transport.recv()) is not None:
             try:
@@ -401,24 +549,24 @@ async def serve(argv: Sequence[str] | None = None) -> None:
                 continue
 
             if isinstance(msg, UserTextMsg):
-                if machine.state is not AppState.READY:
-                    # 3.5：booting 期用户请求不可触发 turn（whisper 分级就绪形态下的
-                    # 真实语义缺口——mock 全绿链未覆盖；忽略而非非法迁移崩进程）
-                    print(
-                        f"[sidecar] 状态 {machine.state.value} 收到 user_text，忽略（3.5）",
-                        file=sys.stderr,
+                async with turn_lock:
+                    if machine.state is not AppState.READY:
+                        # 3.5：booting/生成期用户请求不可触发 turn（语音面同规则）
+                        print(
+                            f"[sidecar] 状态 {machine.state.value} 收到 user_text，忽略（3.5）",
+                            file=sys.stderr,
+                        )
+                        continue
+                    await _run_turn(
+                        transport,
+                        machine,
+                        session,
+                        engines_runtime["llm"],
+                        engines_runtime["tts"],
+                        msg.text,
+                        t0,
+                        ws_transport,
                     )
-                    continue
-                await _mock_turn(
-                    transport,
-                    machine,
-                    session,
-                    engines_runtime["llm"],
-                    engines_runtime["tts"],
-                    msg.text,
-                    t0,
-                    ws_transport,
-                )
             elif isinstance(msg, ControlMsg):
                 print(
                     f"[sidecar] control({msg.action})：骨架期 turn 同步执行、无在途；"
