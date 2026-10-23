@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,9 @@ _MIGRATION_FILE = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")
 _REQUIRES_LINE = re.compile(r"^--\s*requires:\s*([A-Za-z0-9_.]+)\s*$")
 
 BUSY_TIMEOUT_MS = 5000
+# 迁移竞争重试次数：多实例（用户双击两次）同时首次启动时，后到者会撞上
+# 「table already exists」；重试后检查 user_version 即可判定「另一进程已完成」。
+_MIGRATION_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -116,19 +120,34 @@ def apply_migrations(conn: sqlite3.Connection, directory: Path | None = None) ->
                 f"迁移 {migration.version:04d}_{migration.name} 需要扩展 "
                 f"{migration.requires}，当前环境未安装（阶段依赖未就位）",
             )
+        _run_migration(conn, migration)
+        current = migration.version
+
+    return current
+
+
+def _run_migration(conn: sqlite3.Connection, migration: Migration) -> None:
+    """执行单条迁移；另一实例已完成同一迁移时视作成功（不覆盖、不报假错）。
+
+    纯单实例时这段退化为「执行一次即返回」，重试分支只在首次并发启动时触发。
+    """
+    last_error: sqlite3.Error | None = None
+    for attempt in range(_MIGRATION_ATTEMPTS):
         try:
             conn.executescript(migration.sql)
             conn.execute(f"PRAGMA user_version = {migration.version}")
             conn.commit()
+            return
         except sqlite3.Error as exc:
+            last_error = exc
             conn.rollback()
-            raise EchoesError(
-                ErrorCode.STORAGE_ERROR,
-                f"迁移 {migration.version:04d}_{migration.name} 执行失败：{exc}",
-            ) from exc
-        current = migration.version
-
-    return current
+            if _current_version(conn) >= migration.version:
+                return  # 竞争失败但结果已达成：另一进程建好了表
+            time.sleep(0.05 * (attempt + 1))
+    raise EchoesError(
+        ErrorCode.STORAGE_ERROR,
+        f"迁移 {migration.version:04d}_{migration.name} 执行失败：{last_error}",
+    ) from last_error
 
 
 def _module_available(module: str) -> bool:

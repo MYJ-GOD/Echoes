@@ -22,7 +22,7 @@ from echoes_sidecar.audio.stream import AudioInputStream
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.state_machine import AppState, StateMachine, required_engines_ready
 from echoes_sidecar.core.types import AudioChunk
-from echoes_sidecar.db import Storage, ensure_writable, path_risk_note, resolve
+from echoes_sidecar.db import DataPaths, Storage, ensure_writable, path_risk_note, resolve
 from echoes_sidecar.engines.asr.base import ASREngine
 from echoes_sidecar.engines.asr.mock import MockASREngine
 from echoes_sidecar.engines.asr.whisper import WhisperASREngine
@@ -48,6 +48,7 @@ from echoes_sidecar.ipc import (
     UserTextMsg,
     parse_obj,
 )
+from echoes_sidecar.orchestration.clone import CloneService
 from echoes_sidecar.orchestration.text_clean import clean_for_tts
 from echoes_sidecar.session.manager import SessionManager
 from echoes_sidecar.session.session import Session
@@ -94,13 +95,16 @@ def _now_ms(t0: float) -> int:
 DEFAULT_PERSONA_ID = "default"
 DEFAULT_PERSONA_NAME = "默认人设"
 DEFAULT_SESSION_ID = "default"
+# 克隆样本等待上限（3.4）：壳侧录音上限 6s，留足余量；超时即报错而非挂死
+SAMPLE_WAIT_SECONDS = 15.0
 
 
-def _open_storage() -> Storage:
+def _open_storage() -> tuple[DataPaths, Storage]:
     """数据目录 + 迁移 + 启动自检（5.3 / 14.1 / 14.2）。
 
     目录解析只发生在组合根（3.2）；不可写即 STORAGE_ERROR 报错引导，
     不退到内存库——静默降级会把「数据没存住」藏到用户发现为止（3.4.1）。
+    返回 paths 是因为音色资产要相对 assets 目录解析（5.1/3.2）。
     """
     paths = resolve()
     ensure_writable(paths)
@@ -117,7 +121,7 @@ def _open_storage() -> Storage:
             f"[sidecar] 启动自检：{orphans} 条 training 孤儿音色置 failed（14.1）",
             file=sys.stderr,
         )
-    return storage
+    return paths, storage
 
 
 def _open_session(storage: Storage, *, now: float) -> Session:
@@ -350,6 +354,7 @@ async def _asr_loop(
     turn_lock: asyncio.Lock,
     *,
     storage: Storage | None = None,
+    is_cloning: Callable[[], bool] | None = None,
 ) -> None:
     """PTT 语音入口（3.4/§12 步骤 4）：WS 整段音频 → ASR → turn。
 
@@ -366,6 +371,10 @@ async def _asr_loop(
         if pcm is None:
             continue  # 壳断开/重连：半段丢弃（不构成有效输入）
         async with turn_lock:
+            if is_cloning is not None and is_cloning():
+                # 克隆期间不开新 turn（同上：TTS 引擎被占用，且样本音不该进 ASR 轮次）
+                print("[sidecar] 克隆进行中，忽略本段 PTT 音频", file=sys.stderr)
+                continue
             await _asr_turn_from_pcm(
                 pcm,
                 transport,
@@ -544,16 +553,63 @@ def _hello_payload(engine_states: list[EngineState], t: int) -> dict[str, Any]:
     )
 
 
+async def _clone_job(
+    ws_transport: LocalWebSocketTransport,
+    service: CloneService,
+    sample_keys: Sequence[str],
+    transport: Transport,
+    session: Session,
+    t0: float,
+) -> bool:
+    """克隆任务（后台，4.6/4.5）：先收 WS 样本，再交付 CloneService。
+
+    必须后台跑：clone 是秒级以上的活，占住 stdio 主循环就再也收不到
+    `clone_cancel`，取消形同虚设。
+
+    等待样本要设上限：壳侧 bit2 帧与 clone_start 走两条通道（WS / stdio），到达顺序
+    不保证——所以这里必须等；但等不到就该报错收场，不能让任务挂死把后续 turn 一起堵住。
+    """
+    try:
+        pcm = await asyncio.wait_for(
+            ws_transport.collect_clone_sample(), timeout=SAMPLE_WAIT_SECONDS
+        )
+    except TimeoutError:
+        await _send_error(
+            transport,
+            session,
+            EchoesError(
+                ErrorCode.SAMPLE_TOO_SHORT,
+                f"克隆样本未在 {SAMPLE_WAIT_SECONDS:.0f}s 内上送完成（WS 连接异常）",
+            ),
+            t0,
+        )
+        return False
+    if not pcm:
+        await _send_error(
+            transport,
+            session,
+            EchoesError(
+                ErrorCode.SAMPLE_TOO_SHORT,
+                "未收到克隆样本（WS bit2 帧为空或连接已断开）",
+            ),
+            t0,
+        )
+        return False
+    return await service.run(pcm, sample_keys)
+
+
 async def serve(argv: Sequence[str] | None = None) -> None:
     """进程入口：开存储 → 跑服务 → 关存储（存储失败即 STORAGE_ERROR 冒泡，14.1）。"""
-    storage = _open_storage()
+    paths, storage = _open_storage()
     try:
-        await _serve_with_storage(argv, storage)
+        await _serve_with_storage(argv, storage, paths)
     finally:
         storage.close()
 
 
-async def _serve_with_storage(argv: Sequence[str] | None, storage: Storage) -> None:
+async def _serve_with_storage(
+    argv: Sequence[str] | None, storage: Storage, paths: DataPaths
+) -> None:
     t0 = time.perf_counter()
     session = _open_session(storage, now=time.time())  # 5.1 + 14.1 重启重建
     SessionManager().create(session)  # 4.6：阶段 0 单会话，按 session_id 查找写
@@ -585,6 +641,15 @@ async def _serve_with_storage(argv: Sequence[str] | None, storage: Storage) -> N
     transport = StdioTransport(_ThreadedReader(), _StdOutWriter())
     machine = StateMachine()
     turn_lock = asyncio.Lock()  # 文本面/语音面 turn 串行化（3.5 单会话单在途 turn）
+    clone_service = CloneService(
+        transport=transport,
+        storage=storage,
+        tts=tts_engine,
+        session=session,
+        assets_root=paths.assets_dir,
+        t0=t0,
+    )
+    clone_task: asyncio.Task[bool] | None = None
 
     # 3.4 握手：第一行 hello；就绪_changes 时重发 hello（分级就绪载体，3.4 v1.4）
     await transport.send(_hello_payload(engine_states, _now_ms(t0)))
@@ -625,6 +690,7 @@ async def _serve_with_storage(argv: Sequence[str] | None, storage: Storage) -> N
                 t0,
                 turn_lock,
                 storage=storage,
+                is_cloning=lambda: clone_task is not None and not clone_task.done(),
             )
         )
 
@@ -645,6 +711,10 @@ async def _serve_with_storage(argv: Sequence[str] | None, storage: Storage) -> N
                             file=sys.stderr,
                         )
                         continue
+                    if clone_task is not None and not clone_task.done():
+                        # 克隆期间不开新 turn：TTS 引擎被克隆占用，抢跑只会两边都慢
+                        print("[sidecar] 克隆进行中，忽略 user_text", file=sys.stderr)
+                        continue
                     await _run_turn(
                         transport,
                         machine,
@@ -662,11 +732,41 @@ async def _serve_with_storage(argv: Sequence[str] | None, storage: Storage) -> N
                     "三跳在阶段 0 第四周接线（3.4 口径）",
                     file=sys.stderr,
                 )
-            elif isinstance(msg, CloneStartMsg | CloneCancelMsg):
-                print(
-                    "[sidecar] clone_* 骨架占位：阶段 0 第三周接线（§12 步骤 5；4.5 契约）",
-                    file=sys.stderr,
+            elif isinstance(msg, CloneStartMsg):
+                if clone_task is not None and not clone_task.done():
+                    print("[sidecar] 克隆进行中，忽略重复 clone_start", file=sys.stderr)
+                    continue
+                if machine.state is not AppState.READY:
+                    # 3.5 用户动作矩阵：克隆入口只在 ready 可用（壳侧禁按钮，sidecar 兜底）
+                    print(
+                        f"[sidecar] 状态 {machine.state.value} 收到 clone_start，忽略（3.5）",
+                        file=sys.stderr,
+                    )
+                    continue
+                if ws_transport is None:
+                    await _send_error(
+                        transport,
+                        session,
+                        EchoesError(
+                            ErrorCode.CLONE_ENGINE_FAILED,
+                            "克隆样本经 WS 音频面上送，当前 --ws off 无法接收",
+                        ),
+                        t0,
+                    )
+                    continue
+                clone_task = asyncio.create_task(
+                    _clone_job(
+                        ws_transport,
+                        clone_service,
+                        msg.sample_keys,
+                        transport,
+                        session,
+                        t0,
+                    )
                 )
+            elif isinstance(msg, CloneCancelMsg):
+                clone_service.cancel()
+                print("[sidecar] 收到 clone_cancel，已在阶段边界请求取消", file=sys.stderr)
             else:
                 print(
                     f"[sidecar] 收到不该由壳上行的事件 {type(msg).__name__}（协议误用，已忽略）",

@@ -24,6 +24,7 @@ type SidecarFrame =
   | { type: "asr_final"; session_id: string; text: string; is_final: boolean }
   | { type: "assistant_text"; session_id: string; text: string }
   | { type: "turn_complete"; session_id: string; turn_seq: number; status: string }
+  | { type: "clone_progress"; session_id: string; phase: string; pct: number }
   | { type: "error"; session_id: string | null; code: string; message: string };
 
 // 阶段 0 第一周：文本→LLM→文本 经 StdioTransport 打通；
@@ -38,6 +39,26 @@ const asrReady = ref(false);
 // 收尾由 turn_complete（或 error）复位 —— v1.4.1 语义。
 const streaming = ref(false);
 let unlisten: UnlistenFn | null = null;
+
+// ---- 克隆音色（§12 步骤 5）：progress 驱动 UI，失败只报错不回退（2.5） ----
+const clonePhase = ref<null | "recording" | "training" | "checking">(null);
+const clonePct = ref(0);
+const cloneError = ref("");
+const hasClonedVoice = ref(false);
+const CLONE_MIN_SECONDS = 3;
+const CLONE_MAX_SECONDS = 6;
+const clonePhaseLabel = computed(() => {
+  switch (clonePhase.value) {
+    case "recording":
+      return "录音中";
+    case "training":
+      return "克隆中";
+    case "checking":
+      return "校验中";
+    default:
+      return "";
+  }
+});
 
 function protocolDown(code: string, message: string): void {
   engineState.value = "error";
@@ -89,6 +110,19 @@ function handleFrame(frame: SidecarFrame): void {
       streaming.value = false;
       busy.value = false;
       break;
+    case "clone_progress":
+      // recording → training → checking（4.5）：progress 缺失即「假死」，所以这里必须驱动 UI
+      clonePhase.value =
+        frame.phase === "recording" || frame.phase === "training" || frame.phase === "checking"
+          ? frame.phase
+          : "training";
+      clonePct.value = Number(frame.pct) || 0;
+      if (clonePhase.value === "checking" && clonePct.value >= 100) {
+        hasClonedVoice.value = true;
+        clonePhase.value = null;
+        clonePct.value = 100;
+      }
+      break;
     case "error":
       messages.value.push({
         role: "assistant",
@@ -96,6 +130,12 @@ function handleFrame(frame: SidecarFrame): void {
       });
       streaming.value = false;
       busy.value = false;
+      if (frame.code.startsWith("CLONE") || frame.code.startsWith("SAMPLE")) {
+        // 克隆失败：清进度、保留错误文案，音色在 sidecar 侧已落 failed（2.5 不回退）
+        cloneError.value = `${frame.code}：${frame.message}`;
+        clonePhase.value = null;
+        clonePct.value = 0;
+      }
       break;
     default:
       break;
@@ -128,11 +168,27 @@ async function micProbe(): Promise<void> {
 
 // ---- 按住说话（§12 步骤 4）：getUserMedia 48k PCM16 分片 → Rust 重采样 16k → WS ----
 const PTT_CHUNK = 4800; // 100ms @48k
-const pttHeld = ref(false);
+const captureHeld = ref(false);
 const listening = ref(false);
+const cloneSeconds = ref(0);
 const pttEnabled = computed(
-  () => !busy.value && engineState.value === "ready" && asrReady.value,
+  () =>
+    !busy.value &&
+    engineState.value === "ready" &&
+    asrReady.value &&
+    clonePhase.value === null,
 );
+// 3.5 用户动作矩阵：克隆入口只在 ready 可用，且不与 turn / 在途克隆并发
+const cloneEnabled = computed(
+  () =>
+    !busy.value &&
+    engineState.value === "ready" &&
+    clonePhase.value === null &&
+    !captureHeld.value,
+);
+type CaptureMode = "ptt" | "clone";
+// 必须是 ref：模板要按模式区分按钮文案/样式
+const captureMode = ref<CaptureMode>("ptt");
 
 let micStream: MediaStream | null = null;
 let micCtx: AudioContext | null = null;
@@ -144,8 +200,10 @@ let pendingSamples: number[] = [];
 let sendChain: Promise<unknown> = Promise.resolve();
 
 function enqueueChunk(samples: number[]): void {
+  // PTT 与克隆共用一条采集链，只在下行命令上分流（克隆帧带 bit2，3.4）
+  const command = captureMode.value === "clone" ? "clone_push" : "ptt_push";
   sendChain = sendChain
-    .then(() => invoke("ptt_push", { samples }))
+    .then(() => invoke(command, { samples }))
     .catch((err) => {
       micStatus.value = `⚠ 音频发送失败：${String(err)}`;
     });
@@ -178,20 +236,38 @@ function micErrorMessage(err: unknown): string {
   return `${name}：${(err as Error).message}`;
 }
 
-async function pttStart(): Promise<void> {
-  if (!pttEnabled.value || pttHeld.value) return;
-  pttHeld.value = true;
+let cloneTimer: number | null = null;
+
+function stopCloneTimer(): void {
+  if (cloneTimer !== null) {
+    window.clearInterval(cloneTimer);
+    cloneTimer = null;
+  }
+}
+
+/** 采集入口：PTT 与克隆共用 48k→16k→WS 链路，只在命令与帧 flags 上分流。 */
+async function startCapture(mode: CaptureMode): Promise<void> {
+  const allowed = mode === "clone" ? cloneEnabled.value : pttEnabled.value;
+  if (!allowed || captureHeld.value) return;
+  captureHeld.value = true;
+  captureMode.value = mode;
+  if (mode === "clone") {
+    cloneError.value = "";
+    clonePhase.value = "recording";
+    clonePct.value = 0;
+    cloneSeconds.value = 0;
+  }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
     });
-    if (!pttHeld.value) {
+    if (!captureHeld.value) {
       stream.getTracks().forEach((track) => track.stop());
       return;
     }
-    // 先 flush 在途播放（打断首跳）并复位重采样器，再开始送分片。
-    await invoke("ptt_start");
-    if (!pttHeld.value) {
+    // PTT 先 flush 在途播放（打断首跳）；克隆与播放无关，只复位重采样器
+    await invoke(mode === "clone" ? "clone_record_start" : "ptt_start");
+    if (!captureHeld.value) {
       stream.getTracks().forEach((track) => track.stop());
       return;
     }
@@ -230,35 +306,85 @@ async function pttStart(): Promise<void> {
     micProcessor = processor;
     micMute = mute;
     listening.value = true;
-    micStatus.value = "🎙 录音中…";
+    micStatus.value = mode === "clone" ? "🎙 录音中…（3–6 秒）" : "🎙 录音中…";
+
+    if (mode === "clone") {
+      // 超上限自动收尾：一直按着录出 30 秒样本对克隆没有帮助，只增加等待
+      cloneTimer = window.setInterval(() => {
+        cloneSeconds.value += 1;
+        if (cloneSeconds.value >= CLONE_MAX_SECONDS) {
+          void stopCapture();
+        }
+      }, 1000);
+    }
   } catch (err) {
-    pttHeld.value = false;
+    captureHeld.value = false;
+    captureMode.value = "ptt";
+    stopCloneTimer();
     cleanupMic();
     micStatus.value = `⚠ ${micErrorMessage(err)}`;
+    if (mode === "clone") {
+      clonePhase.value = null;
+      cloneError.value = micErrorMessage(err);
+    }
   }
 }
 
-async function pttStop(): Promise<void> {
-  if (!pttHeld.value) return;
-  pttHeld.value = false;
-  if (!micStream) return; // getUserMedia 尚未返回：pttStart 会自行清理
+async function stopCapture(): Promise<void> {
+  if (!captureHeld.value) return;
+  captureHeld.value = false;
+  const mode = captureMode.value;
+  stopCloneTimer();
+  if (!micStream) return; // getUserMedia 尚未返回：startCapture 会自行清理
   const rest = pendingSamples;
   pendingSamples = [];
   cleanupMic();
   try {
     await sendChain;
     if (rest.length > 0) {
-      await invoke("ptt_push", { samples: rest });
+      await invoke(mode === "clone" ? "clone_push" : "ptt_push", { samples: rest });
     }
-    await invoke("ptt_stop");
-    micStatus.value = "识别中…";
+    if (mode === "clone") {
+      await invoke("clone_record_stop");
+      cloneSeconds.value = 0;
+      micStatus.value = "样本已上送，克隆中…";
+    } else {
+      await invoke("ptt_stop");
+      micStatus.value = "识别中…";
+    }
   } catch (err) {
     micStatus.value = `⚠ ${String(err)}`;
+    if (mode === "clone") {
+      clonePhase.value = null;
+      cloneError.value = String(err);
+    }
   }
 }
 
+function pttStart(): void {
+  void startCapture("ptt");
+}
+
+function pttStop(): void {
+  if (captureMode.value === "ptt") void stopCapture();
+}
+
+function cloneStart(): void {
+  void startCapture("clone");
+}
+
+function cloneStop(): void {
+  if (captureMode.value === "clone") void stopCapture();
+}
+
+function cancelClone(): void {
+  void invoke("clone_cancel").catch((err) => {
+    cloneError.value = String(err);
+  });
+}
+
 function onWindowBlur(): void {
-  void pttStop();
+  void stopCapture();
 }
 
 onMounted(() => {
@@ -267,7 +393,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("blur", onWindowBlur);
-  pttHeld.value = false;
+  captureHeld.value = false;
+  stopCloneTimer();
   cleanupMic();
 });
 
@@ -301,6 +428,16 @@ async function send(): Promise<void> {
       <li v-if="messages.length === 0" class="empty">和 Echoes 说点什么…</li>
     </ul>
 
+    <section v-if="clonePhase !== null || cloneError" class="clone-panel">
+      <div v-if="clonePhase" class="clone-line">
+        <span class="clone-label">{{ clonePhaseLabel }}</span>
+        <progress :value="clonePct" max="100"></progress>
+        <span class="pct">{{ clonePct }}%</span>
+        <button class="link" @click="cancelClone">取消</button>
+      </div>
+      <p v-if="cloneError" class="clone-error">⚠ {{ cloneError }}</p>
+    </section>
+
     <footer>
       <input v-model="input" type="text" placeholder="输入消息…" @keyup.enter="send" />
       <button :disabled="busy" @click="send">发送</button>
@@ -317,6 +454,30 @@ async function send(): Promise<void> {
         @touchcancel="pttStop"
       >
         {{ listening ? "松开结束" : "按住说话" }}
+      </button>
+      <button
+        class="clone"
+        :class="{ recording: listening && captureMode === 'clone' }"
+        :disabled="!cloneEnabled"
+        :title="
+          hasClonedVoice
+            ? '重新克隆音色（按住 3–6 秒）'
+            : '按住 3–6 秒说话，克隆你的声音'
+        "
+        @mousedown.prevent="cloneStart"
+        @mouseup="cloneStop"
+        @mouseleave="cloneStop"
+        @touchstart.prevent="cloneStart"
+        @touchend.prevent="cloneStop"
+        @touchcancel="cloneStop"
+      >
+        {{
+          listening && captureMode === "clone"
+            ? `录音中 ${cloneSeconds}s`
+            : hasClonedVoice
+              ? "重克隆"
+              : "克隆音色"
+        }}
       </button>
       <button class="mic" @click="micProbe">{{ micStatus || "麦克风自检" }}</button>
     </footer>
@@ -410,8 +571,46 @@ footer button:disabled {
   opacity: 0.4;
 }
 footer .ptt,
+footer .clone,
 footer .mic {
   background: #36343b;
+}
+footer .clone.recording {
+  background: #b3261e;
+}
+.clone-panel {
+  padding: 8px 0;
+  border-top: 1px solid #2b2831;
+}
+.clone-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: #b9b2c4;
+}
+.clone-line progress {
+  flex: 1;
+  height: 6px;
+  accent-color: #6750a4;
+}
+.clone-label {
+  min-width: 44px;
+}
+.clone-line .link {
+  border: none;
+  background: transparent;
+  color: #a79ab8;
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: underline;
+  padding: 0;
+}
+.clone-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #f2b8b5;
+  line-height: 1.4;
 }
 footer .ptt.recording {
   background: #b3261e;

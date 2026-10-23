@@ -9,14 +9,14 @@
 
 | 范围                | 开发完成度        | 剩余开发（单人，中值）   |
 | ----------------- | ------------ | ------------- |
-| **阶段 0：垂直切片**     | **约 55–60%** | **约 2 周**     |
-| **MVP：阶段 0–1**    | **约 42%**    | **约 5 周**     |
-| **全路线：阶段 -1 → 3** | **约 22–27%** | **约 10 周**    |
+| **阶段 0：垂直切片**     | **约 75%**   | **约 1–1.5 周** |
+| **MVP：阶段 0–1**    | **约 50%**   | **约 4.5 周**   |
+| **全路线：阶段 -1 → 3** | **约 27%**   | **约 9 周**     |
 
 口径说明：
 
 - 分母取母文档排期中点：阶段 -1（1 周）+ 阶段 0（3.5 周）+ 阶段 1（2.5 周）+ 阶段 2（2.5 周）+ 阶段 3（3.5 周）≈ **13 周**。
-- **2026-10-23 追加**：持久化运行层落地（§3.4），阶段 0 完成度由 50–55% 上调至 55–60%，剩余由 2.5–3 周收敛到约 2 周（克隆 ≈1 周 + 打断 ≈0.5 周 + 联调 ≈0.5 周）。
+- **2026-10-23 追加**：持久化运行层（§3.4）、分句纯函数（§3.5）、克隆闭环（§3.6）落地。阶段 0 由 50–55% → 约 75%，剩余约 1–1.5 周 = 三跳打断 ≈0.5 周 + 联调/真机验收 ≈0.5–1 周。阶段 0 的**功能面已齐**，剩下的是打断协议与真机验收，不再是「还没写」。
 - 已完成开发量 ≈ 3 周（阶段 -1 的 1 周 + 阶段 0 前两周）；3 / 13 ≈ 23%，故全路线取 20–25%。
 - 阶段 0 单独看：前两周已代码闭环（按 3.5 周排期约 57%）；但剩余包含克隆、持久化、打断、联调，实际密度高于排期，故完成度取 50–55%，剩余按 2.5–3 周估算。
 - 剩余工作量**不是线性的**：克隆闭环（含持久化）、三跳打断、联调三块比排期更密，这是完成度回落到 50–55% 的原因。
@@ -30,7 +30,7 @@
 | 2  | 冻结 §4 / 3.4 / 3.5 + 代码骨架 + mock 引擎 + 13.2 契约测试      | ✅ 完成                        |
 | 3  | 阶段 0 第一周：壳 + sidecar 骨架 + 文本链 + 采集 + ADR-009/011 输入 | ✅ 完成                        |
 | 4  | 阶段 0 第二周：ASR + TTS + WS 麦克风→扬声器 + 分级预热 + 3.5 状态机    | ✅ 代码完成（真机验收未做）              |
-| 5  | 阶段 0 第三周：克隆闭环（`clone_progress` + 状态机 + 错误码 + 换音色）   | ❌ 未开工（前置：持久化运行层 ✅，见 3.4） |
+| 5  | 阶段 0 第三周：克隆闭环（`clone_progress` + 状态机 + 错误码 + 换音色）   | ✅ 代码完成（真机克隆未验收，见 3.6） |
 | 6  | 阶段 0 第四周：三跳打断 + 延迟校准（ADR-012）+ 7 条验收                | ⚠️ 部分（状态机/预热已提前；打断/校准/验收未做） |
 
 ## 3. 已完成
@@ -100,20 +100,38 @@
 
 **未接线**：CosyVoice2 `synthesize` 仍整段 `inference_zero_shot`。逐句合成的收益（TTFA 3.7s → 预算 2.5s）必须真机实测确认，接线归下一步「真机延迟基线」。
 
+### 3.6 克隆闭环（2026-10-23 落地，整链贯通）
+
+代码位置：`sidecar/echoes_sidecar/orchestration/clone.py`（服务）、`transport/local_ws.py`（样本帧分流）、`main.py`（命令接入）、壳侧 `lib.rs`/`ws_audio.rs`/`App.vue`。
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| WS bit2 克隆样本帧与 PTT 帧分流 | ✅ | `local_ws.py::_feed_audio`（独立 `_clone_in` 队列）+ `collect_clone_sample`；测试断言双向不污染 |
+| 引擎级样本校验（时长 / 静音 / 削波） | ✅ | `clone.py::check_sample`（≥3s、RMS ≥ -45dBFS、削波 ≤5%）→ `SAMPLE_TOO_SHORT` / `SAMPLE_TOO_NOISY` |
+| `clone_progress` 三段（recording→training→checking） | ✅ | `CloneService._emit_progress`；`App.vue` 进度条 + 取消按钮 |
+| 样本 temp+rename 落资产目录 | ✅ | `_atomic_write_wav`（16k 单声道 WAV，5.1 存相对路径） |
+| 开工落 `training` 行 + 孤儿收敛 | ✅ | `insert_training` → `adopt_id`（引擎返回的 voice_id 接管行 ID）→ `mark_ready` |
+| 成功后绑定会话，后续回复用该音色 | ✅ | `session.voice_id` + `sessions.bind_voice`；`_run_turn` 已按 `voice_id or builtin:default` 取音色 |
+| 失败置 failed、报错不降级 | ✅ | `_fail`：`mark_failed` + `error` 事件 + 清理样本，`2.5` 不回退 |
+| 取消（`clone_cancel`） | ✅ 协作取消 | 阶段边界与引擎返回后检查；引擎内部推理不可中断（诚实边界） |
+| 壳侧录音 3–6 秒 + 自动收尾 + 取消 | ✅ | `App.vue` clone 按钮/进度/错误；`lib.rs` 四个 `clone_*` 命令 |
+| 克隆期间不开新 turn | ✅ | `main.py` 对 `user_text`/PTT 的 `is_cloning` 门控 |
+
+验证：pytest 由 123 → **167 passed**（新增克隆 15、分句 12、DB 17）；`cargo test` **14 passed**（新增克隆帧 flags 用例，含真进程 `ptt_audio_end_to_end`）；`npm run build` 通过；ruff/mypy/lint-imports 全绿。
+
+**未做**：`cosyvoice2.clone` 仍是软链占位（zero-shot 真路要上机验证嵌入产出的格式与耗时）；真机录音的样本电平阈值需按实际麦克风校准。
+
 ## 4. 未完成
 
-### 4.1 阶段 0 收尾（约 2 周）
+### 4.1 阶段 0 收尾（约 1–1.5 周）
 
-1. **克隆闭环（约 1 周）**  
-   zero-shot 路线（ADR-009 兜底规则）：  
-   录 3–6 秒 → 样本校验（`SAMPLE_TOO_SHORT` / `SAMPLE_TOO_NOISY`）→ 音色嵌入 → `voice_id` → 绑定当前会话 → 后续回复全用该音色；  
-   `clone_progress` + 状态机 + 错误码；壳侧录制 / 进度 / 绑定 UI。  
-   前置已就绪：`voice` 表 CRUD、`session.bind_voice`、错误码枚举、`CloneProgressMsg` 契约。
-2. **三跳打断（约 0.5 周）**  
-   已做：PTT 按下 flush 本地播放（第一跳）。  
-   未做：sidecar `interrupt` / `cancel_turn`、`CANCELLED` 事件、LLM/TTS 取消、壳侧按 seq 丢弃在途音频、两侧缓冲上限、busy 期放开 PTT。
-3. **联调与测试（约 0.5 周）**  
-   克隆 / 打断的 L1/L2 全流程；四闸回归；错误路径（无麦克风、WS 断线、空转写、TTS 失败）。
+1. **三跳打断（约 0.5 周）**  
+   已做：PTT 按下 flush 本地播放（第一跳）；`ControlMsg` 契约在（`interrupt` / `cancel_turn`），sidecar 侧仍是 print 占位。  
+   未做：sidecar 取消在途 turn、`turn_complete(status=CANCELLED)`、LLM/TTS 取消、壳侧按 seq 丢弃在途音频、两侧缓冲上限（600/300ms）、busy 期放开 PTT。
+2. **克隆真路接线（约 0.5 周，需上机）**  
+   `cosyvoice2.clone` 目前仍抛 `NotImplementedError`；zero-shot 路线的嵌入产出格式/耗时、真机样本电平阈值（`MIN_RMS_DBFS` / 削波比）都要按实际麦克风校准。
+3. **联调与真机验收（约 0.5 周）**  
+   真机链路（麦克风权限、whisper 真实转写、扬声器可听性）、延迟预算实测（ADR-012）、阶段 0 七条验收逐条过。
 
 ### 4.2 阶段 1：记忆与人设（2–3 周）
 
@@ -139,13 +157,14 @@
 - **IPC TS 类型层缺失**：`src/lib/ipc.ts` / `ipc_types.ts` 不存在，`.github/workflows/schema-drift.yml` 仍是 `echo` 占位；前端直接 `invoke` + `listen("sidecar://event")`，协议改动无漂移守护（13.2-1）。
 - **CI 不覆盖真引擎**：`build-sidecar.yml` 只装 pydantic/websockets/pytest 等骨架依赖，`torch` / `faster-whisper` / `cosyvoice` 零覆盖。
 - **TTS 分句**：`split_sentences` 纯函数已落地（3.5）并有 L1 覆盖，但**尚未接入引擎**——TTFA 收益需真机实测，接线前不要宣称延迟改善。
+- **多实例共享一个数据库**：迁移已做「竞争重试 + user_version 复核」（6 进程并发首启实测全通过），但两个 sidecar 同时跑仍会共享同一 session 行；14.1 预设单实例，未做实例锁。
 
 ## 5. 风险与已知边界（验收暂缓，风险不会自动消失）
 
 - **真机链路未验证**：麦克风权限 / 48k 采样率、whisper 真实转写、扬声器可听性均未上机；自动化覆盖到 mock / 接口层。
 - **延迟预算**：CosyVoice2 实测 TTFA 3.7s / RTF 1.33（`a5ccc75`），另一次 6.7s / 2.09（R20，含 wetext 探测）。验收预算为端到端 P50 ≤2.5s / P95 ≤4s，存在明显差距，可能需要流式 / 分句 / 预热优化或 ADR-012 校准。
 - **8G 档显存冲突**：qwen3:8b ≈5.5GB + TTS ≈3.8GB；ADR-001 需按三跳实测复核。
-- **克隆路线**：ADR-009 spike 未跑，按兜底规则走 zero-shot；质量对比与说话人相似度质检推迟到阶段 2。
+- **克隆路线**：闭环代码已通（3.6）但 `cosyvoice2.clone` 仍是占位，真机 zero-shot 质量与耗时未验证；相似度质检（`CLONE_QUALITY_LOW`）按计划推迟到阶段 2。
 - **打断**：当前 busy / 非 ready 时 PTT 禁用，不具备真正 barge-in；三跳只完成第一跳。
 - **持久化**：运行层已落地（3.4）；未做的是 `memory_vec`（待 sqlite-vec）与记忆抽取/检索（阶段 1）。
 - **打包**：ADR-011 未定稿；干净机安装、体积、下载流程未验证。
@@ -153,12 +172,12 @@
 
 ## 6. 下一步（建议顺序）
 
-1. 真机延迟基线（whisper + CosyVoice2 + ollama 真路走一遍，四段耗时写进 ADR-012）——同时清掉「真机未验证」与「TTFA 超预算」两个 🔴。
-2. `audio/chunker.py::split_sentences` + TTS 分句流式（缩短 TTFA 最直接的杠杆，L1 可测）。
-3. 克隆闭环（zero-shot + `clone_progress` + 壳侧 UI；DB 与错误码已就绪）。
-4. 三跳打断（sidecar cancel + 壳侧按 seq 丢弃 + `CANCELLED` 断言）。
-5. 编排层收敛到 `graph.py`（4.5），再接阶段 1 记忆。
-6. 阶段 0 开发回归（四闸 + `cargo test` + `npm run build` + L3 mock / 真 TTS）。
+1. **三跳打断**（sidecar cancel + 壳侧按 seq 丢弃 + `CANCELLED` 断言）——阶段 0 最后一块功能，协议面已齐，属填空。
+2. **真机延迟基线**（whisper + CosyVoice2 + ollama 真路，四段耗时写进 ADR-012）+ `split_sentences` 接入引擎：同时清掉「真机未验证」与「TTFA 超预算」两个 🔴。
+3. **克隆真路**：`cosyvoice2.clone` 接 zero-shot 嵌入，真机校准样本阈值。
+4. 阶段 0 七条验收逐条过 + 四闸 / `cargo test` / `npm run build` 回归。
+5. 编排层收敛到 `graph.py`（4.5），再接阶段 1 记忆与人设。
+6. IPC TS 类型层 + schema-drift CI 真接（4.5），避免阶段 1 改协议时无守护。
 
 ## 7. 关键提交（近端）
 

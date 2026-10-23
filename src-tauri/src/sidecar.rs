@@ -173,9 +173,12 @@ impl Sidecar {
     ///
     /// `args` 为引擎装配参数（真路/ mock 由组合根决定，12.3）；`on_ws_port` 在
     /// stderr 出现 WS 端口行时回调一次（`--ws auto` 时；便携形态见 lib.rs）。
+    /// `envs` 追加子进程环境（测试用来把 `ECHOES_DATA_DIR` 指到临时目录，5.3；
+    /// 生产传空切片——数据目录解析归组合根，不在壳侧硬编码）。
     pub fn spawn(
         sidecar_dir: &Path,
         args: &[String],
+        envs: &[(&str, String)],
         sink: Box<dyn FnMut(ShellEvent) + Send>,
         on_ws_port: Box<dyn FnMut(u16) + Send>,
     ) -> Result<Self, String> {
@@ -185,10 +188,15 @@ impl Sidecar {
             .join(".venv")
             .join("Scripts")
             .join("python.exe");
-        let mut child = Command::new(&python)
+        let mut command = Command::new(&python);
+        command
             .args(["-m", "echoes_sidecar.main"])
             .args(args)
-            .current_dir(sidecar_dir)
+            .current_dir(sidecar_dir);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -220,16 +228,41 @@ impl Sidecar {
 
     /// 壳→sidecar：文本输入（3.4 控制消息，与 asr_final 等价触发 turn）。
     pub fn send_user_text(&self, session_id: &str, text: &str) -> Result<(), String> {
-        let line = serde_json::json!({
+        self.send_line(&serde_json::json!({
             "type": "user_text",
             "session_id": session_id,
             "text": text,
-        });
+        }))
+    }
+
+    /// 壳→sidecar：样本已通过 WS bit2 帧上送完毕，请开始克隆（3.4/4.6）。
+    pub fn send_clone_start(
+        &self,
+        session_id: &str,
+        sample_keys: &[String],
+    ) -> Result<(), String> {
+        self.send_line(&serde_json::json!({
+            "type": "clone_start",
+            "session_id": session_id,
+            "sample_keys": sample_keys,
+        }))
+    }
+
+    /// 壳→sidecar：用户取消克隆（3.4 clone_cancel → CloneError(CLONE_CANCELLED)）。
+    pub fn send_clone_cancel(&self, session_id: &str) -> Result<(), String> {
+        self.send_line(&serde_json::json!({
+            "type": "clone_cancel",
+            "session_id": session_id,
+        }))
+    }
+
+    /// 单行 JSON 写 stdin（3.4：stdio 一行一条消息；写失败即壳与 sidecar 失联）。
+    fn send_line(&self, value: &serde_json::Value) -> Result<(), String> {
         let mut stdin = self
             .stdin
             .lock()
             .map_err(|e| format!("stdin 锁损坏: {e}"))?;
-        let payload = serde_json::to_string(&line).map_err(|e| e.to_string())?;
+        let payload = serde_json::to_string(value).map_err(|e| e.to_string())?;
         writeln!(stdin, "{payload}").map_err(|e| format!("stdin 写入失败: {e}"))?;
         stdin.flush().map_err(|e| format!("stdin flush 失败: {e}"))
     }
@@ -249,6 +282,14 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    /// 每个端到端用例独立数据目录（5.3）：绝不让测试写进用户 %LOCALAPPDATA%，
+    /// 也避免并行用例抢同一个 SQLite 文件。
+    fn temp_data_dir(tag: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("echoes-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.to_string_lossy().into_owned()
+    }
+
     fn sidecar_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -264,6 +305,7 @@ mod tests {
         let sidecar = Sidecar::spawn(
             &sidecar_dir(),
             &[],
+            &[("ECHOES_DATA_DIR", temp_data_dir("turn"))],
             Box::new(move |event| {
                 let _ = tx.send(event);
             }),
@@ -352,6 +394,7 @@ mod tests {
         let _sidecar = Sidecar::spawn(
             &sidecar_dir(),
             &args,
+            &[("ECHOES_DATA_DIR", temp_data_dir("ptt"))],
             Box::new(move |event| {
                 let _ = tx.send(event);
             }),

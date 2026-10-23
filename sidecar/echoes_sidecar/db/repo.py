@@ -183,8 +183,12 @@ class VoiceRepo:
             created_at=now,
         )
 
-    def mark_ready(self, voice_id: str, *, model_path: str) -> None:
-        """克隆成功：status=ready 并记产出文件（相对资产目录，3.2）。"""
+    def mark_ready(self, voice_id: str, *, model_path: str | None = None) -> None:
+        """克隆成功：status=ready 并记产出文件（相对资产目录，3.2）。
+
+        model_path=None 表示引擎未产出独立资产文件（如 mock 引擎、或 zero-shot
+        直接复用样本）——此时 ready 态仍成立，不编造路径（5.1 注释：未生成成功为 NULL）。
+        """
         with _guard(self._conn, "更新音色状态"):
             cursor = self._conn.execute(
                 "UPDATE voice SET status = ?, model_path = ? WHERE id = ?",
@@ -217,6 +221,31 @@ class VoiceRepo:
             )
             self._conn.commit()
         return int(cursor.rowcount)
+
+    def adopt_id(self, provisional_id: str, final_id: str) -> None:
+        """把开工占位行的 id 改成引擎返回的 voice_id（4.5：资产身份由引擎产出）。
+
+        为什么需要：14.1 要求克隆**开工即落 training 行**（否则 kill/断电无孤儿可扫），
+        而 4.5 的 `clone(sample) -> voice_id` 由引擎决定资产 ID，调用前拿不到。
+        改主键安全的前提：session.voice_id 尚未指向该行（绑定发生在克隆成功之后），
+        故不会触发外键重挂。两者相同时为 no-op。
+        """
+        if provisional_id == final_id:
+            return
+        with _guard(self._conn, "改写音色 ID"):
+            existing = self._conn.execute(
+                "SELECT id FROM voice WHERE id = ?", (final_id,)
+            ).fetchone()
+            if existing is not None:
+                raise EchoesError(
+                    ErrorCode.CLONE_ENGINE_FAILED,
+                    f"引擎返回的 voice_id 已存在：{final_id}（4.5 资产 ID 冲突）",
+                )
+            cursor = self._conn.execute(
+                "UPDATE voice SET id = ? WHERE id = ?", (final_id, provisional_id)
+            )
+            self._conn.commit()
+        self._require_row(cursor, provisional_id)
 
 
 def _voice_from_row(row: sqlite3.Row) -> VoiceRow:

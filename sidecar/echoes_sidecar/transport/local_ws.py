@@ -84,6 +84,8 @@ class LocalWebSocketTransport(Transport):
         self._conn: Any | None = None
         self._inbound: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self._audio_in: asyncio.Queue[AudioChunk | None] = asyncio.Queue()
+        # 克隆样本独立队列：bit2 帧不能进 PTT 流，否则克隆音会被 ASR 当成用户说话
+        self._clone_in: asyncio.Queue[AudioChunk | None] = asyncio.Queue()
         self._closing = False
         self._eof = False
 
@@ -118,6 +120,7 @@ class LocalWebSocketTransport(Transport):
         self._eof = True
         self._inbound.put_nowait(None)
         self._audio_in.put_nowait(None)
+        self._clone_in.put_nowait(None)
 
     def _feed_audio(self, raw: bytes) -> None:
         try:
@@ -127,13 +130,16 @@ class LocalWebSocketTransport(Transport):
             return
         if frame.direction != DIR_INPUT:
             return
-        self._audio_in.put_nowait(
-            AudioChunk(
-                data=frame.payload,
-                seq=frame.seq,
-                is_final=bool(frame.flags & WSFrameFlags.IS_FINAL),
-            )
+        chunk = AudioChunk(
+            data=frame.payload,
+            seq=frame.seq,
+            is_final=bool(frame.flags & WSFrameFlags.IS_FINAL),
         )
+        # bit2 = 克隆样本分片（3.4）：与 PTT 帧分流，克隆音绝不进 ASR
+        if frame.flags & WSFrameFlags.CLONE_SAMPLE:
+            self._clone_in.put_nowait(chunk)
+            return
+        self._audio_in.put_nowait(chunk)
 
     def audio_stream(self) -> AudioInputStream:
         """壳→sidecar 音频流（每个 turn 由编排层消费一次，PTT 整段形态）。"""
@@ -152,12 +158,26 @@ class LocalWebSocketTransport(Transport):
                 return b"".join(parts)
         return None
 
+    def clone_stream(self) -> AudioInputStream:
+        """壳→sidecar 克隆样本流（bit2 帧；4.5 clone 契约的 AudioInputStream 口）。"""
+        return _WsAudioInputStream(self._clone_in)
+
+    async def collect_clone_sample(self) -> bytes | None:
+        """收集一段完整克隆样本（至 is_final）的 PCM16；连接中断返回 None。
+
+        与 next_utterance 同构：样本分段上送、收尾由 final 帧界定（3.4 bit2）。
+        """
+        parts: list[bytes] = []
+        async for chunk in self.clone_stream():
+            parts.append(chunk.data)
+            if chunk.is_final:
+                return b"".join(parts)
+        return None
+
     async def send_audio(self, chunk: AudioChunk) -> None:
         """sidecar→壳音频帧（3.4：tts_chunk 24k PCM 口径由上层保证）。"""
         if self._conn is None:
             return  # 阶段 0：无客户端连接时丢弃输出音频（不排队积压）
-        from echoes_sidecar.core.types import WSFrameFlags
-
         flags = int(WSFrameFlags.IS_FINAL) if chunk.is_final else 0
         await self._conn.send(encode_audio_frame(DIR_OUTPUT, chunk.seq, flags, chunk.data))
 

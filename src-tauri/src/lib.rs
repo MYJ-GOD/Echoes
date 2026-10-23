@@ -84,6 +84,68 @@ fn ptt_stop(state: tauri::State<AudioState>) -> Result<(), String> {
     Ok(())
 }
 
+/// 克隆录音开始：复位重采样器（克隆与播放无关，不动播放缓冲）。
+#[tauri::command]
+fn clone_record_start(state: tauri::State<AudioState>) -> Result<(), String> {
+    state
+        .capture
+        .lock()
+        .map_err(|e| format!("采集锁损坏: {e}"))?
+        .reset();
+    Ok(())
+}
+
+/// 克隆样本分片（48k mono PCM16）→ FIR 重采样 16k → WS 0x01 帧，flags 带 bit2。
+#[tauri::command]
+fn clone_push(state: tauri::State<AudioState>, samples: Vec<i16>) -> Result<(), String> {
+    let pcm16k = state
+        .capture
+        .lock()
+        .map_err(|e| format!("采集锁损坏: {e}"))?
+        .push(&samples);
+    if pcm16k.is_empty() {
+        return Ok(());
+    }
+    let ws = state.ws.lock().map_err(|e| format!("音频通道锁损坏: {e}"))?;
+    let Some(client) = ws.as_ref() else {
+        return Err("音频通道未就绪（WS 尚未连接）".into());
+    };
+    client.send_clone_sample(pcm16_le(&pcm16k), false);
+    Ok(())
+}
+
+/// 克隆录音结束：空 final 样本帧收束 → `clone_start`（3.4/4.6）。
+///
+/// 样本内容只走 WS 帧；`sample_keys` 是壳侧对账用的标签（4.6 契约字段）。
+#[tauri::command]
+fn clone_record_stop(
+    state: tauri::State<AudioState>,
+    sidecar: tauri::State<SidecarState>,
+) -> Result<(), String> {
+    state
+        .capture
+        .lock()
+        .map_err(|e| format!("采集锁损坏: {e}"))?
+        .reset();
+    if let Some(client) = state
+        .ws
+        .lock()
+        .map_err(|e| format!("音频通道锁损坏: {e}"))?
+        .as_ref()
+    {
+        client.send_clone_sample(Vec::new(), true);
+    }
+    sidecar
+        .0
+        .send_clone_start("default", &["clone-sample".to_string()])
+}
+
+/// 取消克隆（3.4 clone_cancel）：sidecar 在阶段边界生效并把音色落 failed。
+#[tauri::command]
+fn clone_cancel(sidecar: tauri::State<SidecarState>) -> Result<(), String> {
+    sidecar.0.send_clone_cancel("default")
+}
+
 /// 引擎装配口径：默认真路（whisper + CosyVoice2 + Ollama）；`ECHOES_SIDECAR_MOCK=1`
 /// 强制 mock 全链（无模型验收/开发）。`--ws auto`：壳侧 WS 音频面（3.4）。
 fn sidecar_args() -> Vec<String> {
@@ -139,6 +201,7 @@ pub fn run() {
       let spawn_result = Sidecar::spawn(
         &sidecar_dir,
         &args,
+        &[],
         Box::new(move |event| {
           let _ = emit_handle.emit(sidecar::SHELL_EVENT, event);
         }),
@@ -174,7 +237,11 @@ pub fn run() {
       send_user_text,
       ptt_start,
       ptt_push,
-      ptt_stop
+      ptt_stop,
+      clone_record_start,
+      clone_push,
+      clone_record_stop,
+      clone_cancel
     ])
     .run(tauri::generate_context!())
     .expect("error while building tauri application");

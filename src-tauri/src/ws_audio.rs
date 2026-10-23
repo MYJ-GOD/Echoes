@@ -17,6 +17,8 @@ use tokio_tungstenite::tungstenite::Message;
 pub const DIR_INPUT: u8 = 0x01;
 pub const DIR_OUTPUT: u8 = 0x02;
 pub const FLAG_FINAL: u8 = 0x01;
+/// bit2：克隆样本分片（3.4）；与 IS_FINAL 可叠加，sidecar 侧按此分流不进 ASR。
+pub const FLAG_CLONE_SAMPLE: u8 = 0x04;
 
 /// 解析后的音频帧（payload 借用原始缓冲区）。
 #[derive(Debug, PartialEq, Eq)]
@@ -69,7 +71,8 @@ pub fn pcm16_from_le(payload: &[u8]) -> Vec<i16> {
 
 struct InputChunk {
     pcm: Vec<u8>,
-    is_final: bool,
+    /// 帧 flags（bit0 IS_FINAL / bit2 CLONE_SAMPLE）：由入队方决定，WS 线程只负责封帧
+    flags: u8,
 }
 
 /// 壳→sidecar 音频上行端；克隆共享同一连接与 seq 序列。
@@ -101,9 +104,22 @@ impl WsAudioClient {
 
     /// 上行一段 PCM16（16k mono，已按 3 字节帧头在 WS 线程封装）。
     pub fn send_input(&self, pcm16_le: Vec<u8>, is_final: bool) {
+        let flags = if is_final { FLAG_FINAL } else { 0 };
         let _ = self.tx.send(InputChunk {
             pcm: pcm16_le,
-            is_final,
+            flags,
+        });
+    }
+
+    /// 上行一段克隆样本（3.4 bit2）：与 PTT 共用连接与 seq 序列，但语义分流。
+    pub fn send_clone_sample(&self, pcm16_le: Vec<u8>, is_final: bool) {
+        let mut flags = FLAG_CLONE_SAMPLE;
+        if is_final {
+            flags |= FLAG_FINAL;
+        }
+        let _ = self.tx.send(InputChunk {
+            pcm: pcm16_le,
+            flags,
         });
     }
 }
@@ -142,8 +158,7 @@ async fn run(
         tokio::select! {
             outbound = rx.recv() => {
                 let Some(chunk) = outbound else { break; }; // 壳退出
-                let flags = if chunk.is_final { FLAG_FINAL } else { 0 };
-                let frame = encode_frame(DIR_INPUT, seq, flags, &chunk.pcm);
+                let frame = encode_frame(DIR_INPUT, seq, chunk.flags, &chunk.pcm);
                 seq = seq.wrapping_add(1);
                 if let Err(err) = sink.send(Message::Binary(frame.into())).await {
                     log::error!("WS 音频发送失败: {err}");
@@ -191,6 +206,21 @@ mod tests {
         assert_eq!(frame.seq, 7);
         assert!(frame.is_final());
         assert_eq!(frame.payload, &[1, 2, 3, 4]);
+    }
+
+    /// 克隆样本帧：bit2 与 bit0 可叠加，两者互不覆盖（3.4 flags 三位独立）。
+    #[test]
+    fn clone_sample_flag_coexists_with_final_flag() {
+        let raw = encode_frame(
+            DIR_INPUT,
+            0,
+            FLAG_CLONE_SAMPLE | FLAG_FINAL,
+            &[0x01, 0x00],
+        );
+        let frame = decode_frame(&raw).expect("合法帧");
+        assert_eq!(frame.flags & FLAG_CLONE_SAMPLE, FLAG_CLONE_SAMPLE);
+        assert!(frame.is_final());
+        assert_eq!(frame.payload, &[0x01, 0x00]);
     }
 
     #[test]
