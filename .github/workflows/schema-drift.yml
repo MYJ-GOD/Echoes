@@ -1,7 +1,9 @@
-# 13.2-1：schema 单一来源——TS 侧 src/lib/ipc_types.ts 由 datamodel-code-generator 生成；
-# CI 重新生成并与入库生成物对拍（git diff --exit-code），漂移即红。
-# 触发（修复轮，评审 🟡-5）：push: main + 全部 PR（单人直推 main 时 PR webhook 也会触发 push）。
-# 当前为占位：src/lib/ipc_types.ts 尚不存在（Tauri 壳目录随阶段 0 第一周开出，需 Rust 工具链）。
+# 13.2-1：schema 单一来源——`src/lib/ipc_types.ts` 由 sidecar 的 pydantic 模型生成
+# （`sidecar/echoes_sidecar/ipc/tsexport.py`），CI 重新生成并与入库生成物对拍，
+# 漂移即红。消息方向/字段/错误码改一处而忘了改另一处，这里会立刻拦下来。
+#
+# 为什么要装依赖：生成器 import pydantic + 消息模型，裸 Python 跑不起来。
+# 只装生成所需的最小集（不碰 torch/ML，与 build-sidecar 的骨架依赖同思路）。
 name: schema-drift
 on:
   push:
@@ -10,8 +12,29 @@ on:
 
 jobs:
   guard:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: 占位（阶段 0 接 datamodel-code-generator）
-        run: echo 'schema-drift 待接线：sidecar/echoes_sidecar/ipc/schema.py -> src/lib/ipc_types.ts（13.2-1）'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 安装 sidecar 骨架依赖（生成器只需 pydantic）
+        working-directory: sidecar
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pydantic>=2.7,<3"
+
+      - name: 生成（与入库生成物对拍）
+        # scripts/gen-ipc-types.mjs 找不到 .venv 时按 PATH 找 python3
+        run: node scripts/gen-ipc-types.mjs --check
+
+      - name: 前端类型检查（生成物必须能编译）
+        run: |
+          npm ci
+          npx vue-tsc --noEmit

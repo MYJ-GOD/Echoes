@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+
+import * as ipc from "./lib/ipc";
+import type { SidecarMessage } from "./lib/ipc";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -10,24 +12,8 @@ interface ChatMessage {
   interrupted?: boolean;
 }
 
-// 壳事件侧车帧（结对 sidecar.rs 的 ShellEvent；未知 kind 忽略 —— 3.4 兼容规则）
-type ShellEventPayload =
-  | { kind: "sidecar"; event: SidecarFrame }
-  | { kind: "protocol"; code: string; message: string; fatal: boolean };
-
-type SidecarFrame =
-  | {
-      type: "hello";
-      sidecar_version: string;
-      protocol_version: string;
-      engines?: { name: string; ready: boolean }[];
-    }
-  | { type: "state"; state: string }
-  | { type: "asr_final"; session_id: string; text: string; is_final: boolean }
-  | { type: "assistant_text"; session_id: string; text: string }
-  | { type: "turn_complete"; session_id: string; turn_seq: number; status: string }
-  | { type: "clone_progress"; session_id: string; phase: string; pct: number }
-  | { type: "error"; session_id: string | null; code: string; message: string };
+// 侧车帧类型来自 `lib/ipc_types.ts`（由 sidecar 的 pydantic 模型生成，13.2-1）：
+// 协议改名会在这里编译期报错，而不是运行时静默失败。
 
 // 阶段 0 第一周：文本→LLM→文本 经 StdioTransport 打通；
 // 麦克风（PTT）与音频播放为壳侧采集验证（风险 10），后续接入。
@@ -68,13 +54,8 @@ function protocolDown(code: string, message: string): void {
 }
 
 onMounted(async () => {
-  unlisten = await listen<ShellEventPayload>("sidecar://event", (e) => {
-    const payload = e.payload;
-    if (payload.kind === "protocol") {
-      protocolDown(payload.code, payload.message);
-      return;
-    }
-    handleFrame(payload.event);
+  unlisten = await ipc.onSidecarEvent(handleFrame, (failure) => {
+    protocolDown(failure.code, failure.message);
   });
 });
 
@@ -82,11 +63,10 @@ onUnmounted(() => {
   unlisten?.();
 });
 
-function handleFrame(frame: SidecarFrame): void {
+function handleFrame(frame: SidecarMessage): void {
   switch (frame.type) {
     case "hello":
-      asrReady.value =
-        frame.engines?.some((e) => e.name === "asr" && e.ready) ?? false;
+      asrReady.value = frame.engines.some((e) => e.name === "asr" && e.ready);
       break;
     case "state": {
       // 3.5：state 归 sidecar 所有，壳只是渲染者——busy 以状态机为准，
@@ -103,12 +83,12 @@ function handleFrame(frame: SidecarFrame): void {
     }
     case "asr_final":
       // 语音面输入：sidecar 随后立即进入 turn（asr_final 与 user_text 等价）。
-      messages.value.push({ role: "user", text: String(frame.text) });
+      messages.value.push({ role: "user", text: frame.text });
       busy.value = true;
       micStatus.value = "麦克风就绪";
       break;
     case "assistant_text": {
-      const text = String(frame.text);
+      const text = frame.text;
       const last = messages.value[messages.value.length - 1];
       if (streaming.value && last?.role === "assistant") {
         last.text = text; // text=截至当前全量，直接替换
@@ -119,7 +99,7 @@ function handleFrame(frame: SidecarFrame): void {
       break;
     }
     case "turn_complete": {
-      const status = String(frame.status);
+      const status = frame.status;
       const last = messages.value[messages.value.length - 1];
       if (status === "CANCELLED" && last?.role === "assistant") {
         last.interrupted = true; // 被打断的半句留痕，而不是悄悄丢掉
@@ -222,9 +202,8 @@ let sendChain: Promise<unknown> = Promise.resolve();
 
 function enqueueChunk(samples: number[]): void {
   // PTT 与克隆共用一条采集链，只在下行命令上分流（克隆帧带 bit2，3.4）
-  const command = captureMode.value === "clone" ? "clone_push" : "ptt_push";
   sendChain = sendChain
-    .then(() => invoke(command, { samples }))
+    .then(() => (captureMode.value === "clone" ? ipc.clonePush(samples) : ipc.pttPush(samples)))
     .catch((err) => {
       micStatus.value = `⚠ 音频发送失败：${String(err)}`;
     });
@@ -280,7 +259,7 @@ async function startCapture(mode: CaptureMode): Promise<void> {
   } else if (busy.value) {
     // 三跳首跳：按下即关闸门 + 清播放缓冲 + 通知 sidecar 取消（≤100ms 内静音，
     // 不等 sidecar 确认）。必须先于 getUserMedia——权限/设备协商可能要几百毫秒。
-    void invoke("interrupt_turn").catch((err) => {
+    void ipc.interruptTurn().catch((err) => {
       micStatus.value = `⚠ 打断失败：${String(err)}`;
     });
   }
@@ -293,7 +272,7 @@ async function startCapture(mode: CaptureMode): Promise<void> {
       return;
     }
     // PTT 先 flush 在途播放（打断首跳）；克隆与播放无关，只复位重采样器
-    await invoke(mode === "clone" ? "clone_record_start" : "ptt_start");
+    await (mode === "clone" ? ipc.cloneRecordStart() : ipc.pttStart());
     if (!captureHeld.value) {
       stream.getTracks().forEach((track) => track.stop());
       return;
@@ -369,14 +348,14 @@ async function stopCapture(): Promise<void> {
   try {
     await sendChain;
     if (rest.length > 0) {
-      await invoke(mode === "clone" ? "clone_push" : "ptt_push", { samples: rest });
+      await (mode === "clone" ? ipc.clonePush(rest) : ipc.pttPush(rest));
     }
     if (mode === "clone") {
-      await invoke("clone_record_stop");
+      await ipc.cloneRecordStop();
       cloneSeconds.value = 0;
       micStatus.value = "样本已上送，克隆中…";
     } else {
-      await invoke("ptt_stop");
+      await ipc.pttStop();
       micStatus.value = "识别中…";
     }
   } catch (err) {
@@ -405,7 +384,7 @@ function cloneStop(): void {
 }
 
 function cancelClone(): void {
-  void invoke("clone_cancel").catch((err) => {
+  void ipc.cloneCancel().catch((err) => {
     cloneError.value = String(err);
   });
 }
@@ -427,7 +406,7 @@ onUnmounted(() => {
 
 /** 停止播放（3.5 动作矩阵）：丢弃当前 turn 但不进入采集 → `control(cancel_turn)`。 */
 function stopTurn(): void {
-  void invoke("cancel_turn").catch((err) => {
+  void ipc.cancelTurn().catch((err) => {
     micStatus.value = `⚠ 停止失败：${String(err)}`;
   });
 }
@@ -437,13 +416,13 @@ async function send(): Promise<void> {
   if (!text) return;
   if (busy.value) {
     // 3.5：文本输入 = 打断并发起新 turn（旧 turn 收尾为 CANCELLED）
-    void invoke("interrupt_turn").catch(() => {});
+    void ipc.interruptTurn().catch(() => {});
   }
   messages.value.push({ role: "user", text });
   input.value = "";
   busy.value = true;
   try {
-    await invoke("send_user_text", { text });
+    await ipc.sendUserText(text);
   } catch (err) {
     messages.value.push({ role: "assistant", text: `⚠ 发送失败：${String(err)}` });
     streaming.value = false;

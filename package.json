@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "npm run ipc:check && vue-tsc --noEmit && vite build",
+    "ipc:types": "node scripts/gen-ipc-types.mjs",
+    "ipc:check": "node scripts/gen-ipc-types.mjs --check",
     "tauri": "tauri"
   },
   "dependencies": {
