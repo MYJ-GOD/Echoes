@@ -3,7 +3,8 @@
 口径：
 - `next_utterance` 只在 is_final 帧收束；连接中断（EOF）的半段丢弃 → None；
 - `asr_final` 与 `user_text` 等价触发 turn；booting 期/空段/空转写不形成 turn；
-- ASR 失败经 error 事件上报（ASR_ENGINE_ERROR，非致命不进 3.5 error 态）。
+- ASR 失败经 error 事件上报（ASR_ENGINE_ERROR，非致命不进 3.5 error 态）；
+- turn 流程本身归编排层（`orchestration.graph`），本文件只验「入口 → 编排」的接线。
 """
 
 from __future__ import annotations
@@ -15,38 +16,22 @@ from typing import Any
 from echoes_sidecar.audio.stream import AudioInputStream
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.state_machine import AppState, StateMachine
-from echoes_sidecar.core.types import AudioChunk, Persona
+from echoes_sidecar.core.types import AudioChunk
 from echoes_sidecar.engines.asr.base import ASREngine
 from echoes_sidecar.engines.asr.mock import MockASREngine
-from echoes_sidecar.engines.llm.mock import MockLLMProvider
-from echoes_sidecar.engines.tts.mock import MockTTSEngine
 from echoes_sidecar.main import _asr_turn_from_pcm, _transcribe_pcm
-from echoes_sidecar.session.session import Session
 from echoes_sidecar.transport.local_ws import (
     DIR_INPUT,
     LocalWebSocketTransport,
     encode_audio_frame,
 )
-
-
-class _RecordingTransport:
-    """4.1 Transport 替身：记录 send 的 JSON 载荷。"""
-
-    def __init__(self) -> None:
-        self.sent: list[dict[str, Any]] = []
-
-    async def send(self, msg: dict[str, Any]) -> None:
-        self.sent.append(msg)
-
-
-class _RecordingWS:
-    """LocalWebSocketTransport 替身：记录 send_audio 的 chunk。"""
-
-    def __init__(self) -> None:
-        self.chunks: list[AudioChunk] = []
-
-    async def send_audio(self, chunk: AudioChunk) -> None:
-        self.chunks.append(chunk)
+from tests.conftest import (
+    RecordingEgress,
+    RecordingTransport,
+    make_graph,
+    make_session,
+    ready_machine,
+)
 
 
 class _SegmentedASR(ASREngine):
@@ -68,20 +53,6 @@ class _BoomASR(ASREngine):
     async def transcribe(self, audio: AudioInputStream) -> AsyncIterator[dict[str, Any]]:
         raise EchoesError(ErrorCode.ASR_ENGINE_ERROR, "boom")
         yield {}  # async generator 语法要求（不可达）
-
-
-def _session() -> Session:
-    now = time.time()
-    persona = Persona(
-        id="default", name="默认人设", system_prompt="s", created_at=now, updated_at=now
-    )
-    return Session(session_id="default", profile_id="default", persona=persona)
-
-
-def _ready_machine() -> StateMachine:
-    machine = StateMachine()
-    machine.transition(AppState.READY)
-    return machine
 
 
 async def test_next_utterance_collects_pcm_until_final() -> None:
@@ -115,72 +86,54 @@ async def test_transcribe_pcm_feeds_single_final_chunk_and_joins_segments() -> N
 
 
 async def test_asr_turn_emits_asr_final_then_runs_turn() -> None:
-    transport = _RecordingTransport()
-    ws = _RecordingWS()
-    machine = _ready_machine()
-    session = _session()
+    """asr_final 必须先于任何 turn 产物出壳（3.4 时序），turn 收尾走编排层。"""
+    transport = RecordingTransport()
+    egress = RecordingEgress()
+    graph = make_graph(transport, egress=egress)
+    session = make_session()
 
     formed = await _asr_turn_from_pcm(
         b"\x00\x00" * 16,
         transport,
-        machine,
+        graph,
         session,
         MockASREngine(),
-        MockLLMProvider(),
-        MockTTSEngine(),
         time.perf_counter(),
-        ws,
     )
 
     assert formed
-    finals = [msg for msg in transport.sent if msg.get("type") == "asr_final"]
+    finals = transport.of_type("asr_final")
     assert len(finals) == 1
     assert finals[0]["text"] == "（mock）今天有点累，陪我聊聊"
     assert finals[0]["is_final"] is True
-    assert transport.sent.index(finals[0]) < next(
-        i for i, msg in enumerate(transport.sent) if msg.get("type") == "assistant_text"
-    )
-    completes = [msg for msg in transport.sent if msg.get("type") == "turn_complete"]
-    assert len(completes) == 1
-    assert completes[0]["status"] == "SUCCESS"
+
+    first_text = transport.sent.index(transport.of_type("assistant_text")[0])
+    assert transport.sent.index(finals[0]) < first_text
+
+    assert transport.only_turn_complete()["status"] == "SUCCESS"
     assert session.turn_seq == 1
-    assert machine.state is AppState.READY
-    assert ws.chunks  # TTS chunk 已出 WS
+    assert graph.machine.state is AppState.READY
+    assert egress.chunks  # TTS chunk 已经 AudioEgress 出壳
 
 
 async def test_asr_turn_empty_pcm_is_ignored() -> None:
-    transport = _RecordingTransport()
-    machine = _ready_machine()
+    transport = RecordingTransport()
+    graph = make_graph(transport, machine=ready_machine())
     formed = await _asr_turn_from_pcm(
-        b"",
-        transport,
-        machine,
-        _session(),
-        MockASREngine(),
-        MockLLMProvider(),
-        MockTTSEngine(),
-        time.perf_counter(),
-        None,
+        b"", transport, graph, make_session(), MockASREngine(), time.perf_counter()
     )
     assert not formed
     assert transport.sent == []
-    assert machine.state is AppState.READY
+    assert graph.machine.state is AppState.READY
 
 
 async def test_asr_turn_ignored_when_not_ready() -> None:
     """booting（asr 未就绪）期 PTT 音频不触发 turn（3.5 用户动作矩阵）。"""
-    transport = _RecordingTransport()
+    transport = RecordingTransport()
     machine = StateMachine()  # booting
+    graph = make_graph(transport, machine=machine)
     formed = await _asr_turn_from_pcm(
-        b"\x00\x00",
-        transport,
-        machine,
-        _session(),
-        MockASREngine(),
-        MockLLMProvider(),
-        MockTTSEngine(),
-        time.perf_counter(),
-        None,
+        b"\x00\x00", transport, graph, make_session(), MockASREngine(), time.perf_counter()
     )
     assert not formed
     assert transport.sent == []
@@ -188,21 +141,13 @@ async def test_asr_turn_ignored_when_not_ready() -> None:
 
 
 async def test_asr_failure_emits_error_without_turn() -> None:
-    transport = _RecordingTransport()
-    machine = _ready_machine()
+    transport = RecordingTransport()
+    graph = make_graph(transport, machine=ready_machine())
     formed = await _asr_turn_from_pcm(
-        b"\x00\x00",
-        transport,
-        machine,
-        _session(),
-        _BoomASR(),
-        MockLLMProvider(),
-        MockTTSEngine(),
-        time.perf_counter(),
-        None,
+        b"\x00\x00", transport, graph, make_session(), _BoomASR(), time.perf_counter()
     )
     assert not formed
     assert [msg["type"] for msg in transport.sent] == ["error"]
     assert transport.sent[0]["code"] == "ASR_ENGINE_ERROR"
     assert transport.sent[0]["fatal"] is False
-    assert machine.state is AppState.READY
+    assert graph.machine.state is AppState.READY

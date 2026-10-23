@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Protocol
+
+from echoes_sidecar.core.types import AudioChunk
 
 
 class Transport(ABC):
@@ -27,3 +29,16 @@ class Transport(ABC):
     @abstractmethod
     async def close(self) -> None:
         """关闭底层流；幂等（重复调用安全）。"""
+
+
+class AudioEgress(Protocol):
+    """输出音频的发送面（3.4 WS 0x02 帧）。
+
+    为什么不直接标 `LocalWebSocketTransport`：3.2 要求编排层只依赖契约（ABC/Protocol），
+    具体传输实现归组合根装配；远程大脑（8.1）将来换 LanWebSocketTransport 时，
+    编排层这一行不需要改。
+    """
+
+    async def send_audio(self, chunk: AudioChunk) -> None:
+        """送出一帧 TTS 音频（24k mono PCM16）；无壳连接时实现可静默丢弃。"""
+        ...

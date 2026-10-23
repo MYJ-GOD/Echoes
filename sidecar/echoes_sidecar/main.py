@@ -15,11 +15,11 @@ import asyncio
 import sys
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from echoes_sidecar import __version__
 from echoes_sidecar.audio.stream import AudioInputStream
-from echoes_sidecar.core.cancel import CancelToken, StreamOutcome, TurnCancelled, aclose, pull
+from echoes_sidecar.core.cancel import CancelToken
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.state_machine import AppState, StateMachine, required_engines_ready
 from echoes_sidecar.core.types import AudioChunk
@@ -36,7 +36,6 @@ from echoes_sidecar.engines.tts.cosyvoice2 import CosyVoice2TtsEngine
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
 from echoes_sidecar.ipc import (
     AsrFinalMsg,
-    AssistantTextMsg,
     CloneCancelMsg,
     CloneStartMsg,
     ControlMsg,
@@ -44,13 +43,11 @@ from echoes_sidecar.ipc import (
     ErrorMsg,
     HelloMsg,
     StateMsg,
-    Timings,
-    TurnCompleteMsg,
     UserTextMsg,
     parse_obj,
 )
 from echoes_sidecar.orchestration.clone import CloneService
-from echoes_sidecar.orchestration.text_clean import clean_for_tts
+from echoes_sidecar.orchestration.graph import TriggerSource, TurnDeps, TurnGraph
 from echoes_sidecar.orchestration.turn import TurnFactory, TurnRunner
 from echoes_sidecar.session.manager import SessionManager
 from echoes_sidecar.session.session import Session
@@ -157,180 +154,26 @@ def _open_session(storage: Storage, *, now: float) -> Session:
     )
 
 
-async def _persist_session(storage: Storage, session: Session) -> None:
-    """turn 收尾落库（5.1：轮次明细不落库，只更新活跃时间与音色绑定）。
-
-    写盘进线程（3.2 事件循环只做调度）；失败记 stderr 但不打断 turn——
-    14.1「磁盘满：停止写入、保常态」，同时保留可观测性。
-    """
-
-    def _write() -> None:
-        storage.sessions.touch(session.session_id, now=time.time())
-        if session.voice_id is not None:
-            storage.sessions.bind_voice(session.session_id, session.voice_id)
-
-    try:
-        await asyncio.to_thread(_write)
-    except EchoesError as exc:
-        print(f"[sidecar] 会话落库失败（turn 不受影响）: {exc}", file=sys.stderr)
-
-
 def _state_payload(machine: StateMachine, session_id: str | None, t: int) -> dict[str, Any]:
     return StateMsg(state=machine.state.value, session_id=session_id, t=t).model_dump(
         mode="json"
     )
 
 
-def _turn_factory(
-    transport: Transport,
-    machine: StateMachine,
-    session: Session,
-    provider: LLMProvider,
-    tts: TTSEngine,
-    text: str,
-    t0: float,
-    ws_transport: LocalWebSocketTransport | None,
-    *,
-    storage: Storage | None = None,
-) -> TurnFactory:
-    """把「本轮的输入文本 + 引擎」绑成一个 turn 工厂（3.5 单在途 / 3.4 三跳）。
+def _turn_factory(graph: TurnGraph, session: Session, text: str) -> TurnFactory:
+    """把「本轮输入文本」绑成一个 turn 工厂（3.5 单在途 / 3.4 三跳）。
 
     绑定必须发生在构造期：`runner.start()` 只是建任务，任务要到下一次 `await`
     才真正起跑——用闭包直接抓循环变量会把上一轮的文本串到下一轮。
+    真正的 turn 流程在 `orchestration.graph`（4.3/10），组合根只做装配与适配。
     """
 
     async def _bound(token: CancelToken) -> None:
-        await _run_turn(
-            transport,
-            machine,
-            session,
-            provider,
-            tts,
-            text,
-            t0,
-            ws_transport,
-            token=token,
-            storage=storage,
+        await graph.run_turn(
+            session, TriggerSource.USER_INPUT, {"text": text}, token=token
         )
 
     return _bound
-
-
-async def _run_turn(
-    transport: Transport,
-    machine: StateMachine,
-    session: Session,
-    provider: LLMProvider,
-    tts: TTSEngine,
-    text: str,
-    t0: float,
-    ws_transport: LocalWebSocketTransport | None = None,
-    *,
-    token: CancelToken | None = None,
-    storage: Storage | None = None,
-) -> None:
-    """turn：→generating→(LLM 流式)→speaking→(TTS chunk 逐帧 WS)→turn_complete→ready。
-
-    输入文本来自 user_text（文本面）或 asr_final（PTT 语音面），二者等价（3.4）。
-    音频真链：synthesize 逐段 chunk 经 WS 出壳（0x02 帧、24k PCM，3.4）；
-    ws=off/无连接时 chunk 静默丢弃（send_audio 既有语义），消息面不受影响。
-
-    **三跳打断（3.4）**：`token` 置位后本 turn 在下一个安全检查点收束为
-    `turn_complete(status=CANCELLED)`。收尾统一走 `finally`——一次 turn 恒有且
-    只有一条 `turn_complete`，状态机恒回 `ready`（异常也不能把 UI 锁在 generating）。
-    TTS/LLM 引擎错误 → FAILED（3.4.1 报错不降级；非致命不进 3.5 error 态）。
-    """
-    token = token if token is not None else CancelToken()
-    status: Literal["SUCCESS", "CANCELLED", "FAILED"] = "SUCCESS"
-    llm_first_token_ms: int | None = None
-    tts_first_audio_ms: int | None = None
-
-    machine.transition(AppState.GENERATING)
-    await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
-
-    try:
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": session.persona.system_prompt},
-            {"role": "user", "content": text},
-        ]
-        pieces: list[str] = []
-        stream = provider.generate(messages)
-        try:
-            while True:
-                outcome, piece = await pull(stream, token)
-                if outcome is StreamOutcome.END:
-                    break
-                if outcome is StreamOutcome.CANCELLED:
-                    raise TurnCancelled
-                if llm_first_token_ms is None:
-                    llm_first_token_ms = _now_ms(t0)
-                pieces.append(piece or "")
-                # v1.4.1：回复文本逐片回传（text=截至当前全量；收尾由 turn_complete 界定）
-                await transport.send(
-                    AssistantTextMsg(
-                        session_id=session.session_id,
-                        text="".join(pieces),
-                        t=_now_ms(t0),
-                    ).model_dump(mode="json")
-                )
-        finally:
-            await aclose(stream)
-        reply = "".join(pieces)
-
-        machine.transition(AppState.SPEAKING)
-        await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
-
-        voice_id = session.voice_id or "builtin:default"  # 2.5 未克隆绑定内置音色
-        speakable = clean_for_tts(reply)  # 5.2：音频吃清洗后文本；assistant_text 帧保持原样
-        audio = tts.synthesize(speakable, voice_id)
-        try:
-            while True:
-                outcome, chunk = await pull(audio, token)
-                if outcome is StreamOutcome.END:
-                    break
-                if outcome is StreamOutcome.CANCELLED:
-                    raise TurnCancelled
-                if chunk is None:
-                    continue
-                if tts_first_audio_ms is None:
-                    tts_first_audio_ms = _now_ms(t0)
-                # 音频经 WS 出壳侧播放（3.4）；ws=off 或无连接 → send_audio 内静默丢弃
-                if ws_transport is not None:
-                    await ws_transport.send_audio(chunk)
-        finally:
-            await aclose(audio)
-    except TurnCancelled:
-        # 三跳收尾：不再产出音频（在途 chunk 丢弃），壳侧播放在首跳已清空
-        status = "CANCELLED"
-        print("[sidecar] turn 被三跳打断，按 CANCELLED 收尾", file=sys.stderr)
-    except EchoesError as exc:
-        # 引擎错误不静默不降级（3.4.1）：turn FAILED 收束，状态机照常回 ready
-        print(f"[sidecar] turn 失败（{exc.code}），按 FAILED 收尾: {exc.message}", file=sys.stderr)
-        status = "FAILED"
-        await _send_error(transport, session, exc, t0)
-    finally:
-        await token.close()
-        if status == "SUCCESS" and token.cancelled:
-            status = "CANCELLED"  # 收尾瞬间才置位：最后一个检查点没赶上，语义仍算被打断
-        session.turn_seq += 1
-        await transport.send(
-            TurnCompleteMsg(
-                session_id=session.session_id,
-                turn_seq=session.turn_seq,
-                status=status,
-                timings=Timings(
-                    total_ms=_now_ms(t0),
-                    llm_first_token_ms=llm_first_token_ms,
-                    tts_first_audio_ms=tts_first_audio_ms,
-                ),
-            ).model_dump(mode="json")
-        )
-        if machine.state is not AppState.READY:
-            machine.transition(AppState.READY)
-            await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
-
-        if storage is not None:
-            await _persist_session(storage, session)
 
 
 class _PcmStream(AudioInputStream):
@@ -373,16 +216,12 @@ async def _send_error(
 async def _asr_turn_from_pcm(
     pcm: bytes,
     transport: Transport,
-    machine: StateMachine,
+    graph: TurnGraph,
     session: Session,
     asr: ASREngine,
-    provider: LLMProvider,
-    tts: TTSEngine,
     t0: float,
-    ws_transport: LocalWebSocketTransport | None,
     *,
     runner: TurnRunner | None = None,
-    storage: Storage | None = None,
 ) -> bool:
     """一段 PTT 音频 → ASR → asr_final → turn（3.4：asr_final 与 user_text 等价）。
 
@@ -391,6 +230,7 @@ async def _asr_turn_from_pcm(
     `generating`/`speaking` 期收到新输入 = 先打断在途 turn 再起新 turn（3.5 动作矩阵）；
     `runner` 为空时无取消通道，只能按旧口径忽略（单测直调走这条）。
     """
+    machine = graph.machine
     if not pcm:
         print("[sidecar] 收到空 PTT 段，忽略", file=sys.stderr)
         return False
@@ -434,19 +274,7 @@ async def _asr_turn_from_pcm(
         ).model_dump(mode="json")
     )
     runner = runner if runner is not None else TurnRunner()
-    task = await runner.start(
-        _turn_factory(
-            transport,
-            machine,
-            session,
-            provider,
-            tts,
-            text,
-            t0,
-            ws_transport,
-            storage=storage,
-        )
-    )
+    task = await runner.start(_turn_factory(graph, session, text))
     await runner.wait(task)
     return True
 
@@ -454,15 +282,12 @@ async def _asr_turn_from_pcm(
 async def _asr_loop(
     ws_transport: LocalWebSocketTransport,
     transport: Transport,
-    machine: StateMachine,
+    graph: TurnGraph,
     session: Session,
     asr: ASREngine,
-    provider: LLMProvider,
-    tts: TTSEngine,
     t0: float,
     runner: TurnRunner,
     *,
-    storage: Storage | None = None,
     is_cloning: Callable[[], bool] | None = None,
 ) -> None:
     """PTT 语音入口（3.4/§12 步骤 4）：WS 整段音频 → ASR → turn。
@@ -485,17 +310,7 @@ async def _asr_loop(
             print("[sidecar] 克隆进行中，忽略本段 PTT 音频", file=sys.stderr)
             continue
         await _asr_turn_from_pcm(
-            pcm,
-            transport,
-            machine,
-            session,
-            asr,
-            provider,
-            tts,
-            t0,
-            ws_transport,
-            runner=runner,
-            storage=storage,
+            pcm, transport, graph, session, asr, t0, runner=runner
         )
 
 
@@ -722,7 +537,6 @@ async def _serve_with_storage(
 ) -> None:
     t0 = time.perf_counter()
     session = _open_session(storage, now=time.time())  # 5.1 + 14.1 重启重建
-    SessionManager().create(session)  # 4.6：阶段 0 单会话，按 session_id 查找写
 
     # 组合根装配清单（3.2）：whisper/cosyvoice2 均走真路分级就绪（warmup 后台任务
     # 完成后重发 hello，3.4 v1.4）；mock 保留为无模型契约链。
@@ -730,26 +544,31 @@ async def _serve_with_storage(
     asr_engine, asr_ready = _assemble_asr(argv)
     tts_engine, tts_ready = _assemble_tts(argv)
     ws_transport = await _assemble_ws(argv)
-    engines_runtime: dict[str, Any] = {
-        "asr": asr_engine,
-        "tts": tts_engine,
-        "llm": llm_provider,
-    }
-    def _ready_of(name: str) -> bool:
-        if name == "llm":
-            return llm_ready
-        if name == "asr":
-            return asr_ready
-        if name == "tts":
-            return tts_ready
-        return True
-
+    # hello.engines 的清单顺序即装配顺序（3.4：壳以最后一份 hello 为准）
     engine_states: list[EngineState] = [
-        EngineState(name=name, ready=_ready_of(name)) for name in engines_runtime
+        EngineState(name="asr", ready=asr_ready),
+        EngineState(name="tts", ready=tts_ready),
+        EngineState(name="llm", ready=llm_ready),
     ]
 
     transport = StdioTransport(_ThreadedReader(), _StdOutWriter())
     machine = StateMachine()
+    # 4.6：会话登记与串行化守卫（编排层的 turn 从这里进出）
+    manager = SessionManager()
+    manager.create(session)
+    # 4.3/10 编排层：turn 三节点的唯一实现，组合根只喂依赖（3.2）
+    graph = TurnGraph(
+        TurnDeps(
+            transport=transport,
+            llm=llm_provider,
+            tts=tts_engine,
+            t0=t0,
+            egress=ws_transport,
+            storage=storage,
+        ),
+        machine,
+        manager=manager,
+    )
     # 3.5 单会话单在途 turn：文本面/语音面共用一个 turn 槽（串行 + 可打断）
     runner = TurnRunner()
     clone_service = CloneService(
@@ -793,14 +612,11 @@ async def _serve_with_storage(
             _asr_loop(
                 ws_transport,
                 transport,
-                machine,
+                graph,
                 session,
                 asr_engine,
-                llm_provider,
-                tts_engine,
                 t0,
                 runner,
-                storage=storage,
                 is_cloning=lambda: clone_task is not None and not clone_task.done(),
             )
         )
@@ -827,19 +643,7 @@ async def _serve_with_storage(
                     continue
                 # 不 await：stdio 主循环必须继续读 control——那是打断的唯一入口；
                 # start() 内部会先打断在途 turn（3.5「文本输入=打断并发起新 turn」）
-                await runner.start(
-                    _turn_factory(
-                        transport,
-                        machine,
-                        session,
-                        engines_runtime["llm"],
-                        engines_runtime["tts"],
-                        msg.text,
-                        t0,
-                        ws_transport,
-                        storage=storage,
-                    )
-                )
+                await runner.start(_turn_factory(graph, session, msg.text))
             elif isinstance(msg, ControlMsg):
                 action = msg.action
                 # interrupt 与 cancel_turn 在 sidecar 侧同义（都收束为 CANCELLED）；

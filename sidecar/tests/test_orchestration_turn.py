@@ -1,432 +1,300 @@
-"""三跳打断（3.4）：协作式取消令牌 / 可抢先取项 / turn 槽 / CANCELLED 收尾。
+"""三跳打断（3.4）与其取消原语：`CancelToken` / `pull` / `TurnRunner` / 编排层 CANCELLED 收尾。
 
-口径：
-- 打断是**协作式**的：令牌置位后 turn 在下一个安全检查点停下并正常收尾，
-  绝不强杀（否则 `turn_complete`/`state` 写不出去，壳侧永远卡在 generating）；
-- 被打断的 turn 必须以 `turn_complete(status=CANCELLED)` 结束，且状态机回 ready；
-- 取消后不再向 WS 产出音频（在途 chunk 丢弃），LLM/TTS 流都要被关闭。
+口径（三跳分摊表末行）：被打断的 turn 必须以
+`turn_complete(status=CANCELLED)` 收束、状态机回 `ready`，且**不发 error 事件**
+（打断是用户意图，不是故障）。
+
+本文件分三段：原语（core.cancel）→ 任务槽（TurnRunner）→ 编排层端到端（TurnGraph）。
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Callable
 
-from echoes_sidecar.core.cancel import (
-    CancelToken,
-    StreamOutcome,
-    TurnCancelled,
-    aclose,
-    pull,
-)
-from echoes_sidecar.core.errors import EchoesError, ErrorCode
-from echoes_sidecar.core.state_machine import AppState, StateMachine
-from echoes_sidecar.core.types import AudioChunk, Persona
-from echoes_sidecar.engines.llm.base import LLMProvider
-from echoes_sidecar.engines.llm.mock import MockLLMProvider
-from echoes_sidecar.engines.tts.base import TTSEngine
-from echoes_sidecar.engines.tts.mock import MockTTSEngine
-from echoes_sidecar.main import _run_turn
+from echoes_sidecar.core.cancel import CancelToken, StreamOutcome, TurnCancelled, aclose, pull
+from echoes_sidecar.orchestration.graph import TriggerSource
 from echoes_sidecar.orchestration.turn import TurnRunner
-from echoes_sidecar.session.session import Session
+from tests.conftest import RecordingEgress, RecordingTransport, make_graph, make_session
+from tests.fakes import EndlessTTS, FixedLLM, SlowLLM
+
+# ------------------------------ 原语 ------------------------------
 
 
-class _RecordingTransport:
-    """4.1 Transport 替身：只记录 send 的 JSON 载荷。"""
-
-    def __init__(self) -> None:
-        self.sent: list[dict[str, Any]] = []
-
-    async def send(self, msg: dict[str, Any]) -> None:
-        self.sent.append(msg)
-
-
-class _RecordingWS:
-    """LocalWebSocketTransport 替身：记录 send_audio 的 chunk。"""
-
-    def __init__(self, token: CancelToken | None = None, cancel_after: int = 0) -> None:
-        self.chunks: list[AudioChunk] = []
-        self._token = token
-        self._cancel_after = cancel_after
-
-    async def send_audio(self, chunk: AudioChunk) -> None:
-        self.chunks.append(chunk)
-        if self._token is not None and self._cancel_after == len(self.chunks):
-            self._token.cancel()  # 模拟壳侧三跳：收到第 N 帧后打断
-
-
-class _EndlessTTS(TTSEngine):
-    """永不结束的 TTS（验证取消后立刻断流，不是跑完再看标志）。"""
-
-    def __init__(self) -> None:
-        self.produced = 0
-
-    async def synthesize(self, text: str, voice_id: str) -> AsyncIterator[AudioChunk]:
-        _ = (text, voice_id)
-        while True:
-            yield AudioChunk(data=b"\x00\x00", seq=self.produced)
-            self.produced += 1
-
-    async def clone(self, sample: Any) -> str:  # noqa: ARG002  test-only stub
-        raise NotImplementedError
-
-
-class _SlowLLM(LLMProvider):
-    """首片后长时间阻塞的 LLM（验证令牌能插队到 pending 取项之前）。"""
-
-    @property
-    def name(self) -> str:
-        return "slow"
-
-    async def health(self) -> bool:
-        return True
-
-    async def generate(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        stream: bool = True,
-        max_tokens: int = 1024,
-        temperature: float = 0.7,
-    ) -> AsyncIterator[str]:
-        _ = (messages, stream, max_tokens, temperature)
-        yield "第一片"
-        await asyncio.sleep(30)
-        yield "不该产出"
-
-
-class _BoomLLM(LLMProvider):
-    """恒抛 EchoesError 的 LLM（turn FAILED + error 事件，3.4.1）。"""
-
-    @property
-    def name(self) -> str:
-        return "boom"
-
-    async def health(self) -> bool:
-        return True
-
-    async def generate(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        stream: bool = True,
-        max_tokens: int = 1024,
-        temperature: float = 0.7,
-    ) -> AsyncIterator[str]:
-        _ = (messages, stream, max_tokens, temperature)
-        raise EchoesError(ErrorCode.LLM_PROVIDER_UNAVAILABLE, "boom")
-        yield ""  # async generator 语法要求（不可达）
-
-
-def _session() -> Session:
-    now = time.time()
-    persona = Persona(
-        id="default", name="默认人设", system_prompt="s", created_at=now, updated_at=now
-    )
-    return Session(session_id="default", profile_id="default", persona=persona)
-
-
-def _ready_machine() -> StateMachine:
-    machine = StateMachine()
-    machine.transition(AppState.READY)
-    return machine
-
-
-def _summarize(sent: list[dict[str, Any]]) -> tuple[list[str], dict[str, Any]]:
-    states = [payload["state"] for payload in sent if payload.get("type") == "state"]
-    completes = [payload for payload in sent if payload.get("type") == "turn_complete"]
-    assert len(completes) == 1, f"turn 必须恒有且只有一条 turn_complete：{completes}"
-    return states, completes[0]
-
-
-# ---------------------------- 令牌与取项原语 ----------------------------
-
-
-async def test_cancel_token_is_idempotent_and_wakes_waiters() -> None:
+async def test_token_cancel_is_idempotent() -> None:
     token = CancelToken()
     assert not token.cancelled
-    waiter = token.waiter()
-    assert not waiter.done()
     token.cancel()
-    token.cancel()  # 幂等
+    token.cancel()
     assert token.cancelled
-    assert await asyncio.wait_for(waiter, 1.0) is True
+
+
+async def test_token_waiter_is_reused_across_pulls() -> None:
+    """逐片新建任务会让一次回复多出上千个对象——同一轮必须复用一个句柄。"""
+    token = CancelToken()
+    assert token.waiter() is token.waiter()
     await token.close()
 
 
-async def test_pull_reads_items_then_reports_end() -> None:
-    async def _stream() -> AsyncIterator[int]:
-        yield 1
-        yield 2
+async def test_token_close_allows_fresh_waiter_afterwards() -> None:
+    """`close()` 释放句柄；若同一令牌被复用（不该发生），至少不能拿到死的那个。"""
+    token = CancelToken()
+    first = token.waiter()
+    await token.close()
+    assert first.cancelled()
+    assert token.waiter() is not first
+    await token.close()
+
+
+async def test_token_close_without_waiter_is_noop() -> None:
+    await CancelToken().close()  # 不抛即可（收尾路径必然会调它）
+
+
+async def test_pull_returns_item_then_end() -> None:
+    async def gen() -> AsyncIterator[str]:
+        yield "a"
+        yield "b"
 
     token = CancelToken()
-    stream = _stream()
-    assert await pull(stream, token) == (StreamOutcome.ITEM, 1)
-    assert await pull(stream, token) == (StreamOutcome.ITEM, 2)
+    stream = gen()
+    assert await pull(stream, token) == (StreamOutcome.ITEM, "a")
+    assert await pull(stream, token) == (StreamOutcome.ITEM, "b")
     assert await pull(stream, token) == (StreamOutcome.END, None)
     await token.close()
 
 
-async def test_pull_returns_cancelled_without_touching_stream() -> None:
-    """令牌已置位时不再向引擎要数据（省掉一次可能上百毫秒的引擎调用）。"""
+async def test_pull_does_not_touch_stream_when_already_cancelled() -> None:
+    """令牌已置位就不再向引擎要数据（不启动 `__anext__`）。"""
+    entered = False
 
-    async def _stream() -> AsyncIterator[int]:
-        raise AssertionError("已取消的取项不得触碰流")
-        yield 0  # pragma: no cover
+    async def gen() -> AsyncIterator[str]:
+        nonlocal entered
+        entered = True
+        yield "x"
+
+    outcome, item = await pull(gen(), _cancelled_token())
+    assert (outcome, item) == (StreamOutcome.CANCELLED, None)
+    assert not entered
+
+
+async def test_pull_cancels_pending_anext_and_releases_stream() -> None:
+    """取消必须抢在「引擎吐完当前片」之前：pending 的 `__anext__` 要被 cancel 掉，
+    生成器的 `finally` 才会跑（资源释放，而不是挂在那里等 GC）。"""
+    released = asyncio.Event()
+
+    async def gen() -> AsyncIterator[str]:
+        try:
+            await asyncio.sleep(30)  # 真实 TTS 卡在模型里的等价物
+            yield "不该产出"
+        finally:
+            released.set()
 
     token = CancelToken()
+    task = asyncio.create_task(pull(gen(), token))
+    await asyncio.sleep(0.01)  # 让 __anext__ 真正挂起
     token.cancel()
-    assert await pull(_stream(), token) == (StreamOutcome.CANCELLED, None)
+
+    outcome, item = await asyncio.wait_for(task, 1.0)
+    assert (outcome, item) == (StreamOutcome.CANCELLED, None)
+    assert released.is_set()
     await token.close()
 
 
-async def test_pull_preempts_pending_anext() -> None:
-    """令牌抢在 pending `__anext__` 之前返回：三跳 ≤150ms 的关键。"""
-
-    async def _stream() -> AsyncIterator[int]:
-        await asyncio.sleep(30)
-        yield 0
-
-    token = CancelToken()
-    loop = asyncio.get_running_loop()
-    loop.call_later(0.05, token.cancel)
-    started = time.perf_counter()
-    outcome, _ = await pull(_stream(), token)
-    assert outcome is StreamOutcome.CANCELLED
-    assert time.perf_counter() - started < 2.0, "取消应插队到慢引擎之前"
-    await token.close()
-
-
-async def test_aclose_ignores_streams_without_aclose() -> None:
-    class _Bare:
-        pass
-
-    await aclose(_Bare())  # 不抛
+async def test_aclose_tolerates_stream_without_aclose() -> None:
     await aclose(object())
 
 
-# ------------------------------- turn 槽 -------------------------------
+async def test_aclose_swallows_engine_close_error() -> None:
+    class _Bad:
+        async def aclose(self) -> None:
+            raise RuntimeError("close 炸了")
+
+    await aclose(_Bad())  # 收尾路径不允许被关闭异常带偏
 
 
-async def test_runner_interrupt_without_turn_returns_false() -> None:
-    runner = TurnRunner()
-    assert not runner.busy
-    assert await runner.interrupt() is False
+async def test_turn_cancelled_is_not_an_echoes_error() -> None:
+    """打断不映射 error 事件（3.4）：它是内部信号，不是故障码。"""
+    assert not hasattr(TurnCancelled, "code")
+
+
+# ------------------------------ 任务槽 ------------------------------
 
 
 async def test_runner_start_cancels_previous_turn() -> None:
-    """3.5：单会话单在途 turn——新 turn 起来前旧 turn 必须收束。"""
+    """3.5「generating/speaking + 新输入 = 打断重入」：新 turn 起跑前先收掉旧的。"""
     runner = TurnRunner()
     seen: list[str] = []
 
-    async def _first(token: CancelToken) -> None:
-        try:
-            await asyncio.wait_for(token.waiter(), 30)  # 协作式：等令牌而非死睡
-        finally:
-            seen.append("first-done")
+    async def first(token: CancelToken) -> None:
+        await token.waiter()
+        seen.append("first-cancelled")
 
-    async def _second(token: CancelToken) -> None:
-        seen.append("second")
+    async def second(token: CancelToken) -> None:
+        seen.append("second-done")
 
-    first = await runner.start(_first)
-    assert runner.busy
-    await asyncio.sleep(0.01)
-    second = await runner.start(_second)
-    await runner.wait(second)
-    assert first.done(), "旧 turn 必须在新 turn 起来前收束"
-    assert seen == ["first-done", "second"]
+    task1 = await runner.start(first)
+    await asyncio.sleep(0)
+    task2 = await runner.start(second)
+    await runner.wait(task1)
+    await runner.wait(task2)
+
+    assert seen == ["first-cancelled", "second-done"]
     assert not runner.busy
 
 
 async def test_runner_grace_timeout_does_not_block_new_turn() -> None:
-    """引擎不配合令牌时（卡在模型里）：等满宽限期就放行，新 turn 不被永久堵死。"""
-    runner = TurnRunner(cancel_grace_seconds=0.2)
+    """引擎没在安全检查点停下（不看令牌）时，宽限到点就放新 turn 走，不能挂住用户。"""
+    runner = TurnRunner(cancel_grace_seconds=0.05)
 
-    async def _stubborn(token: CancelToken) -> None:
-        _ = token
-        await asyncio.sleep(0.6)  # 全程不看令牌
+    async def stubborn(token: CancelToken) -> None:
+        await asyncio.sleep(0.3)  # 故意无视令牌
 
-    async def _next(token: CancelToken) -> None:
-        _ = token
+    async def nxt(token: CancelToken) -> None:
+        return None
 
-    stubborn = await runner.start(_stubborn)
+    task1 = await runner.start(stubborn)
     started = time.perf_counter()
-    following = await runner.start(_next)
+    task2 = await runner.start(nxt)
     elapsed = time.perf_counter() - started
-    await runner.wait(following)
-    assert 0.15 <= elapsed < 0.6, f"应等满宽限期即放行（实测 {elapsed:.2f}s）"
-    await runner.wait(stubborn)
+
+    assert elapsed < 0.25, f"宽限期未生效（等了 {elapsed:.2f}s）"
+    await runner.wait(task2)
+    await runner.wait(task1)
 
 
-async def test_runner_swallows_factory_exception() -> None:
-    """任务壳兜住意外异常：否则任务静默死掉，状态机永远停在 generating。"""
+async def test_runner_guard_swallows_unexpected_exception() -> None:
+    """任务壳是最后一道防线：意外异常不能把任务静默搞死（否则状态机停在 generating）。"""
     runner = TurnRunner()
 
-    async def _boom(token: CancelToken) -> None:
-        raise RuntimeError("引擎炸了")
+    async def boom(token: CancelToken) -> None:
+        raise RuntimeError("谁也没想到")
 
-    task = await runner.start(_boom)
-    await runner.wait(task)
-    assert task.done()
+    task = await runner.start(boom)
+    await runner.wait(task)  # 不抛即可
     assert not runner.busy
 
 
-async def test_runner_interrupt_stops_endless_turn() -> None:
+async def test_runner_interrupt_without_in_flight_is_false() -> None:
+    """ready 期连点 PTT 会发来空打断——可容忍的协议噪声，不是错误。"""
     runner = TurnRunner()
-    stopped: list[bool] = []
+    assert await runner.interrupt() is False
 
-    async def _endless(token: CancelToken) -> None:
-        stream = _EndlessTTS().synthesize("x", "v")
-        while True:
-            outcome, _chunk = await pull(stream, token)
-            if outcome is not StreamOutcome.ITEM:
-                stopped.append(token.cancelled)
-                return
 
-    task = await runner.start(_endless)
-    await asyncio.sleep(0.02)
+async def test_runner_interrupt_reports_true_only_for_live_turn() -> None:
+    runner = TurnRunner()
+
+    async def idle(token: CancelToken) -> None:
+        await token.waiter()
+
+    task = await runner.start(idle)
+    await asyncio.sleep(0)
     assert await runner.interrupt() is True
     await runner.wait(task)
-    assert stopped == [True]
+    assert await runner.interrupt() is False  # 已收尾 → 不再算打断
 
 
-# --------------------------- turn 的 CANCELLED ---------------------------
+async def test_runner_wait_is_noop_when_idle() -> None:
+    await TurnRunner().wait()
 
 
-async def test_turn_cancelled_mid_tts_emits_cancelled_and_stops_audio() -> None:
-    """三跳：取消后立刻断流，只发已产出的那一帧，收尾 CANCELLED + 回 ready。"""
-    transport = _RecordingTransport()
-    machine = _ready_machine()
-    session = _session()
-    token = CancelToken()
-    ws = _RecordingWS(token, cancel_after=1)
-    tts = _EndlessTTS()
+# ------------------------------ 编排层端到端 ------------------------------
 
-    await _run_turn(
-        transport,
-        machine,
-        session,
-        MockLLMProvider(),
-        tts,
-        "你好",
-        time.perf_counter(),
-        ws,
-        token=token,
+
+async def test_cancel_before_start_yields_cancelled_close() -> None:
+    """一开始就被打断：不产文本、不进 speaking，仍有一条 CANCELLED 收尾。"""
+    transport = RecordingTransport()
+    graph = make_graph(transport, llm=FixedLLM(["你好"]))
+    session = make_session()
+    token = _cancelled_token()
+
+    outcome = await graph.run_turn(
+        session, TriggerSource.USER_INPUT, {"text": "在吗"}, token=token
     )
 
-    states, complete = _summarize(transport.sent)
-    assert complete["status"] == "CANCELLED"
-    assert states == ["generating", "speaking", "ready"]
-    assert machine.state is AppState.READY
-    assert session.turn_seq == 1
-    assert len(ws.chunks) == 1, "取消后不得再向 WS 产出音频"
-    assert tts.produced <= 2, "取消后不应继续向引擎要数据"
+    assert outcome.status == "CANCELLED"
+    assert transport.of_type("assistant_text") == []
+    assert transport.states() == ["generating", "ready"]
+    assert transport.only_turn_complete()["status"] == "CANCELLED"
+    assert transport.of_type("error") == []
 
 
-async def test_turn_cancel_preempts_slow_llm() -> None:
-    """LLM 卡在下一片时被打断：turn 在秒级内收尾，而不是等满 30s。"""
-    transport = _RecordingTransport()
-    machine = _ready_machine()
-    session = _session()
+async def test_cancel_during_generation_jumps_pending_pull() -> None:
+    """片间等待 30s 也必须被取消抢掉（sidecar ≤150ms 的关键一环）。"""
+    transport = RecordingTransport()
+    graph = make_graph(transport, llm=SlowLLM(delay=30.0))
+    session = make_session()
     token = CancelToken()
-    loop = asyncio.get_running_loop()
-    loop.call_later(0.05, token.cancel)
 
     started = time.perf_counter()
-    await _run_turn(
-        transport,
-        machine,
-        session,
-        _SlowLLM(),
-        MockTTSEngine(),
-        "你好",
-        time.perf_counter(),
-        None,
-        token=token,
+    task = asyncio.create_task(
+        graph.run_turn(session, TriggerSource.USER_INPUT, {"text": "在吗"}, token=token)
     )
-    elapsed = time.perf_counter() - started
-
-    states, complete = _summarize(transport.sent)
-    assert complete["status"] == "CANCELLED"
-    assert states == ["generating", "ready"], "未进入 speaking 即被打断"
-    assert elapsed < 5.0, f"取消未插队到 pending 取项之前（耗时 {elapsed:.1f}s）"
-    assert complete["timings"]["llm_first_token_ms"] is not None
-    assert complete["timings"]["tts_first_audio_ms"] is None
-    assert machine.state is AppState.READY
-
-
-async def test_turn_cancelled_before_start_produces_no_audio() -> None:
-    """令牌在 turn 开始前就已置位：不出音频、不发 assistant_text，仍按 CANCELLED 收尾。"""
-    transport = _RecordingTransport()
-    machine = _ready_machine()
-    session = _session()
-    token = CancelToken()
-    token.cancel()
-    ws = _RecordingWS()
-
-    await _run_turn(
-        transport,
-        machine,
-        session,
-        MockLLMProvider(),
-        MockTTSEngine(),
-        "你好",
-        time.perf_counter(),
-        ws,
-        token=token,
-    )
-
-    _states, complete = _summarize(transport.sent)
-    assert complete["status"] == "CANCELLED"
-    assert ws.chunks == []
-    assert [p for p in transport.sent if p.get("type") == "assistant_text"] == []
-    assert machine.state is AppState.READY
-
-
-async def test_turn_llm_error_marks_failed_and_reports_error() -> None:
-    """LLM 不可达 → FAILED + error 事件（非致命），状态机照常回 ready。"""
-    transport = _RecordingTransport()
-    machine = _ready_machine()
-    session = _session()
-
-    await _run_turn(
-        transport,
-        machine,
-        session,
-        _BoomLLM(),
-        MockTTSEngine(),
-        "你好",
-        time.perf_counter(),
-        None,
-    )
-
-    _states, complete = _summarize(transport.sent)
-    assert complete["status"] == "FAILED"
-    errors = [p for p in transport.sent if p.get("type") == "error"]
-    assert [e["code"] for e in errors] == ["LLM_PROVIDER_UNAVAILABLE"]
-    assert errors[0]["fatal"] is False
-    assert machine.state is AppState.READY
-
-
-async def test_turn_cancelled_exception_is_not_reported_as_error() -> None:
-    """打断不是错误：不得产生 error 事件（壳侧只该看到 CANCELLED 收尾）。"""
-    transport = _RecordingTransport()
-    machine = _ready_machine()
-    token = CancelToken()
+    await _wait_until(lambda: len(transport.of_type("assistant_text")) >= 1)
     token.cancel()
 
-    await _run_turn(
-        transport,
-        machine,
-        _session(),
-        MockLLMProvider(),
-        MockTTSEngine(),
-        "你好",
-        time.perf_counter(),
-        None,
-        token=token,
+    outcome = await asyncio.wait_for(task, 1.0)
+    assert outcome.status == "CANCELLED"
+    assert time.perf_counter() - started < 1.0
+    assert transport.only_turn_complete()["status"] == "CANCELLED"
+
+
+async def test_cancel_during_speaking_stops_audio_and_returns_ready() -> None:
+    """speaking 期被打断：断流（不再产音）+ 一条 CANCELLED + 回 ready，且不报错。"""
+    transport = RecordingTransport()
+    egress = RecordingEgress()
+    graph = make_graph(
+        transport, llm=FixedLLM(["你好"]), tts=EndlessTTS(), egress=egress
     )
-    assert [p for p in transport.sent if p.get("type") == "error"] == []
-    assert isinstance(TurnCancelled(), Exception)
+    session = make_session()
+    token = CancelToken()
+
+    task = asyncio.create_task(
+        graph.run_turn(session, TriggerSource.USER_INPUT, {"text": "在吗"}, token=token)
+    )
+    await _wait_until(lambda: len(egress.chunks) >= 3)
+    token.cancel()
+
+    outcome = await asyncio.wait_for(task, 1.0)
+    produced = len(egress.chunks)
+    await asyncio.sleep(0.05)
+
+    assert outcome.status == "CANCELLED"
+    assert len(egress.chunks) == produced, "取消后仍在产音（断流未生效）"
+    assert transport.only_turn_complete()["status"] == "CANCELLED"
+    assert transport.of_type("error") == []
+    assert transport.states()[-1] == "ready"
+    assert graph.machine.state.value == "ready"
+
+
+async def test_cancelled_turn_still_advances_turn_seq() -> None:
+    """轮次编号照常递增：被打断也是一轮（否则壳侧 seq 会错位）。"""
+    graph = make_graph(RecordingTransport())
+    session = make_session()
+
+    first = await graph.run_turn(
+        session, TriggerSource.USER_INPUT, {"text": "一"}, token=_cancelled_token()
+    )
+    second = await graph.run_turn(session, TriggerSource.USER_INPUT, {"text": "二"})
+
+    assert (first.turn_seq, second.turn_seq) == (1, 2)
+    assert (first.status, second.status) == ("CANCELLED", "SUCCESS")
+
+
+# ------------------------------ 小工具 ------------------------------
+
+
+def _cancelled_token() -> CancelToken:
+    token = CancelToken()
+    token.cancel()
+    return token
+
+
+async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
+    """轮询等待某个可观测状态（turn 跑在后台任务里，没有同步返回点）。"""
+
+    async def _until() -> None:
+        while not predicate():
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(_until(), timeout)

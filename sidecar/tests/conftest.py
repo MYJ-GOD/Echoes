@@ -1,17 +1,27 @@
 """共享测试设施（母文档 13.2）。
 
 内存双工通道：不依赖真实子进程/WS，把 StdioTransport 推入「一致性套件」（13.2-3）。
+turn 编排的构造样板（`make_graph`）也在这里：编排层测试与 ASR 入口测试共用。
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import json
+import time
 from typing import Any
 
 import pytest
 
-from echoes_sidecar.transport.base import Transport
+from echoes_sidecar.core.state_machine import AppState, StateMachine
+from echoes_sidecar.core.types import AudioChunk, Persona
+from echoes_sidecar.engines.llm.base import LLMProvider
+from echoes_sidecar.engines.llm.mock import MockLLMProvider
+from echoes_sidecar.engines.tts.base import TTSEngine
+from echoes_sidecar.engines.tts.mock import MockTTSEngine
+from echoes_sidecar.orchestration.graph import TurnDeps, TurnGraph
+from echoes_sidecar.session.session import Session
+from echoes_sidecar.transport.base import AudioEgress, Transport
 from echoes_sidecar.transport.local_ws import LocalWebSocketTransport
 from echoes_sidecar.transport.stdio import StdioTransport
 
@@ -122,3 +132,77 @@ async def assert_transport_suite(t_sidecar: Transport, t_peer: Transport) -> Non
 
     await t_peer.close()
     assert await t_sidecar.recv() is None
+
+
+class RecordingTransport(Transport):
+    """4.1 Transport 替身：只记录 send 的 JSON 载荷（turn 面不消费 recv/close）。"""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def recv(self) -> dict[str, Any] | None:
+        return None
+
+    async def send(self, msg: dict[str, Any]) -> None:
+        self.sent.append(msg)
+
+    async def close(self) -> None:
+        return None
+
+    def of_type(self, kind: str) -> list[dict[str, Any]]:
+        return [msg for msg in self.sent if msg.get("type") == kind]
+
+    def states(self) -> list[str]:
+        return [str(msg["state"]) for msg in self.of_type("state")]
+
+    def only_turn_complete(self) -> dict[str, Any]:
+        """turn 的不变式：恒有且只有一条 turn_complete（3.4 三跳收尾要求）。"""
+        completes = self.of_type("turn_complete")
+        assert len(completes) == 1, f"应恒有且只有一条 turn_complete，实得 {completes}"
+        return completes[0]
+
+
+class RecordingEgress(AudioEgress):
+    """AudioEgress 替身：记录下行音频帧。"""
+
+    def __init__(self) -> None:
+        self.chunks: list[AudioChunk] = []
+
+    async def send_audio(self, chunk: AudioChunk) -> None:
+        self.chunks.append(chunk)
+
+
+def make_session() -> Session:
+    now = time.time()
+    persona = Persona(
+        id="default", name="默认人设", system_prompt="s", created_at=now, updated_at=now
+    )
+    return Session(session_id="default", profile_id="default", persona=persona)
+
+
+def ready_machine() -> StateMachine:
+    machine = StateMachine()
+    machine.transition(AppState.READY)
+    return machine
+
+
+def make_graph(
+    transport: Transport | None = None,
+    *,
+    llm: LLMProvider | None = None,
+    tts: TTSEngine | None = None,
+    egress: AudioEgress | None = None,
+    machine: StateMachine | None = None,
+    t0: float | None = None,
+) -> TurnGraph:
+    """turn 编排的标准装配（默认 mock 引擎 + 记录型 transport）。"""
+    return TurnGraph(
+        TurnDeps(
+            transport=transport if transport is not None else RecordingTransport(),
+            llm=llm if llm is not None else MockLLMProvider(),
+            tts=tts if tts is not None else MockTTSEngine(),
+            t0=t0 if t0 is not None else time.perf_counter(),
+            egress=egress,
+        ),
+        machine if machine is not None else ready_machine(),
+    )
