@@ -70,6 +70,7 @@ files = [
   "echoes_sidecar/ipc",
   "echoes_sidecar/transport",
   "echoes_sidecar/audio",
+  "echoes_sidecar/db",
   "echoes_sidecar/session",
   "echoes_sidecar/orchestration",
   "echoes_sidecar/memory",
@@ -87,6 +88,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  # 13.1：L3/L4 层需真实权重或 GPU 的用例，默认不跑（本机脚本或 CI 可选标记）
+  "heavy: 依赖真实模型权重/GPU 的用例（13.1-L3/L4）",
+]
 
 [tool.importlinter]
 root_package = "echoes_sidecar"
@@ -102,7 +107,7 @@ layers = [
   "echoes_sidecar.orchestration",
   "echoes_sidecar.session | echoes_sidecar.transport",
   "echoes_sidecar.engines | echoes_sidecar.memory",
-  "echoes_sidecar.audio | echoes_sidecar.ipc",
+  "echoes_sidecar.audio | echoes_sidecar.ipc | echoes_sidecar.db",
   "echoes_sidecar.core",
 ]
 

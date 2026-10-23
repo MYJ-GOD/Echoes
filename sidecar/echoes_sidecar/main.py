@@ -22,6 +22,7 @@ from echoes_sidecar.audio.stream import AudioInputStream
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.state_machine import AppState, StateMachine, required_engines_ready
 from echoes_sidecar.core.types import AudioChunk
+from echoes_sidecar.db import Storage, ensure_writable, path_risk_note, resolve
 from echoes_sidecar.engines.asr.base import ASREngine
 from echoes_sidecar.engines.asr.mock import MockASREngine
 from echoes_sidecar.engines.asr.whisper import WhisperASREngine
@@ -49,7 +50,7 @@ from echoes_sidecar.ipc import (
 )
 from echoes_sidecar.orchestration.text_clean import clean_for_tts
 from echoes_sidecar.session.manager import SessionManager
-from echoes_sidecar.session.session import Persona, Session
+from echoes_sidecar.session.session import Session
 from echoes_sidecar.transport.base import Transport
 from echoes_sidecar.transport.local_ws import LocalWebSocketTransport
 from echoes_sidecar.transport.stdio import StdioTransport
@@ -90,17 +91,82 @@ def _now_ms(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
 
 
-def _default_session() -> Session:
-    """阶段 0 固定 default 人设/会话（4.6/5.1）；prompt 单一来源 persona.py（v2）。"""
-    now = time.time()
-    persona = Persona(
-        id="default",
-        name="默认人设",
+DEFAULT_PERSONA_ID = "default"
+DEFAULT_PERSONA_NAME = "默认人设"
+DEFAULT_SESSION_ID = "default"
+
+
+def _open_storage() -> Storage:
+    """数据目录 + 迁移 + 启动自检（5.3 / 14.1 / 14.2）。
+
+    目录解析只发生在组合根（3.2）；不可写即 STORAGE_ERROR 报错引导，
+    不退到内存库——静默降级会把「数据没存住」藏到用户发现为止（3.4.1）。
+    """
+    paths = resolve()
+    ensure_writable(paths)
+    note = path_risk_note(paths.root)
+    if note is not None:
+        print(
+            f"[sidecar] 数据目录{note}（5.3 历史多发故障区，仅提示）：{paths.root}",
+            file=sys.stderr,
+        )
+    storage = Storage.open(paths.db_file)
+    orphans = storage.voices.fail_orphans()
+    if orphans:
+        print(
+            f"[sidecar] 启动自检：{orphans} 条 training 孤儿音色置 failed（14.1）",
+            file=sys.stderr,
+        )
+    return storage
+
+
+def _open_session(storage: Storage, *, now: float) -> Session:
+    """会话装配（4.6 + 14.1 v1.4）：沿用 DB 最近 session，无记录则建默认会话。
+
+    persona 的 prompt 单一来源仍是 engines.llm.persona（v2）；DB 侧随代码同步，
+    避免旧库里的陈旧 prompt 反过来覆盖代码（3.2 单一来源）。
+    """
+    default_persona = storage.personas.sync(
+        persona_id=DEFAULT_PERSONA_ID,
+        name=DEFAULT_PERSONA_NAME,
         system_prompt=PERSONA_SYSTEM_PROMPT,
-        created_at=now,
-        updated_at=now,
+        now=now,
     )
-    return Session(session_id="default", profile_id="default", persona=persona, created_at=now)
+    row = storage.sessions.latest()
+    if row is None:
+        row = storage.sessions.create(
+            session_id=DEFAULT_SESSION_ID,
+            persona_id=default_persona.id,
+            now=now,
+        )
+    persona = default_persona
+    if row.persona_id != default_persona.id:
+        persona = storage.personas.get(row.persona_id) or default_persona
+    return Session(
+        session_id=row.id,
+        profile_id=row.profile_id,
+        persona=persona,
+        voice_id=row.voice_id,
+        created_at=row.started_at,
+    )
+
+
+async def _persist_session(storage: Storage, session: Session) -> None:
+    """turn 收尾落库（5.1：轮次明细不落库，只更新活跃时间与音色绑定）。
+
+    写盘进线程（3.2 事件循环只做调度）；失败记 stderr 但不打断 turn——
+    14.1「磁盘满：停止写入、保常态」，同时保留可观测性。
+    """
+
+    def _write() -> None:
+        storage.sessions.touch(session.session_id, now=time.time())
+        if session.voice_id is not None:
+            storage.sessions.bind_voice(session.session_id, session.voice_id)
+
+    try:
+        await asyncio.to_thread(_write)
+    except EchoesError as exc:
+        print(f"[sidecar] 会话落库失败（turn 不受影响）: {exc}", file=sys.stderr)
 
 
 def _state_payload(machine: StateMachine, session_id: str | None, t: int) -> dict[str, Any]:
@@ -118,6 +184,8 @@ async def _run_turn(
     text: str,
     t0: float,
     ws_transport: LocalWebSocketTransport | None = None,
+    *,
+    storage: Storage | None = None,
 ) -> None:
     """turn：→generating→(LLM 流式)→speaking→(TTS chunk 逐帧 WS)→turn_complete→ready。
 
@@ -176,6 +244,9 @@ async def _run_turn(
     machine.transition(AppState.READY)
     await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
 
+    if storage is not None:
+        await _persist_session(storage, session)
+
 
 class _PcmStream(AudioInputStream):
     """单段 PTT PCM16（16k mono）→ 4.2 输入流（整段转写形态）。"""
@@ -224,6 +295,8 @@ async def _asr_turn_from_pcm(
     tts: TTSEngine,
     t0: float,
     ws_transport: LocalWebSocketTransport | None,
+    *,
+    storage: Storage | None = None,
 ) -> bool:
     """一段 PTT 音频 → ASR → asr_final → turn（3.4：asr_final 与 user_text 等价）。
 
@@ -259,7 +332,9 @@ async def _asr_turn_from_pcm(
             session_id=session.session_id, text=text, is_final=True, t=_now_ms(t0)
         ).model_dump(mode="json")
     )
-    await _run_turn(transport, machine, session, provider, tts, text, t0, ws_transport)
+    await _run_turn(
+        transport, machine, session, provider, tts, text, t0, ws_transport, storage=storage
+    )
     return True
 
 
@@ -273,6 +348,8 @@ async def _asr_loop(
     tts: TTSEngine,
     t0: float,
     turn_lock: asyncio.Lock,
+    *,
+    storage: Storage | None = None,
 ) -> None:
     """PTT 语音入口（3.4/§12 步骤 4）：WS 整段音频 → ASR → turn。
 
@@ -299,6 +376,7 @@ async def _asr_loop(
                 tts,
                 t0,
                 ws_transport,
+                storage=storage,
             )
 
 
@@ -467,8 +545,17 @@ def _hello_payload(engine_states: list[EngineState], t: int) -> dict[str, Any]:
 
 
 async def serve(argv: Sequence[str] | None = None) -> None:
+    """进程入口：开存储 → 跑服务 → 关存储（存储失败即 STORAGE_ERROR 冒泡，14.1）。"""
+    storage = _open_storage()
+    try:
+        await _serve_with_storage(argv, storage)
+    finally:
+        storage.close()
+
+
+async def _serve_with_storage(argv: Sequence[str] | None, storage: Storage) -> None:
     t0 = time.perf_counter()
-    session = _default_session()
+    session = _open_session(storage, now=time.time())  # 5.1 + 14.1 重启重建
     SessionManager().create(session)  # 4.6：阶段 0 单会话，按 session_id 查找写
 
     # 组合根装配清单（3.2）：whisper/cosyvoice2 均走真路分级就绪（warmup 后台任务
@@ -537,6 +624,7 @@ async def serve(argv: Sequence[str] | None = None) -> None:
                 tts_engine,
                 t0,
                 turn_lock,
+                storage=storage,
             )
         )
 
@@ -566,6 +654,7 @@ async def serve(argv: Sequence[str] | None = None) -> None:
                         msg.text,
                         t0,
                         ws_transport,
+                        storage=storage,
                     )
             elif isinstance(msg, ControlMsg):
                 print(

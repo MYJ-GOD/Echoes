@@ -61,9 +61,11 @@ def test_preload_runtime_failure_is_non_fatal(
 
 
 async def test_serve_preloads_after_handshake_before_main_loop(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """serve 顺序锁：hello/booting/ready 先写出 → preload → 才进 recv 主循环。"""
+    # 数据目录隔离（5.3）：serve 会真开 SQLite 并跑迁移，不许落到用户 %LOCALAPPDATA%
+    monkeypatch.setenv("ECHOES_DATA_DIR", str(tmp_path / "data"))
     order: list[Any] = []
     monkeypatch.setattr(
         main_module, "_preload_runtime", lambda tts, asr: order.append("preload")
