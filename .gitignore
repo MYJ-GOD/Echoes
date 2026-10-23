@@ -25,3 +25,4 @@ tmp/
 
 # GPU 冒烟产物（wav/日志），不入库
 sidecar/scripts/_smoke_out/
+sidecar/scripts/_bench_out/

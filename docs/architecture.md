@@ -770,10 +770,10 @@ strategy:
 | ADR-006 | 嵌入模型选型 | 已定：默认 bge-small-zh，bge-m3 质量档 | v1.2 |
 | ADR-007 | 主动开口的产品定义 | 待定 | 阶段 2 结束前 |
 | ADR-008 | 多音色管理引入时机 | 已定：阶段 2，轻量 | v1.1 |
-| ADR-009 | 克隆技术路线（zero-shot vs fine-tune） | 决策待定；**兜底规则已写入（zero-shot 保底，见 6/阶段 0）** | 阶段 0 第一周 |
+| ADR-009 | 克隆技术路线（zero-shot vs fine-tune） | 已按兜底规则走 zero-shot，真路已接线（见 docs/decisions/ADR-009 + PROGRESS §3.9） | 阶段 0 第一周 |
 | ADR-010 | 音频播放实现（rodio vs Web Audio） | 已定：rodio | v1.2 |
 | ADR-011 | 打包分体策略（torch 运行时包 vs 大安装包） | 决策待定，默认建议分体；依据 7.1 + 阶段 0 探测 | 阶段 0 第一周 |
-| ADR-012 | 阶段 0 阈值校准记录（就绪/延迟 ±20%） | 占位 | 阶段 0 第四周 |
+| ADR-012 | 阶段 0 阈值校准记录（就绪/延迟 ±20%） | 已定稿：口径与工具见 docs/decisions/ADR-012（真机数字待采，采后按 §7 校准规则回填） | 阶段 0 第四周 |
 | ADR-013 | 用户数据导出/删除语义 | 已定：见 16.2 | v1.3 |
 | ADR-014 | CosyVoice2 搬运环境（裸装 uv + vendored 范围 + torch 口径 + 权重通路） | 已定：见 docs/decisions/ADR-014；pynini 侦察闭环已过 | v1.4.2 |
 

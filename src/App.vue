@@ -353,7 +353,7 @@ async function stopCapture(): Promise<void> {
     if (mode === "clone") {
       await ipc.cloneRecordStop();
       cloneSeconds.value = 0;
-      micStatus.value = "样本已上送，克隆中…";
+      micStatus.value = "样本已收到，正在生成音色…";
     } else {
       await ipc.pttStop();
       micStatus.value = "识别中…";
