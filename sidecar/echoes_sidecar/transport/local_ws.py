@@ -10,8 +10,12 @@
   ASREngine.transcribe 直接消费）；sidecar→壳经 send_audio()。
 
 阶段 0 简化注记：单客户端假设（配对壳）；多连接时新连接替换旧连接（旧连接的
-EOF 哨兵被抑制，不误标全局结束）。背压（600/300ms 缓冲上限）属三跳协议（3.4
-打断），随 PTT 接线落地；本层先不设上限（阶段 0 内存面可控）。
+EOF 哨兵被抑制，不误标全局结束）。
+
+背压（3.4 三跳前提的 600/300ms 缓冲上限）在这一层是**结构性满足**而非再设一道队列：
+`send_audio` 由编排层的拉取式循环逐帧 await——TTS 与 WS 之间没有中间缓冲，
+"超上限"这个状态不存在，写满 TCP 窗口时 await 本身就是节流。壳侧那 600ms 是
+硬上限（`src-tauri/src/audio.rs::MAX_BUFFERED_SAMPLES`）。
 """
 
 from __future__ import annotations

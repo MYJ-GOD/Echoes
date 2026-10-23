@@ -19,6 +19,7 @@ from typing import Any, Literal, Protocol
 
 from echoes_sidecar import __version__
 from echoes_sidecar.audio.stream import AudioInputStream
+from echoes_sidecar.core.cancel import CancelToken, StreamOutcome, TurnCancelled, aclose, pull
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.state_machine import AppState, StateMachine, required_engines_ready
 from echoes_sidecar.core.types import AudioChunk
@@ -50,6 +51,7 @@ from echoes_sidecar.ipc import (
 )
 from echoes_sidecar.orchestration.clone import CloneService
 from echoes_sidecar.orchestration.text_clean import clean_for_tts
+from echoes_sidecar.orchestration.turn import TurnFactory, TurnRunner
 from echoes_sidecar.session.manager import SessionManager
 from echoes_sidecar.session.session import Session
 from echoes_sidecar.transport.base import Transport
@@ -179,6 +181,41 @@ def _state_payload(machine: StateMachine, session_id: str | None, t: int) -> dic
     )
 
 
+def _turn_factory(
+    transport: Transport,
+    machine: StateMachine,
+    session: Session,
+    provider: LLMProvider,
+    tts: TTSEngine,
+    text: str,
+    t0: float,
+    ws_transport: LocalWebSocketTransport | None,
+    *,
+    storage: Storage | None = None,
+) -> TurnFactory:
+    """把「本轮的输入文本 + 引擎」绑成一个 turn 工厂（3.5 单在途 / 3.4 三跳）。
+
+    绑定必须发生在构造期：`runner.start()` 只是建任务，任务要到下一次 `await`
+    才真正起跑——用闭包直接抓循环变量会把上一轮的文本串到下一轮。
+    """
+
+    async def _bound(token: CancelToken) -> None:
+        await _run_turn(
+            transport,
+            machine,
+            session,
+            provider,
+            tts,
+            text,
+            t0,
+            ws_transport,
+            token=token,
+            storage=storage,
+        )
+
+    return _bound
+
+
 async def _run_turn(
     transport: Transport,
     machine: StateMachine,
@@ -189,6 +226,7 @@ async def _run_turn(
     t0: float,
     ws_transport: LocalWebSocketTransport | None = None,
     *,
+    token: CancelToken | None = None,
     storage: Storage | None = None,
 ) -> None:
     """turn：→generating→(LLM 流式)→speaking→(TTS chunk 逐帧 WS)→turn_complete→ready。
@@ -196,60 +234,103 @@ async def _run_turn(
     输入文本来自 user_text（文本面）或 asr_final（PTT 语音面），二者等价（3.4）。
     音频真链：synthesize 逐段 chunk 经 WS 出壳（0x02 帧、24k PCM，3.4）；
     ws=off/无连接时 chunk 静默丢弃（send_audio 既有语义），消息面不受影响。
-    TTS 引擎错误（MODEL_NOT_LOADED 等）→ turn FAILED 收束（3.4.1 报错不降级；
-    非致命不进 3.5 error 态）。真实打断/在途取消在三跳协议（3.4 阶段 0 第四周）；
-    骨架期 turn 同步执行（与 PTT 入口共用 turn_lock 串行化）。
+
+    **三跳打断（3.4）**：`token` 置位后本 turn 在下一个安全检查点收束为
+    `turn_complete(status=CANCELLED)`。收尾统一走 `finally`——一次 turn 恒有且
+    只有一条 `turn_complete`，状态机恒回 `ready`（异常也不能把 UI 锁在 generating）。
+    TTS/LLM 引擎错误 → FAILED（3.4.1 报错不降级；非致命不进 3.5 error 态）。
     """
+    token = token if token is not None else CancelToken()
+    status: Literal["SUCCESS", "CANCELLED", "FAILED"] = "SUCCESS"
+    llm_first_token_ms: int | None = None
+    tts_first_audio_ms: int | None = None
+
     machine.transition(AppState.GENERATING)
     await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
 
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": session.persona.system_prompt},
-        {"role": "user", "content": text},
-    ]
-    pieces: list[str] = []
-    async for piece in provider.generate(messages):
-        pieces.append(piece)
-        # v1.4.1：回复文本逐片回传（text=截至当前全量；收尾由 turn_complete 界定）
-        await transport.send(
-            AssistantTextMsg(
-                session_id=session.session_id,
-                text="".join(pieces),
-                t=_now_ms(t0),
-            ).model_dump(mode="json")
-        )
-    reply = "".join(pieces)
-
-    machine.transition(AppState.SPEAKING)
-    await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
-
-    voice_id = session.voice_id or "builtin:default"  # 2.5 未克隆绑定内置音色
-    speakable = clean_for_tts(reply)  # 5.2：音频吃清洗后文本；assistant_text 帧保持原样
-    turn_status: Literal["SUCCESS", "FAILED"] = "SUCCESS"
     try:
-        async for chunk in tts.synthesize(speakable, voice_id):
-            # 音频经 WS 出壳侧播放（3.4）；ws=off 或无连接 → send_audio 内静默丢弃
-            if ws_transport is not None:
-                await ws_transport.send_audio(chunk)
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": session.persona.system_prompt},
+            {"role": "user", "content": text},
+        ]
+        pieces: list[str] = []
+        stream = provider.generate(messages)
+        try:
+            while True:
+                outcome, piece = await pull(stream, token)
+                if outcome is StreamOutcome.END:
+                    break
+                if outcome is StreamOutcome.CANCELLED:
+                    raise TurnCancelled
+                if llm_first_token_ms is None:
+                    llm_first_token_ms = _now_ms(t0)
+                pieces.append(piece or "")
+                # v1.4.1：回复文本逐片回传（text=截至当前全量；收尾由 turn_complete 界定）
+                await transport.send(
+                    AssistantTextMsg(
+                        session_id=session.session_id,
+                        text="".join(pieces),
+                        t=_now_ms(t0),
+                    ).model_dump(mode="json")
+                )
+        finally:
+            await aclose(stream)
+        reply = "".join(pieces)
+
+        machine.transition(AppState.SPEAKING)
+        await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
+
+        voice_id = session.voice_id or "builtin:default"  # 2.5 未克隆绑定内置音色
+        speakable = clean_for_tts(reply)  # 5.2：音频吃清洗后文本；assistant_text 帧保持原样
+        audio = tts.synthesize(speakable, voice_id)
+        try:
+            while True:
+                outcome, chunk = await pull(audio, token)
+                if outcome is StreamOutcome.END:
+                    break
+                if outcome is StreamOutcome.CANCELLED:
+                    raise TurnCancelled
+                if chunk is None:
+                    continue
+                if tts_first_audio_ms is None:
+                    tts_first_audio_ms = _now_ms(t0)
+                # 音频经 WS 出壳侧播放（3.4）；ws=off 或无连接 → send_audio 内静默丢弃
+                if ws_transport is not None:
+                    await ws_transport.send_audio(chunk)
+        finally:
+            await aclose(audio)
+    except TurnCancelled:
+        # 三跳收尾：不再产出音频（在途 chunk 丢弃），壳侧播放在首跳已清空
+        status = "CANCELLED"
+        print("[sidecar] turn 被三跳打断，按 CANCELLED 收尾", file=sys.stderr)
     except EchoesError as exc:
         # 引擎错误不静默不降级（3.4.1）：turn FAILED 收束，状态机照常回 ready
-        print(f"[sidecar] TTS 合成失败，turn FAILED: {exc}", file=sys.stderr)
-        turn_status = "FAILED"
+        print(f"[sidecar] turn 失败（{exc.code}），按 FAILED 收尾: {exc.message}", file=sys.stderr)
+        status = "FAILED"
+        await _send_error(transport, session, exc, t0)
+    finally:
+        await token.close()
+        if status == "SUCCESS" and token.cancelled:
+            status = "CANCELLED"  # 收尾瞬间才置位：最后一个检查点没赶上，语义仍算被打断
+        session.turn_seq += 1
+        await transport.send(
+            TurnCompleteMsg(
+                session_id=session.session_id,
+                turn_seq=session.turn_seq,
+                status=status,
+                timings=Timings(
+                    total_ms=_now_ms(t0),
+                    llm_first_token_ms=llm_first_token_ms,
+                    tts_first_audio_ms=tts_first_audio_ms,
+                ),
+            ).model_dump(mode="json")
+        )
+        if machine.state is not AppState.READY:
+            machine.transition(AppState.READY)
+            await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
 
-    session.turn_seq += 1
-    await transport.send(
-        TurnCompleteMsg(
-            session_id=session.session_id,
-            turn_seq=session.turn_seq,
-            status=turn_status,
-            timings=Timings(total_ms=_now_ms(t0)),
-        ).model_dump(mode="json")
-    )
-    machine.transition(AppState.READY)
-    await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
-
-    if storage is not None:
-        await _persist_session(storage, session)
+        if storage is not None:
+            await _persist_session(storage, session)
 
 
 class _PcmStream(AudioInputStream):
@@ -300,22 +381,38 @@ async def _asr_turn_from_pcm(
     t0: float,
     ws_transport: LocalWebSocketTransport | None,
     *,
+    runner: TurnRunner | None = None,
     storage: Storage | None = None,
 ) -> bool:
     """一段 PTT 音频 → ASR → asr_final → turn（3.4：asr_final 与 user_text 等价）。
 
-    返回是否形成 turn。booting 期/空转写/ASR 失败不形成 turn；ASR 失败经 error
-    事件上报（ASR_ENGINE_ERROR，非致命不进 3.5 error 态——3.4.1 报错不降级）。
+    返回是否形成 turn。booting/error 期、空转写、ASR 失败不形成 turn；ASR 失败经
+    error 事件上报（ASR_ENGINE_ERROR，非致命不进 3.5 error 态——3.4.1 报错不降级）。
+    `generating`/`speaking` 期收到新输入 = 先打断在途 turn 再起新 turn（3.5 动作矩阵）；
+    `runner` 为空时无取消通道，只能按旧口径忽略（单测直调走这条）。
     """
     if not pcm:
         print("[sidecar] 收到空 PTT 段，忽略", file=sys.stderr)
         return False
-    if machine.state is not AppState.READY:
+    if machine.state is AppState.BOOTING or machine.state is AppState.ERROR:
         print(
             f"[sidecar] 状态 {machine.state.value} 收到 PTT 音频，忽略（3.5）",
             file=sys.stderr,
         )
         return False
+    if machine.state is not AppState.READY:
+        if runner is None:
+            print(
+                f"[sidecar] 状态 {machine.state.value} 收到 PTT 音频，无取消通道，忽略（3.5）",
+                file=sys.stderr,
+            )
+            return False
+        # 3.5：generating/speaking + 新输入 = 打断在途 turn（generating→generating 重入）
+        print(
+            f"[sidecar] 状态 {machine.state.value} 收到 PTT 音频，先打断在途 turn（3.5）",
+            file=sys.stderr,
+        )
+        await runner.interrupt()
     try:
         text = await _transcribe_pcm(asr, pcm)
     except EchoesError as exc:
@@ -336,9 +433,21 @@ async def _asr_turn_from_pcm(
             session_id=session.session_id, text=text, is_final=True, t=_now_ms(t0)
         ).model_dump(mode="json")
     )
-    await _run_turn(
-        transport, machine, session, provider, tts, text, t0, ws_transport, storage=storage
+    runner = runner if runner is not None else TurnRunner()
+    task = await runner.start(
+        _turn_factory(
+            transport,
+            machine,
+            session,
+            provider,
+            tts,
+            text,
+            t0,
+            ws_transport,
+            storage=storage,
+        )
     )
+    await runner.wait(task)
     return True
 
 
@@ -351,15 +460,16 @@ async def _asr_loop(
     provider: LLMProvider,
     tts: TTSEngine,
     t0: float,
-    turn_lock: asyncio.Lock,
+    runner: TurnRunner,
     *,
     storage: Storage | None = None,
     is_cloning: Callable[[], bool] | None = None,
 ) -> None:
     """PTT 语音入口（3.4/§12 步骤 4）：WS 整段音频 → ASR → turn。
 
-    next_utterance 在锁外等待（不阻塞文本面 user_text）；转写+turn 在锁内串行，
-    与 user_text 共用同一状态机，避免并发迁移。
+    收整段音频在 turn 之外等待（不阻塞文本面 user_text）；打断通道不在这里——
+    PTT 按下时壳侧发 `control(interrupt)`，由 stdio 主循环处理（turn 是后台任务，
+    主循环才是打断的唯一入口）。
     """
     while True:
         try:
@@ -370,23 +480,23 @@ async def _asr_loop(
             continue
         if pcm is None:
             continue  # 壳断开/重连：半段丢弃（不构成有效输入）
-        async with turn_lock:
-            if is_cloning is not None and is_cloning():
-                # 克隆期间不开新 turn（同上：TTS 引擎被占用，且样本音不该进 ASR 轮次）
-                print("[sidecar] 克隆进行中，忽略本段 PTT 音频", file=sys.stderr)
-                continue
-            await _asr_turn_from_pcm(
-                pcm,
-                transport,
-                machine,
-                session,
-                asr,
-                provider,
-                tts,
-                t0,
-                ws_transport,
-                storage=storage,
-            )
+        if is_cloning is not None and is_cloning():
+            # 克隆期间不开新 turn（同上：TTS 引擎被占用，且样本音不该进 ASR 轮次）
+            print("[sidecar] 克隆进行中，忽略本段 PTT 音频", file=sys.stderr)
+            continue
+        await _asr_turn_from_pcm(
+            pcm,
+            transport,
+            machine,
+            session,
+            asr,
+            provider,
+            tts,
+            t0,
+            ws_transport,
+            runner=runner,
+            storage=storage,
+        )
 
 
 async def _assemble_llm(argv: Sequence[str] | None) -> tuple[LLMProvider, bool]:
@@ -640,7 +750,8 @@ async def _serve_with_storage(
 
     transport = StdioTransport(_ThreadedReader(), _StdOutWriter())
     machine = StateMachine()
-    turn_lock = asyncio.Lock()  # 文本面/语音面 turn 串行化（3.5 单会话单在途 turn）
+    # 3.5 单会话单在途 turn：文本面/语音面共用一个 turn 槽（串行 + 可打断）
+    runner = TurnRunner()
     clone_service = CloneService(
         transport=transport,
         storage=storage,
@@ -688,7 +799,7 @@ async def _serve_with_storage(
                 llm_provider,
                 tts_engine,
                 t0,
-                turn_lock,
+                runner,
                 storage=storage,
                 is_cloning=lambda: clone_task is not None and not clone_task.done(),
             )
@@ -703,19 +814,21 @@ async def _serve_with_storage(
                 continue
 
             if isinstance(msg, UserTextMsg):
-                async with turn_lock:
-                    if machine.state is not AppState.READY:
-                        # 3.5：booting/生成期用户请求不可触发 turn（语音面同规则）
-                        print(
-                            f"[sidecar] 状态 {machine.state.value} 收到 user_text，忽略（3.5）",
-                            file=sys.stderr,
-                        )
-                        continue
-                    if clone_task is not None and not clone_task.done():
-                        # 克隆期间不开新 turn：TTS 引擎被克隆占用，抢跑只会两边都慢
-                        print("[sidecar] 克隆进行中，忽略 user_text", file=sys.stderr)
-                        continue
-                    await _run_turn(
+                if machine.state is AppState.BOOTING or machine.state is AppState.ERROR:
+                    # 3.5：booting/生成期用户请求不可触发 turn（语音面同规则）
+                    print(
+                        f"[sidecar] 状态 {machine.state.value} 收到 user_text，忽略（3.5）",
+                        file=sys.stderr,
+                    )
+                    continue
+                if clone_task is not None and not clone_task.done():
+                    # 克隆期间不开新 turn：TTS 引擎被克隆占用，抢跑只会两边都慢
+                    print("[sidecar] 克隆进行中，忽略 user_text", file=sys.stderr)
+                    continue
+                # 不 await：stdio 主循环必须继续读 control——那是打断的唯一入口；
+                # start() 内部会先打断在途 turn（3.5「文本输入=打断并发起新 turn」）
+                await runner.start(
+                    _turn_factory(
                         transport,
                         machine,
                         session,
@@ -726,12 +839,22 @@ async def _serve_with_storage(
                         ws_transport,
                         storage=storage,
                     )
-            elif isinstance(msg, ControlMsg):
-                print(
-                    f"[sidecar] control({msg.action})：骨架期 turn 同步执行、无在途；"
-                    "三跳在阶段 0 第四周接线（3.4 口径）",
-                    file=sys.stderr,
                 )
+            elif isinstance(msg, ControlMsg):
+                action = msg.action
+                # interrupt 与 cancel_turn 在 sidecar 侧同义（都收束为 CANCELLED）；
+                # 差异在壳：interrupt 随后立即开采集，cancel_turn 不采集（3.4 控制动词定案）
+                interrupted = await runner.interrupt()
+                if interrupted:
+                    print(
+                        f"[sidecar] control({action}) → 在途 turn 按 CANCELLED 收尾（三跳）",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"[sidecar] control({action})：无在途 turn，忽略（可容忍的协议噪声）",
+                        file=sys.stderr,
+                    )
             elif isinstance(msg, CloneStartMsg):
                 if clone_task is not None and not clone_task.done():
                     print("[sidecar] 克隆进行中，忽略重复 clone_start", file=sys.stderr)
@@ -773,6 +896,8 @@ async def _serve_with_storage(
                     file=sys.stderr,
                 )
     finally:
+        # 先打断在途 turn（它还要往 transport 写 turn_complete），再关传输面
+        await runner.interrupt()
         if ws_transport is not None:
             await ws_transport.close()
         await transport.close()
