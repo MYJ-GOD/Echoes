@@ -14,7 +14,8 @@ from __future__ import annotations
 import struct
 import sys
 import types
-from collections.abc import AsyncIterator
+import wave
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ import numpy as np
 import pytest
 
 import echoes_sidecar.engines.tts.cosyvoice2 as cosyvoice2_module
+from echoes_sidecar.audio.stream import AudioInputStream
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.types import AudioChunk
 from echoes_sidecar.engines.tts.base import TTSEngine
@@ -35,27 +37,48 @@ from echoes_sidecar.engines.tts.cosyvoice2 import (
 
 
 class _FakeVendored:
-    """vendored CosyVoice2 替身：预置产出序列 + zero-shot 调参记录对拍。"""
+    """vendored CosyVoice2 替身：预置产出序列 + 推理/spk 注册参数对拍。"""
 
-    def __init__(self, outs: list[Any], exc: Exception | None = None) -> None:
+    def __init__(
+        self,
+        outs: list[Any],
+        exc: Exception | None = None,
+        *,
+        spk_exc: Exception | None = None,
+        spk_fail_prefix: str = "",
+    ) -> None:
         self._outs = outs
         self._exc = exc
+        self._spk_exc = spk_exc
+        self._spk_fail_prefix = spk_fail_prefix
         self.calls: list[dict[str, Any]] = []
+        self.spk_calls: list[dict[str, Any]] = []
+
+    def add_zero_shot_spk(self, prompt_text: str, prompt_wav: str, spk_id: str) -> bool:
+        self.spk_calls.append(
+            {"prompt_text": prompt_text, "prompt_wav": prompt_wav, "spk_id": spk_id}
+        )
+        if self._spk_exc is not None and spk_id.startswith(self._spk_fail_prefix):
+            raise self._spk_exc
+        return True
 
     def inference_zero_shot(
         self,
         tts_text: str,
         prompt_text: str,
         prompt_wav: str,
+        zero_shot_spk_id: str = "",
         stream: bool = False,
         speed: float = 1.0,
         text_frontend: bool = True,
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> Iterator[dict[str, Any]]:
         self.calls.append(
             {
+                "mode": "zero_shot",
                 "tts_text": tts_text,
                 "prompt_text": prompt_text,
                 "prompt_wav": prompt_wav,
+                "zero_shot_spk_id": zero_shot_spk_id,
                 "stream": stream,
             }
         )
@@ -63,11 +86,43 @@ class _FakeVendored:
         if self._exc is not None:
             raise self._exc
 
+    def inference_cross_lingual(
+        self,
+        tts_text: str,
+        prompt_wav: str,
+        zero_shot_spk_id: str = "",
+        stream: bool = False,
+        speed: float = 1.0,
+        text_frontend: bool = True,
+    ) -> Iterator[dict[str, Any]]:
+        self.calls.append(
+            {
+                "mode": "cross_lingual",
+                "tts_text": tts_text,
+                "prompt_wav": prompt_wav,
+                "zero_shot_spk_id": zero_shot_spk_id,
+                "stream": stream,
+            }
+        )
+        yield from ({"tts_speech": o} for o in self._outs)
 
-def _stub_engine(outs: list[Any], exc: Exception | None = None) -> CosyVoice2TtsEngine:
+
+def _stub_engine(
+    outs: list[Any],
+    exc: Exception | None = None,
+    *,
+    spk_exc: Exception | None = None,
+    spk_fail_prefix: str = "",
+    voices_dir: Path | None = None,
+) -> CosyVoice2TtsEngine:
     """轻构造引擎 + 直塞替身 vendored 实例（绕过真加载，不触 torch/vendor）。"""
-    engine = CosyVoice2TtsEngine(model_dir=Path("Z:/missing/weights"))
-    engine._engine = _FakeVendored(outs, exc)
+    kwargs: dict[str, Any] = {"model_dir": Path("Z:/missing/weights")}
+    if voices_dir is not None:
+        kwargs["voices_dir"] = voices_dir
+    engine = CosyVoice2TtsEngine(**kwargs)
+    engine._engine = _FakeVendored(
+        outs, exc, spk_exc=spk_exc, spk_fail_prefix=spk_fail_prefix
+    )
     return engine
 
 
@@ -176,6 +231,196 @@ async def test_worker_thread_error_bridges_tts_engine_error() -> None:
     with pytest.raises(EchoesError) as exc_info:
         await _collect(engine, "你好", BUILTIN_DEFAULT_VOICE)
     assert exc_info.value.code == ErrorCode.TTS_ENGINE_ERROR
+
+
+# ------------------------------ 4.5 分句接线 ------------------------------
+
+
+async def test_synthesize_splits_sentences_into_separate_inference_calls() -> None:
+    """4.5：逐句推理（首句先出），chunk 序号跨句连续，只有整段流尾 is_final。"""
+    engine = _stub_engine([np.full((1, 2), 0.25, dtype=np.float32)])
+    engine._add_spk(
+        BUILTIN_DEFAULT_VOICE, BUILTIN_DEFAULT_PROMPT_TEXT, BUILTIN_DEFAULT_PROMPT_WAV
+    )
+
+    chunks = await _collect(engine, "第一句。第二句！", BUILTIN_DEFAULT_VOICE)
+
+    vendored = engine._engine
+    assert isinstance(vendored, _FakeVendored)
+    assert [c["tts_text"] for c in vendored.calls] == ["第一句。", "第二句！"]
+    assert [c.seq for c in chunks] == [0, 1]
+    assert [c.is_final for c in chunks] == [False, True]
+
+
+async def test_synthesize_long_sentence_is_split_by_secondary_pause() -> None:
+    """超过 60 字的长句按次级停顿拆开：不让首块音频等整句念完。"""
+    engine = _stub_engine([np.zeros((1, 2), dtype=np.float32)])
+    engine._add_spk(
+        BUILTIN_DEFAULT_VOICE, BUILTIN_DEFAULT_PROMPT_TEXT, BUILTIN_DEFAULT_PROMPT_WAV
+    )
+    long_sentence = "、".join(["很长的一段话"] * 20) + "。"
+
+    await _collect(engine, long_sentence, BUILTIN_DEFAULT_VOICE)
+
+    vendored = engine._engine
+    assert isinstance(vendored, _FakeVendored)
+    assert len(vendored.calls) > 1
+    assert all(len(c["tts_text"]) <= 60 for c in vendored.calls)
+
+
+async def test_synthesize_uses_cached_spk_embedding_when_registered() -> None:
+    """注册过音色就走 spk2info 缓存：合成不再传 prompt 文本/wav（省掉每轮特征提取）。"""
+    engine = _stub_engine([np.zeros((1, 2), dtype=np.float32)])
+    engine._add_spk(
+        BUILTIN_DEFAULT_VOICE, BUILTIN_DEFAULT_PROMPT_TEXT, BUILTIN_DEFAULT_PROMPT_WAV
+    )
+
+    await _collect(engine, "你好", BUILTIN_DEFAULT_VOICE)
+
+    vendored = engine._engine
+    assert isinstance(vendored, _FakeVendored)
+    call = vendored.calls[0]
+    assert call["zero_shot_spk_id"] == BUILTIN_DEFAULT_VOICE
+    assert call["prompt_text"] == ""
+    assert call["prompt_wav"] == ""
+
+
+# ------------------------------ 克隆真路（ADR-009 zero-shot） ------------------------------
+
+
+def _seed_wav(path: Path, *, seconds: float = 0.05) -> Path:
+    """写一段可被 clone 收下的 PCM16 16k 样本 wav。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = b"\x00\x01" * int(16_000 * seconds)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16_000)
+        handle.writeframes(frames)
+    return path
+
+
+def _pcm_stream(pcm: bytes) -> AudioInputStream:
+    class _Stream(AudioInputStream):
+        def __aiter__(self) -> AsyncIterator[AudioChunk]:
+            async def _gen() -> AsyncIterator[AudioChunk]:
+                yield AudioChunk(data=pcm, seq=0, is_final=True)
+
+            return _gen()
+
+    return _Stream()
+
+
+async def test_clone_writes_prompt_wav_and_registers_embedding(tmp_path: Path) -> None:
+    """clone：prompt 落 voices/clone_<hex>.wav（temp+rename）→ 嵌入注册 → 返回 clone:<hex>。"""
+    engine = _stub_engine([], voices_dir=tmp_path / "voices")
+
+    voice_id = await engine.clone(_pcm_stream(b"\x01\x00" * 16))
+
+    assert voice_id.startswith("clone:")
+    safe = voice_id.replace(":", "_")
+    wav = tmp_path / "voices" / f"{safe}.wav"
+    assert wav.is_file()
+    with wave.open(str(wav), "rb") as handle:
+        assert (handle.getframerate(), handle.getnchannels()) == (16_000, 1)
+        assert handle.getnframes() == 16
+    # 临时文件不留痕（14.2）
+    assert list((tmp_path / "voices").glob(".*.tmp")) == []
+
+    vendored = engine._engine
+    assert isinstance(vendored, _FakeVendored)
+    assert vendored.spk_calls == [
+        {"prompt_text": "", "prompt_wav": str(wav), "spk_id": voice_id}
+    ]
+
+
+async def test_clone_empty_sample_raises_without_touching_disk(tmp_path: Path) -> None:
+    """空样本 = CLONE_ENGINE_FAILED，且不产生任何音色资产（14.1 不留孤儿）。"""
+    engine = _stub_engine([], voices_dir=tmp_path / "voices")
+    with pytest.raises(EchoesError) as exc_info:
+        await engine.clone(_pcm_stream(b""))
+    assert exc_info.value.code == ErrorCode.CLONE_ENGINE_FAILED
+    assert not (tmp_path / "voices").exists() or list((tmp_path / "voices").iterdir()) == []
+
+
+async def test_clone_without_warmup_raises_model_not_loaded(tmp_path: Path) -> None:
+    engine = CosyVoice2TtsEngine(model_dir=tmp_path / "w", voices_dir=tmp_path / "voices")
+    with pytest.raises(EchoesError) as exc_info:
+        await engine.clone(_pcm_stream(b"\x01\x00" * 8))
+    assert exc_info.value.code == ErrorCode.MODEL_NOT_LOADED
+
+
+async def test_clone_embedding_failure_cleans_wav(tmp_path: Path) -> None:
+    """嵌入提取失败 → CLONE_ENGINE_FAILED，且 prompt wav 不残留（不留孤儿资产）。"""
+    engine = _stub_engine([], spk_exc=RuntimeError("onnx 炸了"), voices_dir=tmp_path / "voices")
+    with pytest.raises(EchoesError) as exc_info:
+        await engine.clone(_pcm_stream(b"\x01\x00" * 16))
+    assert exc_info.value.code == ErrorCode.CLONE_ENGINE_FAILED
+    assert list((tmp_path / "voices").glob("clone_*.wav")) == []
+
+
+async def test_cloned_voice_synthesizes_via_cross_lingual(tmp_path: Path) -> None:
+    """克隆音色没有转写文本 → 走 inference_cross_lingual（不硬填 prompt 文本）。"""
+    engine = _stub_engine([np.zeros((1, 2), dtype=np.float32)], voices_dir=tmp_path / "voices")
+    voice_id = await engine.clone(_pcm_stream(b"\x01\x00" * 16))
+
+    chunks = await _collect(engine, "你好", voice_id)
+
+    vendored = engine._engine
+    assert isinstance(vendored, _FakeVendored)
+    call = vendored.calls[0]
+    assert call["mode"] == "cross_lingual"
+    assert call["zero_shot_spk_id"] == voice_id
+    assert call["prompt_wav"].endswith(f"{voice_id.replace(':', '_')}.wav")
+    assert chunks[-1].is_final is True
+
+
+async def test_register_voices_rebuilds_embeddings_from_assets(tmp_path: Path) -> None:
+    """重启重建：按 voices/*.wav 重建嵌入（不写权重目录，7.3 下载边界保持只读）。"""
+    voices = tmp_path / "voices"
+    _seed_wav(voices / "clone_abc.wav")
+    engine = _stub_engine([], voices_dir=voices)
+
+    engine._register_voices()
+
+    vendored = engine._engine
+    assert isinstance(vendored, _FakeVendored)
+    registered = {c["spk_id"] for c in vendored.spk_calls}
+    assert registered == {BUILTIN_DEFAULT_VOICE, "clone:abc"}
+
+
+async def test_register_voices_skips_broken_clone(tmp_path: Path) -> None:
+    """单个克隆嵌入重建失败只跳过它，不牵连其它音色（3.4.1 局部报错不全局降级）。"""
+    voices = tmp_path / "voices"
+    _seed_wav(voices / "clone_bad.wav")
+    engine = _stub_engine(
+        [], spk_exc=RuntimeError("坏样本"), spk_fail_prefix="clone:", voices_dir=voices
+    )
+
+    engine._register_voices()  # 不抛
+
+    # 坏的那支没进音色面，内置音色照常可用
+    assert engine._spk_ids == {BUILTIN_DEFAULT_VOICE}
+
+
+async def test_cloned_voice_missing_wav_raises(tmp_path: Path) -> None:
+    """克隆音色资产被删 → VOICE_NOT_AVAILABLE（不静默回退内置音色，2.5）。"""
+    engine = _stub_engine([], voices_dir=tmp_path / "voices")
+    engine._spk_ids.add("clone:gone")
+    with pytest.raises(EchoesError) as exc_info:
+        await _collect(engine, "你好", "clone:gone")
+    assert exc_info.value.code == ErrorCode.VOICE_NOT_AVAILABLE
+
+
+async def test_cloned_voice_unregistered_raises(tmp_path: Path) -> None:
+    """样本在但嵌入没就绪（重建失败）→ VOICE_NOT_AVAILABLE 并指明原因。"""
+    voices = tmp_path / "voices"
+    _seed_wav(voices / "clone_ready.wav")
+    engine = _stub_engine([], voices_dir=voices)
+    with pytest.raises(EchoesError) as exc_info:
+        await _collect(engine, "你好", "clone:ready")
+    assert exc_info.value.code == ErrorCode.VOICE_NOT_AVAILABLE
+    assert "嵌入" in exc_info.value.message
 
 
 def _seed_wetext_cache(monkeypatch: pytest.MonkeyPatch, base: Path) -> None:

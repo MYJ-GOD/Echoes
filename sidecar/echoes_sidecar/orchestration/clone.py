@@ -259,11 +259,15 @@ class CloneService:
         return target
 
     def _existing_model_rel(self, voice_id: str) -> str | None:
-        """引擎产出的资产文件（若有）：不猜路径，只认资产目录里真实存在的文件。"""
+        """引擎产出的资产文件（若有）：不猜路径，只认资产目录里真实存在的文件。
+
+        glob 已按引擎返回的 voice_id 收窄（`clone:<hex>` → `clone_<hex>.*`），
+        不会误认样本（样本名是克隆前生成的裸 hex）。ADR-009 的 zero-shot 路把
+        prompt wav 本身当资产，所以这里**不再跳过 .wav**。
+        """
         safe = voice_id.replace(":", "_")
         for candidate in sorted(self._voices_dir().glob(f"{safe}.*")):
-            if candidate.suffix.lower() != ".wav":
-                return self._rel(candidate)
+            return self._rel(candidate)
         return None
 
     def _next_display_name(self) -> str:

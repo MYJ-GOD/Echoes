@@ -18,6 +18,16 @@
   文本严格配对入库；zero-shot 声音克隆的前提是两者一致。
 - 分级就绪（同 whisper，3.4 v1.4）：ready=False 首发 → warmup() 后台加载 →
   组合根置 ready 重发 hello；未 warmup 即 synthesize = MODEL_NOT_LOADED 报错。
+- **音色一律走 spk2info 缓存**（`add_zero_shot_spk`）：vendored 的
+  `frontend_zero_shot` 在 `zero_shot_spk_id == ''` 时会**每次调用**重跑一遍
+  campplus 嵌入 + speech tokenizer（百毫秒级）。逐句合成要调 N 次，不缓存就是
+  N 倍开销，所以内置音色在 warmup 注册一次、克隆音色在 clone 后立刻注册。
+  注册只写内存（不调 `save_spkinfo`），理由见 `_register_voices`。
+- 4.5 分句接线：`synthesize` 先用 `audio.chunker.split_sentences` 切句再逐句推理
+  （长句按次级停顿/硬切拆到 60 字内），首句更早出声；段内 chunk 序号跨句连续。
+- 克隆真路（ADR-009 zero-shot）：样本 16k PCM16 → 落 `voices/clone_<hex>.wav`
+  （temp+rename，14.2）→ `add_zero_shot_spk` 算嵌入 → 返回 `clone:<hex>`；
+  合成走 `inference_cross_lingual`（无人转写文本，正是 cross-lingual 的适用面）。
 - RTF 1.33（T-4060 fp16 实测）> 1：连续流式跟播不可行 → 「整句产出按句播」
   消费语义在壳侧；本层保证逐段产出与段尾 is_final 边界。
 """
@@ -29,12 +39,16 @@ import os
 import queue
 import sys
 import threading
+import wave
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from echoes_sidecar.audio.chunker import split_sentences
 from echoes_sidecar.audio.stream import AudioInputStream
-from echoes_sidecar.core.errors import EchoesError, ErrorCode
+from echoes_sidecar.core.errors import CloneError, EchoesError, ErrorCode
 from echoes_sidecar.core.types import AudioChunk
 from echoes_sidecar.engines.tts.base import TTSEngine
 
@@ -42,11 +56,14 @@ __all__ = [
     "BUILTIN_DEFAULT_PROMPT_TEXT",
     "BUILTIN_DEFAULT_PROMPT_WAV",
     "BUILTIN_DEFAULT_VOICE",
+    "CLONE_VOICE_PREFIX",
     "CosyVoice2TtsEngine",
     "np_to_pcm16",
 ]
 
 BUILTIN_DEFAULT_VOICE = "builtin:default"  # 2.5 保留 ID（none 态解析目标）
+# 克隆音色 ID 前缀：`clone:<hex>`；落盘文件名 = ID 里的 ':' 换成 '_'（5.1/14.2）
+CLONE_VOICE_PREFIX = "clone:"
 
 # 与 builtin_default_prompt.wav 严格配对（scripts/make_builtin_prompt.py 唯一来源）
 BUILTIN_DEFAULT_PROMPT_TEXT = (
@@ -56,6 +73,11 @@ BUILTIN_DEFAULT_PROMPT_WAV = (
     Path(__file__).resolve().parent / "assets" / "builtin_default_prompt.wav"
 )
 _DEFAULT_MODEL_DIR = Path.home() / ".cache" / "echoes" / "models" / "CosyVoice2-0.5B"
+# 引擎侧面：克隆 prompt 落盘目录（组合根传 assets/voices；与 5.1 相对路径同根）
+_DEFAULT_VOICES_DIR = Path.home() / ".cache" / "echoes" / "assets" / "voices"
+# 克隆样本口径（与 4.2/3.4 的 PTT/WS 帧一致：16k mono PCM16）
+_CLONE_SAMPLE_RATE = 16_000
+_SAMPLE_WIDTH = 2
 
 # wetext（vendored frontend 文本正则化依赖）在 modelscope 的快照仓：
 # 运行时一律 local_files_only 零网（R20 实证：联网补拉在匿名限频 403 +
@@ -159,10 +181,21 @@ def _install_wetext_offline_snapshot() -> None:
 class CosyVoice2TtsEngine(TTSEngine):
     """CosyVoice2 zero-shot 流式合成引擎（lazy 加载；输出 24kHz mono PCM16）。"""
 
-    def __init__(self, *, fp16: bool = True, model_dir: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fp16: bool = True,
+        model_dir: Path | str | None = None,
+        voices_dir: Path | str | None = None,
+    ) -> None:
         self._fp16 = fp16
         self._model_dir = Path(model_dir) if model_dir is not None else _DEFAULT_MODEL_DIR
+        self._voices_dir = (
+            Path(voices_dir) if voices_dir is not None else _DEFAULT_VOICES_DIR
+        )
         self._engine: Any | None = None  # vendored CosyVoice2（无 stub，Any 口）
+        # 已注册进 vendored spk2info 的音色（= 其特征提取已缓存，合成时无需再算）
+        self._spk_ids: set[str] = set()
 
     async def warmup(self) -> None:
         """组合根装配期预热（vendored 引导 + 权重加载在线程内，不阻塞 booting 其余装配）。"""
@@ -199,6 +232,7 @@ class CosyVoice2TtsEngine(TTSEngine):
             )
         finally:
             logging.getLogger().setLevel(prev_level)
+        self._register_voices()
 
     def preload(self) -> None:
         """主线程预载重型 C 依赖（3.2 执行约束细则；Windows loader-lock 死锁规避）。
@@ -220,31 +254,101 @@ class CosyVoice2TtsEngine(TTSEngine):
         if torch.cuda.is_available():
             torch.zeros(1, device="cuda")  # 建 CUDA context（worker 只复用不初始化）
 
-    def _resolve_voice(self, voice_id: str) -> tuple[str, Path]:
-        """voice_id → zero-shot prompt（prompt_text, prompt_wav）；未知/缺失报错不降级。"""
-        if voice_id != BUILTIN_DEFAULT_VOICE:
-            raise EchoesError(
-                ErrorCode.VOICE_NOT_AVAILABLE,
-                f"voice_id {voice_id} 不在本引擎可用音色面"
-                "（阶段 0 仅 builtin:default；克隆接线=第三周 §12 步骤 5）",
+    # ------------------------------ 音色注册 ------------------------------
+
+    def _register_voices(self) -> None:
+        """把内置音色与既有克隆音色注册成 spk2info 条目（特征提取只做一次）。
+
+        为什么不 `save_spkinfo()`：它写的是 `{model_dir}/spk2info.pt`——权重目录属
+        7.3 的「下载边界」，运行时往里写会让「权重完好」与「嵌embedding 完好」两件事
+        混在一起。本引擎的权威来源是 `voices/*.wav`：启动时按文件重建嵌入（
+        每音色十几~几十毫秒，音色数是个位数），权重目录被重下也不会让音色静默失效。
+
+        内置音色注册失败 → 直接抛（TTS 本就不可用）；单个克隆失败 → 记 stderr 并
+        跳过，只有点它的会话会拿到 VOICE_NOT_AVAILABLE（不牵连其它音色）。
+        """
+        if BUILTIN_DEFAULT_PROMPT_WAV.is_file():
+            self._add_spk(
+                BUILTIN_DEFAULT_VOICE, BUILTIN_DEFAULT_PROMPT_TEXT, BUILTIN_DEFAULT_PROMPT_WAV
             )
-        prompt_wav: Path = BUILTIN_DEFAULT_PROMPT_WAV  # 模块级查（tests monkeypatch 面）
-        if not prompt_wav.is_file():
+        for wav in sorted(self._voices_dir.glob("clone_*.wav")):
+            voice_id = f"{CLONE_VOICE_PREFIX}{wav.stem.removeprefix('clone_')}"
+            try:
+                self._add_spk(voice_id, "", wav)
+            except EchoesError as exc:
+                print(
+                    f"[sidecar] 克隆音色 {voice_id} 嵌入重建失败，跳过（{exc.code}）: "
+                    f"{exc.message}",
+                    file=sys.stderr,
+                )
+
+    def _add_spk(self, voice_id: str, prompt_text: str, prompt_wav: Path) -> None:
+        """算一次音色嵌入并缓存（vendored 同步重活，调用方负责离事件循环）。"""
+        engine = self._engine
+        if engine is None:  # 防御：注册只在 _load_engine 末尾或 warmup 之后发生
+            raise EchoesError(ErrorCode.MODEL_NOT_LOADED, "引擎未加载即注册音色")
+        try:
+            engine.add_zero_shot_spk(prompt_text, str(prompt_wav), voice_id)
+        except Exception as exc:  # noqa: BLE001  vendored 无类型，异常统一转引擎错误
             raise EchoesError(
-                ErrorCode.VOICE_NOT_AVAILABLE,
-                f"内置音色 prompt 资产缺失: {prompt_wav}"
-                "（scripts/make_builtin_prompt.py 重生成，wav/文本须严格配对）",
+                ErrorCode.TTS_ENGINE_ERROR, f"音色 {voice_id} 嵌入提取失败: {exc}"
+            ) from exc
+        self._spk_ids.add(voice_id)
+
+    def _resolve_voice(self, voice_id: str) -> _Voice:
+        """voice_id → 合成参数；未知/缺失报错不降级（2.5/3.4.1）。
+
+        - `builtin:default`：prompt 文本与 wav 严格配对（同一脚本生成），零-shot 路；
+        - `clone:<hex>`：只有 prompt wav，没有对应转写文本 → cross-lingual 路
+          （vendored `inference_cross_lingual`，无需 prompt_text）。
+        """
+        if voice_id == BUILTIN_DEFAULT_VOICE:
+            prompt_wav: Path = BUILTIN_DEFAULT_PROMPT_WAV  # 模块级查（tests monkeypatch 面）
+            if not prompt_wav.is_file():
+                raise EchoesError(
+                    ErrorCode.VOICE_NOT_AVAILABLE,
+                    f"内置音色 prompt 资产缺失: {prompt_wav}"
+                    "（scripts/make_builtin_prompt.py 重生成，wav/文本须严格配对）",
+                )
+            return _Voice(
+                prompt_text=BUILTIN_DEFAULT_PROMPT_TEXT,
+                prompt_wav=prompt_wav,
+                spk_id=voice_id if voice_id in self._spk_ids else "",
             )
-        return BUILTIN_DEFAULT_PROMPT_TEXT, prompt_wav
+
+        if voice_id.startswith(CLONE_VOICE_PREFIX):
+            wav = self._voices_dir / f"{_safe(voice_id)}.wav"
+            if not wav.is_file():
+                raise EchoesError(
+                    ErrorCode.VOICE_NOT_AVAILABLE,
+                    f"克隆音色样本缺失: {wav}（音色资产被删？请重新克隆）",
+                )
+            if voice_id not in self._spk_ids:
+                raise EchoesError(
+                    ErrorCode.VOICE_NOT_AVAILABLE,
+                    f"克隆音色 {voice_id} 的嵌入未就绪（见启动日志的嵌入重建失败行）",
+                )
+            return _Voice(
+                prompt_text="", prompt_wav=wav, spk_id=voice_id, cross_lingual=True
+            )
+
+        raise EchoesError(
+            ErrorCode.VOICE_NOT_AVAILABLE,
+            f"voice_id {voice_id} 不在本引擎可用音色面"
+            f"（{BUILTIN_DEFAULT_VOICE} 或 {CLONE_VOICE_PREFIX}<hex>）",
+        )
+
+    # ------------------------------ 合成 ------------------------------
 
     async def synthesize(self, text: str, voice_id: str) -> AsyncIterator[AudioChunk]:
-        """流式合成（4.5）：vendored 同步生成器经线程 + 队列桥接为 async chunk 流。
+        """流式合成（4.5）：分句 → 逐句推理 → vendored 同步生成器经线程/队列桥接。
 
+        - 4.5 分句接线：`split_sentences` 切句后逐句推理，首句更早出音；chunk 序号
+          跨句连续，只有整段流尾带 is_final；
         - 3.2 执行约束：vendored 迭代是同步长任务，必须离事件循环（worker thread）；
           每段 tts_speech（24k float）→ np_to_pcm16 → AudioChunk；
-        - 末段带真实 payload 且 is_final=True；零段产出兜底单帧 b"" 流尾帧；
         - 线程内异常经队列桥回主协程 → EchoesError(TTS_ENGINE_ERROR)，不静默
-          （3.4.1）；打断/在途取消归三跳协议（3.4 第四周，阶段 0 turn 同步执行）。
+          （3.4.1）；打断/在途取消由编排层 `pull()` 收束（3.4 三跳）。
         """
         engine = self._engine
         if engine is None:
@@ -252,18 +356,34 @@ class CosyVoice2TtsEngine(TTSEngine):
                 ErrorCode.MODEL_NOT_LOADED,
                 "CosyVoice2 未 warmup 即 synthesize（3.4.1 报错不降级）",
             )
-        prompt_text, prompt_wav = self._resolve_voice(voice_id)
+        voice = self._resolve_voice(voice_id)
+        segments = split_sentences(text)
+        if not segments:
+            yield AudioChunk(data=b"", seq=0, is_final=True)  # 空文本：流尾兜底
+            return
+
         chunks_q: queue.Queue[Any] = queue.Queue()
 
         def _produce() -> None:
             try:
-                for model_output in engine.inference_zero_shot(
-                    text, prompt_text, str(prompt_wav), stream=True
-                ):
-                    speech = model_output["tts_speech"]
-                    if hasattr(speech, "detach"):  # torch.Tensor：断梯度 + 归 CPU
-                        speech = speech.detach().cpu()
-                    chunks_q.put(speech)
+                for segment in segments:
+                    if voice.cross_lingual:
+                        stream = engine.inference_cross_lingual(
+                            segment, str(voice.prompt_wav), voice.spk_id, stream=True
+                        )
+                    elif voice.spk_id:
+                        stream = engine.inference_zero_shot(
+                            segment, "", "", voice.spk_id, stream=True
+                        )
+                    else:  # 未注册：内联重算 prompt 特征（等价结果，只是慢）
+                        stream = engine.inference_zero_shot(
+                            segment, voice.prompt_text, str(voice.prompt_wav), stream=True
+                        )
+                    for model_output in stream:
+                        speech = model_output["tts_speech"]
+                        if hasattr(speech, "detach"):  # torch.Tensor：断梯度 + 归 CPU
+                            speech = speech.detach().cpu()
+                        chunks_q.put(speech)
             except Exception as exc:  # noqa: BLE001  跨线程异常桥（消费端统一转错误码）
                 chunks_q.put(exc)
             finally:
@@ -292,5 +412,79 @@ class CosyVoice2TtsEngine(TTSEngine):
             seq += 1
 
     async def clone(self, sample: AudioInputStream) -> str:
-        """克隆（4.5/ADR-009）：阶段 0 第三周接线（§12 步骤 5）；失败抛 CloneError。"""
-        raise NotImplementedError("阶段 0 第三周接线（§12 步骤 5；4.5 契约与 ADR-009）")
+        """克隆（4.5/ADR-009 zero-shot 真路）：样本 → prompt wav → 嵌入 → voice_id。
+
+        三步（ADR-009 第二周 spike 清单 1 的工程化落地）：
+        1. 收整段 16k PCM16 样本（4.2 输入流 → bytes；空样本报错不降级）；
+        2. 落 `voices/clone_<hex>.wav`（temp+rename，14.2：半个样本绝不对外可见）；
+        3. `add_zero_shot_spk` 算一次嵌入并缓存在 spk2info（合成时零重复提取）。
+
+        为什么不 `save_spkinfo()`：见 `_register_voices`——嵌入的权威来源是
+        `voices/*.wav`，启动时按文件重建；权重目录保持只读（7.3 下载边界）。
+
+        走 cross-lingual 合成：用户样本没有对应转写文本，`inference_zero_shot`
+        要求 prompt 文本与 prompt wav 严格配对，硬填会让韵律跑偏。
+        """
+        engine = self._engine
+        if engine is None:
+            raise EchoesError(
+                ErrorCode.MODEL_NOT_LOADED, "CosyVoice2 未 warmup 即 clone（3.4.1 报错不降级）"
+            )
+        pcm = await _drain_pcm(sample)
+        if not pcm:
+            raise CloneError(ErrorCode.CLONE_ENGINE_FAILED, "克隆样本为空（引擎侧收到 0 字节）")
+
+        voice_id = f"{CLONE_VOICE_PREFIX}{uuid4().hex}"
+        wav = await asyncio.to_thread(self._write_clone_wav, voice_id, pcm)
+        try:
+            await asyncio.to_thread(self._add_spk, voice_id, "", wav)
+        except EchoesError as exc:
+            # 嵌入失败则该音色无意义：把 prompt wav 一起清掉（14.1 不留孤儿资产）
+            wav.unlink(missing_ok=True)
+            raise CloneError(
+                ErrorCode.CLONE_ENGINE_FAILED, f"克隆嵌入提取失败：{exc.message}"
+            ) from exc
+        return voice_id
+
+    def _write_clone_wav(self, voice_id: str, pcm: bytes) -> Path:
+        """样本落盘（temp+rename）：文件名 = voice_id 的 ':' → '_'（5.1 相对路径）。"""
+        target = self._voices_dir / f"{_safe(voice_id)}.wav"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.tmp")
+        try:
+            with wave.open(str(tmp), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(_SAMPLE_WIDTH)
+                handle.setframerate(_CLONE_SAMPLE_RATE)
+                handle.writeframes(pcm[: len(pcm) - (len(pcm) % _SAMPLE_WIDTH)])
+            os.replace(tmp, target)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            raise CloneError(
+                ErrorCode.CLONE_ENGINE_FAILED, f"克隆样本写盘失败：{target}（{exc}）"
+            ) from exc
+        return target
+
+
+@dataclass(frozen=True)
+class _Voice:
+    """合成所需的音色解析结果（引擎内部用；`spk_id` 为空 = 内联重算 prompt 特征）。"""
+
+    prompt_text: str
+    prompt_wav: Path
+    spk_id: str
+    cross_lingual: bool = False
+
+
+def _safe(voice_id: str) -> str:
+    """voice_id → 文件名安全形态（`clone:<hex>` → `clone_<hex>`，5.1/14.2）。"""
+    return voice_id.replace(":", "_")
+
+
+async def _drain_pcm(sample: AudioInputStream) -> bytes:
+    """整段 PCM16 收齐（4.2 输入流可能是任意分片；克隆只要一段完整样本）。"""
+    parts: list[bytes] = []
+    async for chunk in sample:
+        if chunk.data:
+            parts.append(chunk.data)
+    return b"".join(parts)

@@ -98,6 +98,29 @@ class _CancellingTTS(TTSEngine):
         return "voice:cancelled"
 
 
+class _AssetWritingTTS(TTSEngine):
+    """ADR-009 真路的形态：引擎自己落 prompt 资产（`clone_<hex>.wav`）再返回 voice_id。"""
+
+    def __init__(self, voices_dir: Path, voice_id: str = "clone:abc123") -> None:
+        self.voices_dir = voices_dir
+        self.voice_id = voice_id
+
+    async def synthesize(self, text: str, voice_id: str) -> AsyncIterator[AudioChunk]:
+        _ = (text, voice_id)
+        yield AudioChunk(data=b"\x00\x00", seq=0, is_final=True)
+
+    async def clone(self, sample: AudioInputStream) -> str:
+        _ = sample
+        self.voices_dir.mkdir(parents=True, exist_ok=True)
+        target = self.voices_dir / f"{self.voice_id.replace(':', '_')}.wav"
+        with wave.open(str(target), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(SAMPLE_RATE)
+            handle.writeframes(b"\x00\x00" * 1600)
+        return self.voice_id
+
+
 def _setup(tmp_path: Path) -> tuple[Storage, Session, Path]:
     storage = Storage.open(tmp_path / "db" / "echoes.db")
     now = time.time()
@@ -217,6 +240,25 @@ async def test_clone_success_writes_asset_binds_voice_and_reports_progress(
             assert handle.getframerate() == SAMPLE_RATE
             assert handle.getnframes() == len(pcm) // 2
         assert not list((assets_root / "voices").glob("*.tmp"))
+    finally:
+        storage.close()
+
+
+async def test_engine_written_prompt_asset_is_recorded_as_model_path(
+    tmp_path: Path,
+) -> None:
+    """ADR-009 真路：引擎落的 `clone_<hex>.wav` 被认成 model_path（不猜路径，只认实存文件）。"""
+    storage, session, assets_root = _setup(tmp_path)
+    transport = _RecordingTransport()
+    tts = _AssetWritingTTS(assets_root / "voices")
+    service = _service(storage, session, assets_root, transport, tts)
+    try:
+        assert await service.run(_tone(3.5)) is True
+
+        voice = storage.voices.list_all()[0]
+        assert voice.model_path == "voices/clone_abc123.wav"
+        assert voice.sample_path != voice.model_path  # 样本与 prompt 是两笔资产
+        assert session.voice_id == "clone:abc123"
     finally:
         storage.close()
 

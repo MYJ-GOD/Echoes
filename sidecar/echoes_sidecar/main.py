@@ -15,6 +15,7 @@ import asyncio
 import sys
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
+from pathlib import Path
 from typing import Any, Protocol
 
 from echoes_sidecar import __version__
@@ -371,12 +372,15 @@ def _assemble_asr(argv: Sequence[str] | None) -> tuple[ASREngine, bool]:
     return engine, False
 
 
-def _assemble_tts(argv: Sequence[str] | None) -> tuple[TTSEngine, bool]:
+def _assemble_tts(
+    argv: Sequence[str] | None, *, assets_dir: Path | None = None
+) -> tuple[TTSEngine, bool]:
     """组合根 TTS 装配（3.2）：mock 默认（契约链）；cosyvoice2 真路（第二周尾部）。
 
     分级就绪同 whisper：ready=False 首发，vendored 权重 warmup 完成后才置 True
     并重发 hello（3.4 v1.4）；权重缺失时 warmup 任务报 MODEL_NOT_LOADED
     （7.3：下载归部署 bootstrap，运行时不联网补救——ADR-014）。
+    `assets_dir` 是克隆 prompt 的落盘根（5.1：引擎与 session 库认同一个资产目录）。
     """
     parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
     parser.add_argument("--tts", choices=["mock", "cosyvoice2"], default="mock")
@@ -385,7 +389,9 @@ def _assemble_tts(argv: Sequence[str] | None) -> tuple[TTSEngine, bool]:
     if args.tts == "mock":
         return MockTTSEngine(), True
 
-    engine: CosyVoice2TtsEngine = CosyVoice2TtsEngine()  # fp16 默认（tier_matrix 定档）
+    voices_dir = (assets_dir / "voices") if assets_dir is not None else None
+    # fp16 默认（tier_matrix 定档）；voices_dir 缺省时引擎退到 ~/.cache/echoes/assets
+    engine: CosyVoice2TtsEngine = CosyVoice2TtsEngine(voices_dir=voices_dir)
     print("[sidecar] CosyVoice2TtsEngine(fp16): 后台 warmup 中", file=sys.stderr)
     return engine, False
 
@@ -542,7 +548,7 @@ async def _serve_with_storage(
     # 完成后重发 hello，3.4 v1.4）；mock 保留为无模型契约链。
     llm_provider, llm_ready = await _assemble_llm(argv)
     asr_engine, asr_ready = _assemble_asr(argv)
-    tts_engine, tts_ready = _assemble_tts(argv)
+    tts_engine, tts_ready = _assemble_tts(argv, assets_dir=paths.assets_dir)
     ws_transport = await _assemble_ws(argv)
     # hello.engines 的清单顺序即装配顺序（3.4：壳以最后一份 hello 为准）
     engine_states: list[EngineState] = [
