@@ -9,17 +9,17 @@
 
 | 范围                | 开发完成度        | 剩余开发（单人，中值）   |
 | ----------------- | ------------ | ------------- |
-| **阶段 0：垂直切片**     | **约 75%**   | **约 1–1.5 周** |
-| **MVP：阶段 0–1**    | **约 50%**   | **约 4.5 周**   |
-| **全路线：阶段 -1 → 3** | **约 27%**   | **约 9 周**     |
+| **阶段 0：垂直切片**     | **约 82%**   | **约 0.5–1 周** |
+| **MVP：阶段 0–1**    | **约 54%**   | **约 4 周**     |
+| **全路线：阶段 -1 → 3** | **约 30%**   | **约 8.5 周**   |
 
 口径说明：
 
 - 分母取母文档排期中点：阶段 -1（1 周）+ 阶段 0（3.5 周）+ 阶段 1（2.5 周）+ 阶段 2（2.5 周）+ 阶段 3（3.5 周）≈ **13 周**。
-- **2026-10-23 追加**：持久化运行层（§3.4）、分句纯函数（§3.5）、克隆闭环（§3.6）落地。阶段 0 由 50–55% → 约 75%，剩余约 1–1.5 周 = 三跳打断 ≈0.5 周 + 联调/真机验收 ≈0.5–1 周。阶段 0 的**功能面已齐**，剩下的是打断协议与真机验收，不再是「还没写」。
-- 已完成开发量 ≈ 3 周（阶段 -1 的 1 周 + 阶段 0 前两周）；3 / 13 ≈ 23%，故全路线取 20–25%。
-- 阶段 0 单独看：前两周已代码闭环（按 3.5 周排期约 57%）；但剩余包含克隆、持久化、打断、联调，实际密度高于排期，故完成度取 50–55%，剩余按 2.5–3 周估算。
-- 剩余工作量**不是线性的**：克隆闭环（含持久化）、三跳打断、联调三块比排期更密，这是完成度回落到 50–55% 的原因。
+- **2026-10-23 追加**：持久化运行层（§3.4）、分句纯函数（§3.5）、克隆闭环（§3.6）、三跳打断（§3.7）落地。阶段 0 由 50–55% → 75% → 约 82%，剩余约 0.5–1 周 = 克隆真路 ≈0.5 周 + 联调/真机验收 ≈0.5 周。阶段 0 的**功能面已全部写完**，剩下的是真路接线与真机验收，不再是「还没写」。
+- 已完成开发量 ≈ 3.9 周（阶段 -1 的 1 周 + 阶段 0 前三周多）；3.9 / 13 ≈ 30%。
+- 阶段 0 单独看：前两周已代码闭环（按 3.5 周排期约 57%）；克隆、持久化、三跳打断三块单体密度均高于排期，故完成度取 82%，剩余按 0.5–1 周估算。
+
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -31,7 +31,7 @@
 | 3  | 阶段 0 第一周：壳 + sidecar 骨架 + 文本链 + 采集 + ADR-009/011 输入 | ✅ 完成                        |
 | 4  | 阶段 0 第二周：ASR + TTS + WS 麦克风→扬声器 + 分级预热 + 3.5 状态机    | ✅ 代码完成（真机验收未做）              |
 | 5  | 阶段 0 第三周：克隆闭环（`clone_progress` + 状态机 + 错误码 + 换音色）   | ✅ 代码完成（真机克隆未验收，见 3.6） |
-| 6  | 阶段 0 第四周：三跳打断 + 延迟校准（ADR-012）+ 7 条验收                | ⚠️ 部分（状态机/预热已提前；打断/校准/验收未做） |
+| 6  | 阶段 0 第四周：三跳打断 + 延迟校准（ADR-012）+ 7 条验收                | ⚠️ 部分（三跳打断已完成；校准/验收未做） |
 
 ## 3. 已完成
 
@@ -121,17 +121,38 @@
 
 **未做**：`cosyvoice2.clone` 仍是软链占位（zero-shot 真路要上机验证嵌入产出的格式与耗时）；真机录音的样本电平阈值需按实际麦克风校准。
 
+### 3.7 三跳打断（2026-10-23 落地，阶段 0 最后一块功能）
+
+代码位置：`sidecar/echoes_sidecar/core/cancel.py`（取消原语）、`orchestration/turn.py`（turn 任务槽）、`main.py`（接线）、壳侧 `audio.rs`（播放缓冲）/`ws_audio.rs`（下行闸门）/`lib.rs`（两条 control 命令）/`App.vue`（busy 期放开 PTT）。
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| turn 改为后台任务（stdio 主循环得以继续读 `control`） | ✅ | `TurnRunner`；打断消息不再排在 turn 之后 |
+| 协作式取消（不强杀异步生成器） | ✅ | `CancelToken` + `TurnCancelled`；`turn_complete` 一定写得出去 |
+| 取消可插队到 pending 取项（≤150ms 预算） | ✅ | `core/cancel.py::pull`（令牌与 `__anext__` 竞速）；`test_pull_preempts_pending_anext` |
+| 取消后立即停止向 WS 产出音频 | ✅ | `_run_turn` 的 TTS 循环按 `pull` 收束；`test_turn_cancelled_mid_tts_...` 断言只出 1 帧 |
+| `turn_complete(status=CANCELLED)` + 恒回 `ready` | ✅ | 收尾统一走 `finally`（异常也不会把 UI 锁在 generating） |
+| `interrupt` / `cancel_turn` 两动词 | ✅ | sidecar 侧同义（都收束为 CANCELLED），差异在壳：是否立即开采集（3.4 定案） |
+| 壳侧打断首跳（≤100ms 静音） | ✅ | `interrupt_turn`：关闸门 → 清播放缓冲 → 发 `control`；不等 sidecar 确认 |
+| 丢弃打断前已在管道里的旧帧 | ✅ | `OutputGate`（timings 之外的第二个"在途"口径）；`turn_complete`/`state(ready\|generating)` 开门 + 超时自释放 |
+| 壳侧在途缓冲上限 600ms + 背压丢弃 | ✅ | `audio.rs`：自持 `VecDeque<f32>` + `MAX_BUFFERED_SAMPLES=14400`；满则等 250ms 再丢帧并记 warn |
+| busy 期放开 PTT（真 barge-in） | ✅ | `pttEnabled` 覆盖 generating/speaking；按下即 `interrupt_turn` |
+| 文本输入打断（3.5 动作矩阵） | ✅ | `runner.start()` 内先打断旧 turn；`App.vue::send` 在 busy 时先发 interrupt |
+| 停止播放按钮 | ✅ | `cancel_turn` 命令 + `App.vue` 停止按钮；被打断气泡标「已打断」 |
+| mock 时延注入（13.3 打断基准前置） | ✅ | `MockLLMProvider` 读 `ECHOES_MOCK_CHUNK_DELAY_MS`（默认 0） |
+
+验证：pytest 由 167 → **182 passed**（新增三跳 15 例）；`cargo test` 由 14 → **20 passed**（新增闸门丢弃、缓冲上限/背压、真进程 `interrupt_cancels_in_flight_turn`、空闲 `control` 忽略）；`npm run build` 通过；ruff/mypy(33 files)/lint-imports(2 contracts) 全绿。
+
+**诚实边界**：sidecar 侧的"出队缓冲 300ms"以**拉取式消费**满足（TTS→WS 之间没有中间队列，`send_audio` 的 await 即节流，无缓冲故无溢出）；壳侧 600ms 是硬上限，单帧若超过上限仍整帧接收（帧是原子的，截半帧比短暂超限更糟），实际是「600ms + 至多一帧」。
+
 ## 4. 未完成
 
-### 4.1 阶段 0 收尾（约 1–1.5 周）
+### 4.1 阶段 0 收尾（约 0.5–1 周）
 
-1. **三跳打断（约 0.5 周）**  
-   已做：PTT 按下 flush 本地播放（第一跳）；`ControlMsg` 契约在（`interrupt` / `cancel_turn`），sidecar 侧仍是 print 占位。  
-   未做：sidecar 取消在途 turn、`turn_complete(status=CANCELLED)`、LLM/TTS 取消、壳侧按 seq 丢弃在途音频、两侧缓冲上限（600/300ms）、busy 期放开 PTT。
-2. **克隆真路接线（约 0.5 周，需上机）**  
+1. **克隆真路接线（约 0.5 周，需上机）**  
    `cosyvoice2.clone` 目前仍抛 `NotImplementedError`；zero-shot 路线的嵌入产出格式/耗时、真机样本电平阈值（`MIN_RMS_DBFS` / 削波比）都要按实际麦克风校准。
-3. **联调与真机验收（约 0.5 周）**  
-   真机链路（麦克风权限、whisper 真实转写、扬声器可听性）、延迟预算实测（ADR-012）、阶段 0 七条验收逐条过。
+2. **联调与真机验收（约 0.5 周）**  
+   真机链路（麦克风权限、whisper 真实转写、扬声器可听性）、延迟预算实测（ADR-012）、阶段 0 七条验收逐条过；三跳的 100/50/150ms 三跳分摊需在真机上量一次（当前只有「打断早于引擎吐完」的定性断言）。
 
 ### 4.2 阶段 1：记忆与人设（2–3 周）
 
@@ -153,11 +174,13 @@
 
 ### 4.5 技术债（2026-10-23 审计发现，不阻塞但会在阶段 1 反噬）
 
-- **编排层被绕过**：`orchestration/graph.py::run_turn` 与 `session/manager.py::serialize_turn` 仍是 `NotImplementedError` 且全仓无调用方；真实 turn 逻辑在 `main.py::_run_turn` + `turn_lock`。母文档 §10 要求「retrieve→prompt→generate 三节点收敛进 graph.py」、§5.2 要求上下文预算/裁剪在编排层——阶段 1 接记忆检索前必须先收口，否则会出现第二套 turn 逻辑。
+- **编排层被绕过**：`orchestration/graph.py::run_turn` 与 `session/manager.py::serialize_turn` 仍是 `NotImplementedError` 且全仓无调用方；真实 turn 逻辑在 `main.py::_run_turn` + `orchestration/turn.py::TurnRunner`。母文档 §10 要求「retrieve→prompt→generate 三节点收敛进 graph.py」、§5.2 要求上下文预算/裁剪在编排层——阶段 1 接记忆检索前必须先收口，否则会出现第二套 turn 逻辑。
 - **IPC TS 类型层缺失**：`src/lib/ipc.ts` / `ipc_types.ts` 不存在，`.github/workflows/schema-drift.yml` 仍是 `echo` 占位；前端直接 `invoke` + `listen("sidecar://event")`，协议改动无漂移守护（13.2-1）。
 - **CI 不覆盖真引擎**：`build-sidecar.yml` 只装 pydantic/websockets/pytest 等骨架依赖，`torch` / `faster-whisper` / `cosyvoice` 零覆盖。
 - **TTS 分句**：`split_sentences` 纯函数已落地（3.5）并有 L1 覆盖，但**尚未接入引擎**——TTFA 收益需真机实测，接线前不要宣称延迟改善。
 - **多实例共享一个数据库**：迁移已做「竞争重试 + user_version 复核」（6 进程并发首启实测全通过），但两个 sidecar 同时跑仍会共享同一 session 行；14.1 预设单实例，未做实例锁。
+- **打断的宽限与自释放**（3.7 引入的三处兜底，都是"引擎/协议不配合"时的止损，不是正常路径）：① `TurnRunner` 置令牌后等 2s，超时即让旧 turn 跑完（引擎卡在模型里时）；② 壳侧下行闸门关超 1.5s 自动放行（打断时 sidecar 已无在途 turn，就不会有 `turn_complete` 来开门）；③ ASR 在途不可打断（whisper 是阻塞 CPU 调用），只保证 turn 侧可打断。
+- **PTT 音频在 turn 期间靠 control 打断**：`_asr_loop` 等 turn 结束才回到 `next_utterance`，所以「turn 中途的 PTT」完全依赖壳侧按下即发 `control(interrupt)`；若哪天壳不发这条消息，音频只会堆在队列里等 turn 结束（阶段 1 做 VAD/免提时需要重看这条假设）。
 
 ## 5. 风险与已知边界（验收暂缓，风险不会自动消失）
 
@@ -165,19 +188,18 @@
 - **延迟预算**：CosyVoice2 实测 TTFA 3.7s / RTF 1.33（`a5ccc75`），另一次 6.7s / 2.09（R20，含 wetext 探测）。验收预算为端到端 P50 ≤2.5s / P95 ≤4s，存在明显差距，可能需要流式 / 分句 / 预热优化或 ADR-012 校准。
 - **8G 档显存冲突**：qwen3:8b ≈5.5GB + TTS ≈3.8GB；ADR-001 需按三跳实测复核。
 - **克隆路线**：闭环代码已通（3.6）但 `cosyvoice2.clone` 仍是占位，真机 zero-shot 质量与耗时未验证；相似度质检（`CLONE_QUALITY_LOW`）按计划推迟到阶段 2。
-- **打断**：当前 busy / 非 ready 时 PTT 禁用，不具备真正 barge-in；三跳只完成第一跳。
+- **打断**：三跳已落地（3.7），busy 期 PTT 可按下即打断；但 100/50/150ms 分摊只在 mock 下定性验证过，真机数字要等 ADR-012 的延迟实测一起量。
 - **持久化**：运行层已落地（3.4）；未做的是 `memory_vec`（待 sqlite-vec）与记忆抽取/检索（阶段 1）。
 - **打包**：ADR-011 未定稿；干净机安装、体积、下载流程未验证。
 - **平台**：当前 dev 形态绑定 Windows + 仓库内 `.venv`；跨平台打包未开始。
 
 ## 6. 下一步（建议顺序）
 
-1. **三跳打断**（sidecar cancel + 壳侧按 seq 丢弃 + `CANCELLED` 断言）——阶段 0 最后一块功能，协议面已齐，属填空。
-2. **真机延迟基线**（whisper + CosyVoice2 + ollama 真路，四段耗时写进 ADR-012）+ `split_sentences` 接入引擎：同时清掉「真机未验证」与「TTFA 超预算」两个 🔴。
-3. **克隆真路**：`cosyvoice2.clone` 接 zero-shot 嵌入，真机校准样本阈值。
-4. 阶段 0 七条验收逐条过 + 四闸 / `cargo test` / `npm run build` 回归。
-5. 编排层收敛到 `graph.py`（4.5），再接阶段 1 记忆与人设。
-6. IPC TS 类型层 + schema-drift CI 真接（4.5），避免阶段 1 改协议时无守护。
+1. **真机延迟基线**（whisper + CosyVoice2 + ollama 真路，四段耗时写进 ADR-012）+ `split_sentences` 接入引擎：同时清掉「真机未验证」「TTFA 超预算」「三跳分摊未实测」三个 🔴。
+2. **克隆真路**：`cosyvoice2.clone` 接 zero-shot 嵌入，真机校准样本阈值。
+3. 阶段 0 七条验收逐条过 + 四闸 / `cargo test` / `npm run build` 回归。
+4. 编排层收敛到 `graph.py`（4.5），再接阶段 1 记忆与人设。
+5. IPC TS 类型层 + schema-drift CI 真接（4.5），避免阶段 1 改协议时无守护。
 
 ## 7. 关键提交（近端）
 
