@@ -14,7 +14,7 @@ import argparse
 import asyncio
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Literal, Protocol
 
 from echoes_sidecar import __version__
@@ -271,6 +271,34 @@ class _Warmable(Protocol):
     async def warmup(self) -> None: ...
 
 
+def _try_preload(name: str, preload: Callable[[], None]) -> None:
+    """预热失败只记 stderr 不中断服务（预热是优化面；warmup 的报错不降级链保底）。"""
+    try:
+        preload()
+    except Exception as exc:  # noqa: BLE001  warmup 路径将复现同一缺件/死锁类问题
+        print(
+            f"[sidecar] {name} 主线程预热失败（warmup 路径将复现）: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _preload_runtime(tts_engine: TTSEngine, asr_engine: ASREngine) -> None:
+    """主线程预热真路引擎的重型 C 依赖（3.2 执行约束细则；Windows 死锁规避，R20）。
+
+    R20 实证：非主线程首次初始化 OpenBLAS 家族扩展（numpy/scipy）可在
+    LoadLibrary 的 loader lock 下死锁（spawn+PIPE 形态 100% 复现）。预热必须
+    发生在 gate 任务创建之前（见 serve），使 warmup 的 worker 只做权重物化。
+    mock 引擎无此面，零成本。
+    """
+    if isinstance(tts_engine, CosyVoice2TtsEngine):
+        print("[sidecar] 主线程预热 CosyVoice2 依赖链（R20）", file=sys.stderr)
+        _try_preload("tts", tts_engine.preload)
+    if isinstance(asr_engine, WhisperASREngine):
+        print("[sidecar] 主线程预热 whisper 依赖链（R20）", file=sys.stderr)
+        _try_preload("asr", asr_engine.preload)
+
+
+
 async def _gate_engine_ready(
     transport: Transport,
     machine: StateMachine,
@@ -348,6 +376,9 @@ async def serve(argv: Sequence[str] | None = None) -> None:
     else:
         print("[sidecar] 必需引擎(asr/llm)未就绪：停在 booting（3.5）", file=sys.stderr)
     await transport.send(_state_payload(machine, None, _now_ms(t0)))
+    # 3.2 执行约束细则（R20）：主线程预热重型 C 依赖——首发 hello/booting/ready
+    # 已写出（UI 有反馈），且必须早于 gate 任务（worker 线程不得触发首 import）。
+    _preload_runtime(tts_engine, asr_engine)
     if isinstance(asr_engine, WhisperASREngine):
         asyncio.create_task(
             _gate_engine_ready(

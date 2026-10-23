@@ -41,6 +41,15 @@ class WhisperASREngine(ASREngine):
         if self._model is None:
             await asyncio.to_thread(self._load_model)
 
+    def preload(self) -> None:
+        """主线程预载（同 CosyVoice2TtsEngine.preload：Windows loader-lock 死锁规避，R20）。
+
+        只 import faster-whisper/ctranslate2 全链与 numpy（OpenBLAS 初始化留
+        主线程）；模型权重仍归 warmup 分级就绪（3.4 v1.4），幂等。
+        """
+        import numpy  # noqa: F401  主线程完成 OpenBLAS 初始化
+        from faster_whisper import WhisperModel  # noqa: F401  ctranslate2 全链
+
     def _load_model(self) -> None:
         import os
 

@@ -200,6 +200,26 @@ class CosyVoice2TtsEngine(TTSEngine):
         finally:
             logging.getLogger().setLevel(prev_level)
 
+    def preload(self) -> None:
+        """主线程预载重型 C 依赖（3.2 执行约束细则；Windows loader-lock 死锁规避）。
+
+        R20 实证：非主线程首次初始化 OpenBLAS 家族扩展（numpy/scipy）可在
+        LoadLibrary 的 loader lock 下死锁（spawn+PIPE 形态 100% 复现，
+        直跑形态不复现）。组合根在首发 hello 后、gate 任务启动前于主线程
+        调本方法：完成全部首次 import + CUDA context 建立；warmup 的 worker
+        线程只做权重物化（torch.load），不再触发 C 扩展初始化。
+        只热 import 面，不加载权重（权重仍归 warmup 分级就绪，3.4 v1.4）；幂等。
+        """
+        _ensure_vendor_boot()  # torch import + DLL 注入（主线程，幂等）
+        import numpy  # noqa: F401  主线程完成 OpenBLAS 初始化
+        import scipy  # noqa: F401  scipy 自带 OpenBLAS 副本，同风险面
+        import torch
+        import wetext  # noqa: F401  vendored frontend 文本面（kaldifst）
+        from cosyvoice.cli.cosyvoice import CosyVoice2  # noqa: F401  vendored 全链
+
+        if torch.cuda.is_available():
+            torch.zeros(1, device="cuda")  # 建 CUDA context（worker 只复用不初始化）
+
     def _resolve_voice(self, voice_id: str) -> tuple[str, Path]:
         """voice_id → zero-shot prompt（prompt_text, prompt_wav）；未知/缺失报错不降级。"""
         if voice_id != BUILTIN_DEFAULT_VOICE:

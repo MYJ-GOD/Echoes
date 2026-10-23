@@ -81,7 +81,7 @@ files = [
 
 # 第三方无 py.typed 的 ML 库（15.1 锚定 SDK：接口签名在 base.py 契约层自持）
 [[tool.mypy.overrides]]
-module = ["faster_whisper.*", "cosyvoice.*", "wetext.*", "torch", "torch.*"]
+module = ["faster_whisper.*", "cosyvoice.*", "wetext.*", "scipy.*", "torch", "torch.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
