@@ -24,6 +24,7 @@ if str(_SIDECAR_ROOT) not in sys.path:  # 脚本直跑：把 sidecar/ 放进 imp
 from echoes_sidecar.memory.eval import (  # noqa: E402
     DEFAULT_CASES,
     EvalReport,
+    LLMPairJudge,
     evaluate,
     gate_failures,
     load_cases,
@@ -58,9 +59,12 @@ class ScriptedLLM:
         yield "[]"
 
 
-def _print_report(report: EvalReport, failures: list[str], *, provider: str) -> None:
+def _print_report(
+    report: EvalReport, failures: list[str], *, provider: str, judge: str
+) -> None:
     print("记忆抽取评测（13.3）")
     print(f"  provider : {provider}")
+    print(f"  judge    : {judge}")
     print(f"  cases    : {len(report.cases)}")
     print(f"  precision: {report.precision:.3f}  (TP={report.tp} FP={report.fp})")
     print(f"  recall   : {report.recall:.3f}  (FN={report.fn})")
@@ -115,16 +119,31 @@ async def _run(args: argparse.Namespace) -> int:
 
         llm = OllamaLLMProvider(model=args.model, think=False)
 
+    judge_mode = args.judge
+    if judge_mode == "auto":
+        judge_mode = "llm" if args.provider == "ollama" else "string"
+    judge_llm = None
+    judge = None
+    if judge_mode == "llm":
+        from echoes_sidecar.engines.llm.ollama import OllamaLLMProvider
+
+        judge_llm = OllamaLLMProvider(model=args.judge_model, think=False)
+        judge = LLMPairJudge(judge_llm)
+
     extractor = MemoryExtractor(llm, privacy_mode=True)  # type: ignore[arg-type]
     try:
-        report = await evaluate(extractor, cases)
+        report = await evaluate(extractor, cases, judge=judge)
     finally:
-        aclose = getattr(llm, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        for client in (llm, judge_llm):
+            if client is None:
+                continue
+            aclose = getattr(client, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     failures = gate_failures(report)
-    _print_report(report, failures, provider=args.provider)
+    judge_label = "string" if judge is None else f"llm:{args.judge_model}"
+    _print_report(report, failures, provider=args.provider, judge=judge_label)
     return 0 if not failures else 1
 
 
@@ -132,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="13.3 记忆抽取评测门禁")
     parser.add_argument("--provider", choices=["scripted", "ollama"], default="scripted")
     parser.add_argument("--model", default="qwen3:8b")
+    parser.add_argument("--judge", choices=["auto", "string", "llm"], default="auto")
+    parser.add_argument("--judge-model", default="qwen2.5:7b-instruct")
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES)
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 条（调试用）")
     args = parser.parse_args(argv)

@@ -40,11 +40,21 @@ _SYSTEM_PROMPT = (
     "   identity（身份/背景/关系）、other（其他稳定事实）。\n"
     "3. 忽略：临时情绪或身体状态（如“今天好累”）、提问、假设（如“如果…”）、\n"
     "   玩笑、对助手的要求、一次性的当下动作。\n"
-    "4. 每条事实用第三人称、简短陈述（不超过 30 字），不补充原文没有的信息。\n"
-    "5. 不抽取敏感信息：密码、验证码、证件号、银行卡、精确住址、健康诊断、电话号码。\n"
-    "6. 若新事实与「已知事实」中某条矛盾或更新了它，把那条的 id 填进 replaces；\n"
-    "   否则 replaces 为 null。只能引用已知事实里的 id。\n"
-    "7. 没有可抽取的事实时输出 []。\n"
+    "4. 每条事实用第三人称、只保留核心事实（不超过 20 字）；不要添加原文没有的时间、程度、细节。\n"
+    "5. 一句话包含多个独立事实时，分别列出，不要合并。\n"
+    "6. 不抽取敏感信息：密码、验证码、证件号、银行卡、精确住址、健康诊断、电话号码。\n"
+    "7. 更新：若用户说“改了/现在/不再/搬到”等，只输出更新后的事实，\n"
+    "   不要把已知旧事实原样再列一遍；把旧事实 id 填进新事实的 replaces。\n"
+    "8. 没有可抽取的事实时输出 []。\n"
+    "\n"
+    "示例：\n"
+    "已知：[f1] 用户下周三去上海出差\n"
+    "用户：出差改到周五了\n"
+    '输出：[{"fact":"用户下周五去上海出差","category":"event","replaces":"f1"}]\n'
+    "已知：[]\n"
+    "用户：我最近在减肥，晚上不吃主食。\n"
+    '输出：[{"fact":"用户最近在减肥","category":"preference"},'
+    '{"fact":"用户晚上不吃主食","category":"preference"}]\n'
     "\n"
     "只输出严格 JSON 数组，不要 markdown 代码块，不要解释：\n"
     '[{"fact":"...","category":"preference","replaces":null}]\n'
@@ -122,7 +132,7 @@ class MemoryExtractor:
         active = await self._resolve_active(profile_id, active_facts)
         active_ids = {item["id"] for item in active}
         messages = _build_messages(active, text)
-        raw = await _collect(self._llm.generate(messages, stream=False, temperature=0.0))
+        raw = await collect_text(self._llm.generate(messages, stream=False, temperature=0.0))
         facts = _parse(raw, active_ids)
         return facts[:MAX_FACTS_PER_TURN]
 
@@ -194,7 +204,7 @@ class MemoryExtractor:
         return result
 
 
-async def _collect(stream: AsyncIterator[str]) -> str:
+async def collect_text(stream: AsyncIterator[str]) -> str:
     """把 provider 的 AsyncIterator 收成全量文本（4.4：非流式仍按 iterator 契约）。"""
     parts: list[str] = []
     async for piece in stream:
@@ -311,4 +321,5 @@ __all__ = [
     "ExtractedFact",
     "FactLLM",
     "MemoryExtractor",
+    "collect_text",
 ]

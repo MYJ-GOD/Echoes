@@ -91,6 +91,37 @@ class BoomExtractor:
         raise RuntimeError("模型吐了非 JSON")
 
 
+class FixedExtractor:
+    def __init__(self, facts: list[ExtractedFact]) -> None:
+        self._facts = facts
+
+    async def extract(
+        self,
+        profile_id: str,
+        transcript: str,
+        *,
+        active_facts: Sequence[Any] | None = None,
+    ) -> list[ExtractedFact]:
+        _ = (profile_id, transcript, active_facts)
+        return list(self._facts)
+
+
+class FakeJudge:
+    def __init__(self, mapping: dict[tuple[str, str], bool]) -> None:
+        self._mapping = mapping
+        self.calls = 0
+
+    async def equivalent(self, expected: str, predicted: str) -> bool:
+        self.calls += 1
+        return self._mapping.get((expected, predicted), False)
+
+
+class BoomJudge:
+    async def equivalent(self, expected: str, predicted: str) -> bool:
+        _ = (expected, predicted)
+        raise RuntimeError("judge down")
+
+
 def test_default_fixture_has_50_cases_and_all_categories() -> None:
     cases = load_cases()
     assert len(cases) >= 50
@@ -157,7 +188,7 @@ async def test_extractor_error_is_recorded_and_fails_gate() -> None:
     failures = gate_failures(report)
 
     assert report.errors
-    assert any("抽取错误" in item for item in failures)
+    assert any("抽取/判定错误" in item for item in failures)
 
 
 async def test_gate_requires_replacement_coverage() -> None:
@@ -173,3 +204,60 @@ async def test_gate_requires_replacement_coverage() -> None:
 
     assert report.replacement_total == 0
     assert any("替代用例" in item for item in gate_failures(report))
+
+
+async def test_llm_judge_matches_paraphrase_and_ignores_category() -> None:
+    """真实模型的正确转述（更详细/类别不同）不应被字符串相似度误杀。"""
+    cases = [
+        {
+            "id": "para",
+            "transcript": "用户：我每天早上都要喝一杯手冲咖啡。",
+            "active": [],
+            "expected": [{"fact": "用户喜欢喝手冲咖啡", "category": "preference"}],
+        }
+    ]
+    extractor = FixedExtractor(
+        [ExtractedFact("用户每天早上喝一杯手冲咖啡", "event")]
+    )
+    judge = FakeJudge({("用户喜欢喝手冲咖啡", "用户每天早上喝一杯手冲咖啡"): True})
+
+    report = await evaluate(extractor, cases, judge=judge)
+
+    assert report.precision == 1.0
+    assert report.recall == 1.0
+    assert judge.calls == 1
+
+
+async def test_llm_judge_rejects_different_entity() -> None:
+    cases = [
+        {
+            "id": "wrong-entity",
+            "transcript": "用户：我喜欢狗。",
+            "active": [],
+            "expected": [{"fact": "用户喜欢猫", "category": "preference"}],
+        }
+    ]
+    extractor = FixedExtractor([ExtractedFact("用户喜欢狗", "preference")])
+    judge = FakeJudge({("用户喜欢猫", "用户喜欢狗"): False})
+
+    report = await evaluate(extractor, cases, judge=judge)
+
+    assert report.recall == 0.0
+    assert report.precision == 0.0
+
+
+async def test_judge_error_is_recorded_and_fails_gate() -> None:
+    cases = [
+        {
+            "id": "judge-boom",
+            "transcript": "用户：我喜欢猫。",
+            "active": [],
+            "expected": [{"fact": "用户喜欢猫", "category": "preference"}],
+        }
+    ]
+    extractor = FixedExtractor([ExtractedFact("用户喜欢猫", "preference")])
+
+    report = await evaluate(extractor, cases, judge=BoomJudge())
+
+    assert report.errors
+    assert any("判定错误" in item for item in gate_failures(report))
