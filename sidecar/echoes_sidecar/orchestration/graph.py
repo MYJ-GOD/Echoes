@@ -18,8 +18,8 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Literal
 
@@ -29,12 +29,14 @@ from echoes_sidecar.core.state_machine import AppState, StateMachine
 from echoes_sidecar.core.types import AudioChunk
 from echoes_sidecar.db import Storage
 from echoes_sidecar.engines.llm.base import LLMProvider
+from echoes_sidecar.engines.llm.router import ProviderRouter
 from echoes_sidecar.engines.tts.base import TTSEngine
 from echoes_sidecar.ipc import AssistantTextMsg, ErrorMsg, StateMsg, Timings, TurnCompleteMsg
 from echoes_sidecar.memory.extractor import MemoryExtractor
 from echoes_sidecar.memory.store import MemoryStore
 from echoes_sidecar.orchestration.text_clean import clean_for_tts
 from echoes_sidecar.session.manager import SessionManager
+from echoes_sidecar.session.runtime import RuntimeSettings
 from echoes_sidecar.session.session import Session
 from echoes_sidecar.session.summary import SessionSummarizer, SummaryState, SummaryTurn
 from echoes_sidecar.transport.base import AudioEgress, Transport
@@ -72,6 +74,7 @@ class TurnDeps:
     memory: MemoryStore | None = None  # 5.2：turn 前检索相关事实
     extractor: MemoryExtractor | None = None  # 5.2：turn 后异步抽取
     summarizer: SessionSummarizer | None = None  # 5.2：每 10 轮/30 分钟的滚动摘要
+    settings_loader: Callable[[], RuntimeSettings] | None = None  # 3.4：每 turn 拉取
 
 
 @dataclass(frozen=True)
@@ -156,6 +159,7 @@ class TurnGraph:
         await self._emit_state(session)
 
         try:
+            await self._apply_runtime_settings(session)
             messages = await self._compose_messages(session, text)
             reply = await self._generate(session, messages, progress, token)
             self._machine.transition(AppState.SPEAKING)
@@ -235,6 +239,35 @@ class TurnGraph:
         messages.append({"role": "user", "content": user_text})
         self._fit_budget(messages)
         return messages
+
+    async def _apply_runtime_settings(self, session: Session) -> None:
+        """3.4 拉取语义：每 turn 开始前应用 provider/model 与人设覆盖。"""
+        loader = self._deps.settings_loader
+        if loader is None:
+            return
+        try:
+            settings = loader()
+        except Exception as exc:  # noqa: BLE001  设置读取失败不阻断对话
+            print(f"[sidecar] 运行期设置读取失败（沿用当前值）: {exc}", file=sys.stderr)
+            return
+
+        router = self._deps.llm
+        if isinstance(router, ProviderRouter):
+            try:
+                await router.apply(provider=settings.provider, model=settings.model)
+            except Exception as exc:  # noqa: BLE001  provider 构造失败保持旧实例
+                print(
+                    f"[sidecar] LLM provider 切换失败（沿用旧实例）: {exc}",
+                    file=sys.stderr,
+                )
+
+        if settings.persona_name and settings.persona_system_prompt:
+            session.persona = replace(
+                session.persona,
+                name=settings.persona_name,
+                system_prompt=settings.persona_system_prompt,
+                updated_at=time.time(),
+            )
 
     def _current_summary(self, session: Session) -> str:
         """取当前摘要（首轮从 DB 懒加载；读失败按无摘要处理）。"""

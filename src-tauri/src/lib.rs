@@ -7,6 +7,7 @@
 
 mod audio;
 mod capture;
+mod profile;
 mod sidecar;
 mod ws_audio;
 
@@ -109,6 +110,27 @@ fn ptt_stop(state: tauri::State<AudioState>) -> Result<(), String> {
         client.send_input(Vec::new(), true);
     }
     Ok(())
+}
+
+/// 人设卡（3.4 拉取语义）：setting 覆盖优先，缺省回落 persona 表。
+#[tauri::command]
+fn get_persona() -> Result<profile::PersonaView, String> {
+    profile::read_persona(&profile::db_path())
+}
+
+#[tauri::command]
+fn save_persona(persona: profile::PersonaView) -> Result<(), String> {
+    profile::write_persona(&profile::db_path(), &persona)
+}
+
+#[tauri::command]
+fn get_settings() -> Result<profile::SettingsView, String> {
+    profile::read_settings(&profile::db_path())
+}
+
+#[tauri::command]
+fn save_settings(settings: profile::SettingsView) -> Result<(), String> {
+    profile::write_settings(&profile::db_path(), &settings)
 }
 
 /// 克隆录音开始：复位重采样器（克隆与播放无关，不动播放缓冲）。
@@ -286,6 +308,10 @@ pub fn run() {
       ptt_start,
       ptt_push,
       ptt_stop,
+      get_persona,
+      save_persona,
+      get_settings,
+      save_settings,
       interrupt_turn,
       cancel_turn,
       clone_record_start,

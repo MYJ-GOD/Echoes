@@ -145,6 +145,20 @@ async def test_privacy_mode_skips_cloud_provider() -> None:
     assert repo.saved == []
 
 
+async def test_mock_provider_never_summarizes() -> None:
+    repo = FakeRepo()
+    llm = FakeLLM(name="mock")
+    summarizer = _summarizer(repo, llm)
+
+    state = await summarizer.update(
+        "s1", [SummaryTurn(1, "你好", "mock 台词")], turn_seq=1, now=2.0
+    )
+
+    assert state is None
+    assert llm.calls == []
+    assert repo.saved == []
+
+
 async def test_empty_summary_is_an_error() -> None:
     repo = FakeRepo()
     summarizer = _summarizer(repo, FakeLLM("   "))

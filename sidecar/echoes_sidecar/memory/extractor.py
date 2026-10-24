@@ -122,6 +122,8 @@ class MemoryExtractor:
         text = transcript.strip()
         if not text:
             return []
+        if self._llm.name == "mock":
+            return []  # mock 台词不是用户事实（防止 --memory on 时写入假记忆）
         if self._privacy_mode and self._llm.name.startswith("cloud"):
             print(
                 "[sidecar] 隐私模式下跳过记忆抽取（4.4/5.2：绝不出网）",

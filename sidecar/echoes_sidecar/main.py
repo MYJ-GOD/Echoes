@@ -32,6 +32,7 @@ from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.llm.ollama import OllamaLLMProvider
 from echoes_sidecar.engines.llm.persona import PERSONA_SYSTEM_PROMPT
+from echoes_sidecar.engines.llm.router import ProviderRouter
 from echoes_sidecar.engines.tts.base import TTSEngine
 from echoes_sidecar.engines.tts.cosyvoice2 import CosyVoice2TtsEngine
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
@@ -54,6 +55,7 @@ from echoes_sidecar.orchestration.clone import CloneService
 from echoes_sidecar.orchestration.graph import TriggerSource, TurnDeps, TurnGraph
 from echoes_sidecar.orchestration.turn import TurnFactory, TurnRunner
 from echoes_sidecar.session.manager import SessionManager
+from echoes_sidecar.session.runtime import load_runtime_settings
 from echoes_sidecar.session.session import Session
 from echoes_sidecar.session.summary import SessionSummarizer
 from echoes_sidecar.transport.base import Transport
@@ -336,19 +338,32 @@ async def _assemble_llm(argv: Sequence[str] | None) -> tuple[LLMProvider, bool]:
     args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
 
     if args.llm == "mock":
-        return MockLLMProvider(), True
-
-    provider = OllamaLLMProvider(
-        model=args.model,
-        think=False if args.no_think else None,
-    )
-    ready = await provider.health()
-    if not ready:
-        print(
-            f"[sidecar] Ollama 不可达（model={args.model}）：llm ready=False（3.5 gate）",
-            file=sys.stderr,
+        initial: LLMProvider = MockLLMProvider()
+        ready = True
+    else:
+        initial = OllamaLLMProvider(
+            model=args.model,
+            think=False if args.no_think else None,
         )
-    return provider, ready
+        ready = await initial.health()
+        if not ready:
+            print(
+                f"[sidecar] Ollama 不可达（model={args.model}）：llm ready=False（3.5 gate）",
+                file=sys.stderr,
+            )
+
+    think = False if args.no_think else None
+
+    def _factory(provider: str, model: str) -> LLMProvider:
+        if provider == "mock":
+            return MockLLMProvider()
+        return OllamaLLMProvider(model=model, think=think)
+
+    # 3.4 拉取语义：设置表可在 turn 边界切 provider，无需重启 sidecar。
+    router = ProviderRouter(
+        initial, _factory, provider=args.llm, model=args.model
+    )
+    return router, ready
 
 
 def _assemble_asr(argv: Sequence[str] | None) -> tuple[ASREngine, bool]:
@@ -628,6 +643,7 @@ async def _serve_with_storage(
             memory=memory_store,
             extractor=memory_extractor,
             summarizer=summarizer,
+            settings_loader=lambda: load_runtime_settings(storage),
         ),
         machine,
         manager=manager,

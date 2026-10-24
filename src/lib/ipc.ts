@@ -100,6 +100,34 @@ export function cloneCancel(): Promise<void> {
   return invoke("clone_cancel");
 }
 
+/** 人设卡（3.4 拉取语义：壳写 SQLite，sidecar 每轮读取）。 */
+export interface PersonaView {
+  name: string;
+  systemPrompt: string;
+}
+
+export interface SettingsView {
+  provider: "mock" | "ollama";
+  model: string;
+  privacyMode: boolean;
+}
+
+export function getPersona(): Promise<PersonaView> {
+  return invoke("get_persona");
+}
+
+export function savePersona(persona: PersonaView): Promise<void> {
+  return invoke("save_persona", { persona });
+}
+
+export function getSettings(): Promise<SettingsView> {
+  return invoke("get_settings");
+}
+
+export function saveSettings(settings: SettingsView): Promise<void> {
+  return invoke("save_settings", { settings });
+}
+
 /**
  * 类型对拍的「反向使用」：这几条断言保证前端构造的控制消息与生成类型一致
  * （壳侧真正发送走命令而非直接写 JSON 行，故只做编译期校验）。

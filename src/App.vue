@@ -48,6 +48,59 @@ const clonePhaseLabel = computed(() => {
   }
 });
 
+// ---- 人设卡 / Settings（3.4 拉取语义：壳写 SQLite，sidecar 每轮读取） ----
+const showSettings = ref(false);
+const personaDraft = ref<ipc.PersonaView>({ name: "", systemPrompt: "" });
+const settingsDraft = ref<ipc.SettingsView>({
+  provider: "ollama",
+  model: "qwen3:8b",
+  privacyMode: true,
+});
+const profileStatus = ref("");
+let profileRetry: number | null = null;
+let profileAttempts = 0;
+
+async function loadProfile(): Promise<void> {
+  try {
+    const [persona, settings] = await Promise.all([
+      ipc.getPersona(),
+      ipc.getSettings(),
+    ]);
+    personaDraft.value = persona;
+    settingsDraft.value = settings;
+    profileStatus.value = "";
+    profileAttempts = 0;
+  } catch (err) {
+    profileAttempts += 1;
+    profileStatus.value =
+      profileAttempts >= 5 ? `⚠ ${String(err)}` : "等待 sidecar 初始化…";
+    if (profileAttempts < 5) {
+      profileRetry = window.setTimeout(() => {
+        profileRetry = null;
+        void loadProfile();
+      }, 1500);
+    }
+  }
+}
+
+async function savePersona(): Promise<void> {
+  try {
+    await ipc.savePersona(personaDraft.value);
+    profileStatus.value = "人设已保存（下一轮对话生效）";
+  } catch (err) {
+    profileStatus.value = `⚠ ${String(err)}`;
+  }
+}
+
+async function saveSettings(): Promise<void> {
+  try {
+    await ipc.saveSettings(settingsDraft.value);
+    profileStatus.value = "设置已保存（下一轮对话生效）";
+  } catch (err) {
+    profileStatus.value = `⚠ ${String(err)}`;
+  }
+}
+
 function protocolDown(code: string, message: string): void {
   engineState.value = "error";
   messages.value.push({ role: "assistant", text: `⚠ ${code}：${message}` });
@@ -57,10 +110,15 @@ onMounted(async () => {
   unlisten = await ipc.onSidecarEvent(handleFrame, (failure) => {
     protocolDown(failure.code, failure.message);
   });
+  void loadProfile();
 });
 
 onUnmounted(() => {
   unlisten?.();
+  if (profileRetry !== null) {
+    window.clearTimeout(profileRetry);
+    profileRetry = null;
+  }
 });
 
 function handleFrame(frame: SidecarMessage): void {
@@ -436,6 +494,7 @@ async function send(): Promise<void> {
     <header>
       <h1>Echoes</h1>
       <span class="status">sidecar 状态：{{ engineState }}</span>
+      <button class="settings-open" @click="showSettings = true">设置</button>
     </header>
 
     <ul class="history">
@@ -506,6 +565,56 @@ async function send(): Promise<void> {
       </button>
       <button class="mic" @click="micProbe">{{ micStatus || "麦克风自检" }}</button>
     </footer>
+
+    <div
+      v-if="showSettings"
+      class="settings-overlay"
+      @click.self="showSettings = false"
+    >
+      <section class="settings-panel">
+        <div class="settings-head">
+          <h2>人设与设置</h2>
+          <button class="link" @click="showSettings = false">关闭</button>
+        </div>
+        <p v-if="profileStatus" class="settings-status">{{ profileStatus }}</p>
+
+        <label>
+          人设名字
+          <input v-model="personaDraft.name" type="text" maxlength="50" />
+        </label>
+        <label>
+          人设提示词
+          <textarea
+            v-model="personaDraft.systemPrompt"
+            rows="6"
+            maxlength="4000"
+          ></textarea>
+        </label>
+        <button @click="savePersona">保存人设</button>
+
+        <hr />
+
+        <label>
+          Provider
+          <select v-model="settingsDraft.provider">
+            <option value="ollama">Ollama（本地）</option>
+            <option value="mock">Mock（无模型）</option>
+          </select>
+        </label>
+        <label>
+          模型
+          <input v-model="settingsDraft.model" type="text" maxlength="100" />
+        </label>
+        <label class="check">
+          <input v-model="settingsDraft.privacyMode" type="checkbox" />
+          隐私模式（本地 provider 始终不出网）
+        </label>
+        <p class="hint">
+          当前仅本地 provider，无需 API key。保存后在下一轮对话生效；人设覆盖默认人设。
+        </p>
+        <button @click="saveSettings">保存设置</button>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -652,5 +761,98 @@ footer .mic {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 人设卡 / Settings（3.4 拉取语义：保存后下一轮生效） */
+.settings-open {
+  margin-left: auto;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 8px;
+  background: #36343b;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+.settings-panel {
+  width: min(520px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid #343038;
+  border-radius: 14px;
+  background: #1e1b23;
+}
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.settings-head h2 {
+  font-size: 16px;
+}
+.settings-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #b9b2c4;
+}
+.settings-panel label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.settings-panel input[type="text"],
+.settings-panel textarea,
+.settings-panel select {
+  padding: 8px 10px;
+  border: 1px solid #343038;
+  border-radius: 8px;
+  background: #141218;
+  color: inherit;
+  font: inherit;
+}
+.settings-panel textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+.settings-panel button {
+  align-self: flex-start;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  background: #6750a4;
+  color: white;
+  cursor: pointer;
+}
+.settings-panel button.link {
+  padding: 0;
+  background: transparent;
+  color: #a79ab8;
+  text-decoration: underline;
+}
+.settings-panel hr {
+  width: 100%;
+  border: none;
+  border-top: 1px solid #2b2831;
+}
+.settings-status,
+.settings-panel .hint {
+  font-size: 12px;
+  color: #8a8494;
+  line-height: 1.5;
 }
 </style>

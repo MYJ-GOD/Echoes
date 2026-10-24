@@ -120,6 +120,8 @@ class SessionSummarizer:
         pending = [turn for turn in turns if turn.turn > up_to]
         if not pending:
             return None
+        if self._llm.name == "mock":
+            return None  # mock 台词不能写成摘要
         if self._privacy_mode and self._llm.name.startswith("cloud"):
             print(
                 "[sidecar] 隐私模式下跳过会话摘要（4.4/5.2：绝不出网）",
