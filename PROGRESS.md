@@ -17,8 +17,8 @@
 
 - 分母取母文档排期中点：阶段 -1（1 周）+ 阶段 0（3.5 周）+ 阶段 1（2.5 周）+ 阶段 2（2.5 周）+ 阶段 3（3.5 周）≈ **13 周**。
 - **2026-10-23 追加**：持久化运行层（§3.4）、分句纯函数（§3.5）、克隆闭环（§3.6）、三跳打断（§3.7）落地。阶段 0 由 50–55% → 75% → 约 82%，剩余约 0.5–1 周 = 克隆真路 ≈0.5 周 + 联调/真机验收 ≈0.5 周。阶段 0 的**功能面已全部写完**，剩下的是真路接线与真机验收，不再是「还没写」。
-- **2026-10-23 第二轮**：编排层收敛（§3.8）、克隆真路 + 分句接线（§3.9）、IPC TS 类型层与漂移守护（§3.10）落地，阶段 0 → **约 92%**。三笔技术债（编排层被绕过 / IPC TS 缺失 / 分句未接线）全部清掉。剩下 8% 不是代码：是真机数字（延迟、三跳毫秒、听感）与断网演练——**本机 `.venv` 无 torch，这部分只能上机**。
-- 已完成开发量 ≈ 4.3 周（阶段 -1 的 1 周 + 阶段 0 近四周）；4.3 / 13 ≈ 32%。
+- **2026-10-23 第二轮**：编排层收敛（§3.8）、克隆真路 + 分句接线（§3.9）、IPC TS 类型层与漂移守护（§3.10）落地，阶段 0 → **约 92%**。三笔技术债（编排层被绕过 / IPC TS 缺失 / 分句未接线）全部清掉。剩下 8% 不是代码：是真机数字（延迟、三跳毫秒、听感）与断网演练——**部署实际使用的 `sidecar/.venv` 实测 torch 2.7.1+cu126 / CUDA 可用**，故 TTS 侧延迟与克隆嵌入耗时本机就能采；仍缺的是 ollama（LLM 侧）与麦克风/播放设备（PTT→asr_final、三跳分摊、听感盲听）。
+- **2026-10-24 实测轮**：真机整链第一次跑通（`bench_latency.py --tts cosyvoice2`），当场暴露两个只在真路才现形的 bug，都已修：① SQLite 连接跨线程（`asyncio.to_thread` 落库 → `check_same_thread` 判死）；② TTS 流式为给末段盖 `is_final` 扣住一个 chunk，把首音频推迟一整段。修后首音频 **4211 → 2727ms**、引擎级 38 字文本 **7.7 → 2.7s**。数字与判定见 [ADR-012 §4.1](docs/decisions/ADR-012-latency-baseline.md)，缺口处置见其 §9（**需产品决策**：预算是否按本地 0.5B 的物理下界校准）。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -120,7 +120,7 @@ TTFA 的收益仍须 ADR-012 实测确认——**接线 ≠ 延迟已改善**，
 验证：pytest 由 123 → **167 passed**（新增克隆 15、分句 12、DB 17）；`cargo test` **14 passed**（新增克隆帧 flags 用例，含真进程 `ptt_audio_end_to_end`）；`npm run build` 通过；ruff/mypy/lint-imports 全绿。
 
 **未做**：真机录音的样本电平阈值需按实际麦克风校准（`MIN_RMS_DBFS` / 削波比）；
-克隆听感与耗时未验（本机无 torch，见 §3.9 的诚实边界）。
+克隆听感与耗时未验（听感要人耳 + 播放设备，见 §3.9 的诚实边界；嵌入耗时可在本机采）。
 
 ### 3.7 三跳打断（2026-10-23 落地，阶段 0 最后一块功能）
 
@@ -177,9 +177,10 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 验证：pytest 由 198 → **211**（引擎 +10、克隆编排 +1）。
 
-**诚实边界**：本机 `.venv` 无 torch，真合成跑不起来。以上全部是「代码 + L2 桩测试」，
-**克隆听感、嵌入耗时、TTFA 收益均未实测**；`test_engines_tts_cosyvoice2.py` 用
-`_FakeVendored` 锁调用面，不证明 vendored 真行为。
+**诚实边界**：`torch 2.7.1+cu126`（CUDA 可用）与 `~/.cache/echoes/models/CosyVoice2-0.5B`
+权重本机就位，真合成能跑；缺的是**听感判据**（要人耳盲听）与**样本电平阈值**（要真麦克风）。
+`test_engines_tts_cosyvoice2.py` 仍用 `_FakeVendored` 锁调用面——它证明「调用姿势对」，
+不证明 vendored 的音质与 RTF；后者归 `scripts/gpu_smoke.py` 与 ADR-012 的口径。
 
 ### 3.10 IPC TS 类型层 + schema-drift 真接（2026-10-23 第二轮，清技术债）
 
@@ -198,26 +199,41 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 | 能力 | 状态 | 证据 |
 | --- | --- | --- |
-| 延迟基线工具（整链四段 P50/P95） | ✅ | `scripts/bench_latency.py`；mock 自检跑通并强制标注「mock 不代表真实延迟」 |
+| 延迟基线工具（整链四段 P50/P95） | ✅ | `scripts/bench_latency.py`；**真机已跑**（`--tts cosyvoice2`，见 §3.12） |
 | 分段口径写死（绝对刻度做差） | ✅ | `ADR-012` §2 + `test_bench_latency.py` 8 例 |
-| 七条验收逐条核对 | ✅ | [docs/acceptance/stage0.md](docs/acceptance/stage0.md)：3 条已证 / 4 条半证（差上机数字） |
+| 七条验收逐条核对 | ✅ | [docs/acceptance/stage0.md](docs/acceptance/stage0.md)：3 条已证 / 3 条半证 / **1 条实测未达标**（验收 2） |
+
+### 3.12 真机实测轮：两个只有真路才现形的 bug（2026-10-24）
+
+| 缺陷 | 症状 | 根因 | 证据 |
+| --- | --- | --- | --- |
+| SQLite 跨线程 | 每轮收尾抛 `SQLite objects created in a thread…`，turn 任务异常退出 | 3.2 要求落库入线程（`asyncio.to_thread`），而连接是主线程建的；单测 storage 是桩，CI 永远绿 | `ThreadSafeConnection`（RLock 串行）+ `check_same_thread=False`；`test_db_connection_threads.py` 5 例 |
+| 流式扣帧 | 首音频要等**第二个** chunk，TTFA = 整段合成时间 | 为「末段带 is_final」扣住一个 chunk（one-chunk lookahead） | 改成「真 chunk 即发 + 零长度 `is_final` 收尾」；引擎级 7.7s→2.7s |
+| （配套）首句短切 | 长回复首句可到 60 字 ≈ 12s 音频 ≈ 12s TTFA | 分句软上限只管「别太长」，没人管「首句要短」 | `split_sentences(first_max_chars=20)`；A/B 实测 -55% TTFA |
+
+验证：pytest 239 → **243**（跨线程 5、短切 4、warmup 闸门 2、末帧语义改 2）；
+`ruff` / `mypy`（34 文件）/ `lint-imports` 全绿。
+报告：`sidecar/scripts/_bench_out/latency_20261024_{105459,110756}.md`（修复前/后）。
 
 ## 4. 未完成
 
-### 4.1 阶段 0 收尾（约 0.5 周，**只剩上机**）
+### 4.1 阶段 0 收尾（**一半已实测，一半卡在设备/决策**）
 
-代码面已全部写完，剩下四件事都必须在有 torch + 音频设备的机器上做（本机 `.venv`
-`import torch` 直接 ModuleNotFoundError）：
+已实测（2026-10-24）：TTS 侧延迟与三级就绪（ADR-012 §4.1）。结论是**不达标**——
+首音频 2727ms（预算 500）、端到端 4705ms（预算 2500）、冷启就绪 36.1s（预算 25s）。
+按 ADR-012 §7.3 不改预算，缺口处置建议在其 §9，**需要产品/母文档决策**。
 
-1. **延迟基线与阈值校准（ADR-012）**：`python scripts/bench_latency.py --turns 10 --real`；
-   四段 P50/P95 填进 ADR-012 §4，按 §7 的规则决定是否一次性 ±20% 校准。
+仍缺的三块是 ollama（LLM 侧整链）与麦克风/播放设备（PTT、三跳、听感）：
+
+1. **延迟基线补齐「输入 → 首 token」段**：起 ollama（11434）→
+   `python scripts/bench_latency.py --turns 10 --real`。
 2. **PTT → `asr_final` ≤600ms**：脚本不覆盖（要真麦克风），人工 + 日志时间戳。
 3. **打断三跳 100/50/150ms**：需真实播放设备；协议侧已由 `cargo test interrupt_*` 与
    `test_cancel_during_*` 定性覆盖。
 4. **克隆听感 + 样本电平阈值**：zero-shot 嵌入耗时与相似度听感未验；
    `MIN_RMS_DBFS` / 削波比要按实际麦克风校准；断网整链演练一并做（验收 6）。
 
-进度逐条见 [docs/acceptance/stage0.md](docs/acceptance/stage0.md)（3 已证 / 4 半证）。
+进度逐条见 [docs/acceptance/stage0.md](docs/acceptance/stage0.md)（3 已证 / 3 半证 / 1 未达标）。
 
 ### 4.2 阶段 1：记忆与人设（2–3 周）
 
@@ -253,9 +269,14 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 ## 5. 风险与已知边界（验收暂缓，风险不会自动消失）
 
 - **真机链路未验证**：麦克风权限 / 48k 采样率、whisper 真实转写、扬声器可听性均未上机；自动化覆盖到 mock / 接口层。
-- **延迟预算**：CosyVoice2 实测 TTFA 3.7s / RTF 1.33（`a5ccc75`），另一次 6.7s / 2.09（R20，含 wetext 探测）。验收预算为端到端 P50 ≤2.5s / P95 ≤4s，存在明显差距。口径与工具已就绪（[ADR-012](docs/decisions/ADR-012-latency-baseline.md) + `bench_latency.py`），§3.9 的音色缓存与逐句合成是候选杠杆，**但都未实测**。
+- **延迟预算（实测已确认不达标）**：整链首音频 P50 **2727ms** / P95 3194ms（预算 500ms）、
+  端到端 P50 **4705ms** / P95 5932ms（预算 2500/4000）；引擎成本形状
+  ≈ 1.4s 固定开销 + 0.65 × 音频秒数（RTF 0.83–1.4）。已做的两个杠杆（流式去扣帧、
+  首句短切 20 字）把 TTFA 从 4211 压到 2727ms，但**结构上仍够不到 500ms**。
+  处置建议见 [ADR-012 §9](docs/decisions/ADR-012-latency-baseline.md)（含「开场语气词
+  预合成」这条唯一能进 500ms 量级的路径），**需产品决策**。
 - **8G 档显存冲突**：qwen3:8b ≈5.5GB + TTS ≈3.8GB；ADR-001 需按三跳实测复核。
-- **克隆路线**：闭环与真路代码均就绪（3.6 / 3.9），但 zero-shot 的**听感与耗时未验证**（本机无 torch）；相似度质检（`CLONE_QUALITY_LOW`）按计划推迟到阶段 2。
+- **克隆路线**：闭环与真路代码均就绪（3.6 / 3.9），zero-shot 的**听感未验证**（要人耳盲听 + 播放设备；嵌入耗时本机可测）；相似度质检（`CLONE_QUALITY_LOW`）按计划推迟到阶段 2。
 - **打断**：三跳已落地（3.7），busy 期 PTT 可按下即打断；但 100/50/150ms 分摊只在 mock 下定性验证过，真机数字要等 ADR-012 的延迟实测一起量。
 - **持久化**：运行层已落地（3.4）；未做的是 `memory_vec`（待 sqlite-vec）与记忆抽取/检索（阶段 1）。
 - **打包**：ADR-011 未定稿；干净机安装、体积、下载流程未验证。
@@ -265,13 +286,15 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 代码面的五件事已全部落地（编排层收敛 → 克隆真路 + 分句 → 验收脚手架 → IPC 类型层）。
 
-**A. 上机（阶段 0 收尾，阻塞在硬件/环境，不在代码）**
+**A. 上机（阶段 0 收尾）**
 
-1. 装 torch（`cd sidecar && uv sync`）→ `python scripts/bench_latency.py --turns 10 --real`；
-   四段 P50/P95 填 ADR-012 §4，按 §7 规则决定校准。
-2. 真麦克风：PTT→`asr_final` ≤600ms；真播放设备：三跳 100/50/150ms 分摊。
-3. 克隆听感盲听 + 样本电平阈值校准；拔网线跑整链（验收 6）。
-4. 每项结果回填 [docs/acceptance/stage0.md](docs/acceptance/stage0.md)，逐条从 ⚠️ 转 ✅/❌。
+1. ~~TTS 侧延迟~~ **已跑**（ADR-012 §4.1）；剩「输入 → 首 token」段：起 ollama（11434）
+   → `python scripts/bench_latency.py --turns 10 --real`。
+2. **待决策**：ADR-012 §9 的预算缺口（首音频 5.5×、端到端 1.9×、冷启 1.44×）。
+   实现侧建议「按实测校准预算 + 把开场语气词预合成排进阶段 2」，需产品拍板。
+3. 真麦克风：PTT→`asr_final` ≤600ms；真播放设备：三跳 100/50/150ms 分摊。
+4. 克隆听感盲听 + 样本电平阈值校准；拔网线跑整链（验收 6）。
+5. 每项结果回填 [docs/acceptance/stage0.md](docs/acceptance/stage0.md)。
 
 **B. 阶段 1（记忆与人设，2–3 周）**
 

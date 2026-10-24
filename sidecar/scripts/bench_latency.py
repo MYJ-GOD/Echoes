@@ -234,6 +234,7 @@ async def run_bench(args: argparse.Namespace) -> int:
     deadline = started + args.timeout
     sent = 0
     finished = 0
+    ready_logged = False
     try:
         while finished < args.turns and time.perf_counter() < deadline:
             await asyncio.sleep(0.2)
@@ -246,8 +247,24 @@ async def run_bench(args: argparse.Namespace) -> int:
                     ready = {str(e["name"]): bool(e["ready"]) for e in raw}
             completes = len([m for m in msgs if m.get("type") == "turn_complete"])
             finished = completes
-            required = ["asr", "llm"] if args.asr != "mock" else ["llm"]
+            # 分级就绪（3.4 v1.4）：真引擎要等 warmup 完成才压——否则首轮撞上
+            # 「权重还没物化」，量到的是一条失败路径，而不是基线。
+            required = [
+                name
+                for name, chosen in (
+                    ("asr", args.asr != "mock"),
+                    ("llm", args.llm != "mock"),
+                    ("tts", args.tts != "mock"),
+                )
+                if chosen
+            ]
             engines_ready = all(ready.get(name) for name in required)
+            if engines_ready and not ready_logged:
+                print(
+                    f"[bench] 引擎就绪（{'+'.join(required) or 'mock'}），"
+                    f"等待 {(time.perf_counter() - started) * 1000:.0f}ms"
+                )
+                ready_logged = True
             if engines_ready and sent < args.turns and sent == completes:
                 assert proc.stdin is not None
                 text = args.text if sent == 0 else f"{args.text}（第 {sent + 1} 轮）"

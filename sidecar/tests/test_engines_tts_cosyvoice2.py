@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import struct
 import sys
+import threading
 import types
 import wave
 from collections.abc import AsyncIterator, Iterator
@@ -176,17 +178,67 @@ async def test_warmup_missing_weights_raises_model_not_loaded(tmp_path: Path) ->
     assert exc_info.value.code == ErrorCode.MODEL_NOT_LOADED
 
 
+async def test_synthesize_waits_for_warmup_in_flight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """warmup 在途 → 合成**等它装完**（冷启动首轮慢，但不报「没就绪」）。
+
+    真机形态：窗口 ~3s 就 ready，CosyVoice2 权重物化要十几秒；用户恰在这段
+    窗口点第一句，硬报 MODEL_NOT_LOADED 等于「点了却说没就绪」。
+    """
+    engine = CosyVoice2TtsEngine(model_dir=tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _slow_load() -> None:
+        entered.set()
+        release.wait(5)
+        engine._engine = _FakeVendored([np.full((1, 2), 0.5, dtype=np.float32)])
+        engine._spk_ids.add(BUILTIN_DEFAULT_VOICE)
+
+    monkeypatch.setattr(engine, "_load_engine", _slow_load)
+    warm = asyncio.create_task(engine.warmup())
+    assert await asyncio.to_thread(entered.wait, 5) is True  # 确认已进到加载里
+
+    turn = asyncio.create_task(_collect(engine, "你好", BUILTIN_DEFAULT_VOICE))
+    await asyncio.sleep(0.05)
+    assert not turn.done(), "warmup 未完成时合成应等待，而不是立刻报错"
+
+    release.set()
+    chunks = await turn
+    await warm
+    assert chunks[-1].is_final is True
+    assert chunks[0].data == struct.pack("<hh", 16383, 16383)
+
+
+async def test_synthesize_after_failed_warmup_raises_real_cause(tmp_path: Path) -> None:
+    """warmup 失败后合成：抛当时那次失败的真因（权重缺失优于笼统「未就绪」）。"""
+    engine = CosyVoice2TtsEngine(model_dir=tmp_path / "CosyVoice2-0.5B")
+    with pytest.raises(EchoesError):
+        await engine.warmup()
+
+    with pytest.raises(EchoesError) as exc_info:
+        await _collect(engine, "你好", BUILTIN_DEFAULT_VOICE)
+    assert exc_info.value.code == ErrorCode.MODEL_NOT_LOADED
+    assert "权重不存在" in exc_info.value.message
+
+
 async def test_synthesize_streams_chunks_with_final() -> None:
-    """两段产出：seq 0（非终结）→ seq 1（带真实 payload、is_final=True）。"""
+    """两段产出 → 两帧真 payload 立刻发出 + 一帧零长度 is_final 收尾。
+
+    **不许扣住末帧盖 is_final**：那会把首音频推迟到下一个 chunk 到达
+    （ADR-012 §4.1 实测首段 3.2s 就好、TTFA 却记成 7.7s）。
+    """
     engine = _stub_engine(
         [np.full((1, 4), 0.5, dtype=np.float32), np.full((1, 2), -0.5, dtype=np.float32)]
     )
     chunks = await _collect(engine, "你好", BUILTIN_DEFAULT_VOICE)
 
-    assert [c.seq for c in chunks] == [0, 1]
-    assert [c.is_final for c in chunks] == [False, True]
+    assert [c.seq for c in chunks] == [0, 1, 2]
+    assert [c.is_final for c in chunks] == [False, False, True]
     assert chunks[0].data == struct.pack("<hhhh", 16383, 16383, 16383, 16383)
     assert chunks[1].data == struct.pack("<hh", -16383, -16383)
+    assert chunks[2].data == b""  # 流尾锚点：零长度（壳侧 push_pcm16 直接 return）
 
     vendored = engine._engine
     assert isinstance(vendored, _FakeVendored)
@@ -237,7 +289,7 @@ async def test_worker_thread_error_bridges_tts_engine_error() -> None:
 
 
 async def test_synthesize_splits_sentences_into_separate_inference_calls() -> None:
-    """4.5：逐句推理（首句先出），chunk 序号跨句连续，只有整段流尾 is_final。"""
+    """4.5：逐句推理（首句先出），chunk 序号跨句连续，流尾由零长度帧收束。"""
     engine = _stub_engine([np.full((1, 2), 0.25, dtype=np.float32)])
     engine._add_spk(
         BUILTIN_DEFAULT_VOICE, BUILTIN_DEFAULT_PROMPT_TEXT, BUILTIN_DEFAULT_PROMPT_WAV
@@ -248,8 +300,8 @@ async def test_synthesize_splits_sentences_into_separate_inference_calls() -> No
     vendored = engine._engine
     assert isinstance(vendored, _FakeVendored)
     assert [c["tts_text"] for c in vendored.calls] == ["第一句。", "第二句！"]
-    assert [c.seq for c in chunks] == [0, 1]
-    assert [c.is_final for c in chunks] == [False, True]
+    assert [c.seq for c in chunks] == [0, 1, 2]
+    assert [c.is_final for c in chunks] == [False, False, True]
 
 
 async def test_synthesize_long_sentence_is_split_by_secondary_pause() -> None:

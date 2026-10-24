@@ -17,7 +17,10 @@
   prompt wav 资产（Windows SAPI Huihui，16k mono PCM16）+ 配对文本，wav 与
   文本严格配对入库；zero-shot 声音克隆的前提是两者一致。
 - 分级就绪（同 whisper，3.4 v1.4）：ready=False 首发 → warmup() 后台加载 →
-  组合根置 ready 重发 hello；未 warmup 即 synthesize = MODEL_NOT_LOADED 报错。
+  组合根置 ready 重发 hello。**未开始 warmup 就合成 = MODEL_NOT_LOADED 报错**；
+  已在进行中则**等它装完**（冷启动首轮慢是诚实的，报错让用户「点了却说没就绪」
+  才是降级）。真机上窗口在 ~3s 就 ready，权重物化要十几秒，这段窗口正是用户
+  最容易点第一句话的时候。
 - **音色一律走 spk2info 缓存**（`add_zero_shot_spk`）：vendored 的
   `frontend_zero_shot` 在 `zero_shot_spk_id == ''` 时会**每次调用**重跑一遍
   campplus 嵌入 + speech tokenizer（百毫秒级）。逐句合成要调 N 次，不缓存就是
@@ -78,6 +81,11 @@ _DEFAULT_VOICES_DIR = Path.home() / ".cache" / "echoes" / "assets" / "voices"
 # 克隆样本口径（与 4.2/3.4 的 PTT/WS 帧一致：16k mono PCM16）
 _CLONE_SAMPLE_RATE = 16_000
 _SAMPLE_WIDTH = 2
+# 首句短切上限（字）：本地 RTF≈1（ADR-012 §4.1 实测：21 字 ≈ 4.2s 音频 ≈ 4.2s 合成），
+# 首音频块要等首句合成完，所以「首句多长」直接决定 TTFA。20 字 ≈ 4s 音频，
+# 是「常见口语首从句」的长度（实测 16 字会错过 18 字处的逗号，等于没切）；
+# 再短就得在没有停顿的地方硬切，韵律会崩——宁可慢，不要机器味。
+_FIRST_SEGMENT_MAX_CHARS = 20
 
 # wetext（vendored frontend 文本正则化依赖）在 modelscope 的快照仓：
 # 运行时一律 local_files_only 零网（R20 实证：联网补拉在匿名限频 403 +
@@ -196,11 +204,23 @@ class CosyVoice2TtsEngine(TTSEngine):
         self._engine: Any | None = None  # vendored CosyVoice2（无 stub，Any 口）
         # 已注册进 vendored spk2info 的音色（= 其特征提取已缓存，合成时无需再算）
         self._spk_ids: set[str] = set()
+        # 分级就绪的闸门：warmup 装完（成功或失败）都置位，_warmup_error 区分结果。
+        self._loaded = asyncio.Event()
+        self._warmup_started = False
+        self._warmup_error: EchoesError | None = None
 
     async def warmup(self) -> None:
         """组合根装配期预热（vendored 引导 + 权重加载在线程内，不阻塞 booting 其余装配）。"""
-        if self._engine is None:
-            await asyncio.to_thread(self._load_engine)
+        self._warmup_started = True
+        try:
+            if self._engine is None:
+                await asyncio.to_thread(self._load_engine)
+        except EchoesError as exc:
+            # 让在途等待者立刻醒来拿到真因（权重缺失/引导失败），而不是无限等
+            self._warmup_error = exc
+            raise
+        finally:
+            self._loaded.set()
 
     def _load_engine(self) -> None:
         # 先查权重再引导 vendored：目录缺失时绝不 import（防 vendored 联网回退，
@@ -253,6 +273,31 @@ class CosyVoice2TtsEngine(TTSEngine):
 
         if torch.cuda.is_available():
             torch.zeros(1, device="cuda")  # 建 CUDA context（worker 只复用不初始化）
+
+    async def _ensure_engine(self, action: str) -> Any:
+        """分级就绪闸门：等 warmup 装完再交给调用方（3.4 v1.4）。
+
+        - 从未 warmup（单测直连 / 装配被跳过）→ MODEL_NOT_LOADED，不替调用方偷偷加载；
+        - warmup 在途 → `await` 到底：冷启动首轮把「权重物化」算进 TTFA，比回一个
+          「引擎未就绪」错误诚实（用户已看到 ready）；
+        - warmup 失败 → 抛当时那次失败的真因（权重缺失优于笼统的「未就绪」）。
+        """
+        if self._engine is not None:
+            return self._engine
+        if not self._warmup_started:
+            raise EchoesError(
+                ErrorCode.MODEL_NOT_LOADED,
+                f"CosyVoice2 未 warmup 即 {action}（3.4.1 报错不降级）",
+            )
+        await self._loaded.wait()
+        if self._warmup_error is not None:
+            raise self._warmup_error
+        if self._engine is None:  # 防御：warmup 正常返回却没引擎
+            raise EchoesError(
+                ErrorCode.MODEL_NOT_LOADED,
+                f"CosyVoice2 warmup 结束但引擎缺失（{action}，3.4.1 报错不降级）",
+            )
+        return self._engine
 
     # ------------------------------ 音色注册 ------------------------------
 
@@ -344,20 +389,19 @@ class CosyVoice2TtsEngine(TTSEngine):
         """流式合成（4.5）：分句 → 逐句推理 → vendored 同步生成器经线程/队列桥接。
 
         - 4.5 分句接线：`split_sentences` 切句后逐句推理，首句更早出音；chunk 序号
-          跨句连续，只有整段流尾带 is_final；
+          跨句连续；
+        - **流尾 = 零长度 is_final 帧**（协议既有形态：PTT 松手同样用它收束）。
+          真 chunk 一律**产出即发**，不为了给末段盖 is_final 而扣住——扣一下等于
+          把首音频推迟到下一个 chunk 到达（ADR-012 §4.1 实测：首段 3.2s 就好，
+          TTFA 却被算成 7.7s）；
         - 3.2 执行约束：vendored 迭代是同步长任务，必须离事件循环（worker thread）；
           每段 tts_speech（24k float）→ np_to_pcm16 → AudioChunk；
         - 线程内异常经队列桥回主协程 → EchoesError(TTS_ENGINE_ERROR)，不静默
           （3.4.1）；打断/在途取消由编排层 `pull()` 收束（3.4 三跳）。
         """
-        engine = self._engine
-        if engine is None:
-            raise EchoesError(
-                ErrorCode.MODEL_NOT_LOADED,
-                "CosyVoice2 未 warmup 即 synthesize（3.4.1 报错不降级）",
-            )
+        engine = await self._ensure_engine("synthesize")
         voice = self._resolve_voice(voice_id)
-        segments = split_sentences(text)
+        segments = split_sentences(text, first_max_chars=_FIRST_SEGMENT_MAX_CHARS)
         if not segments:
             yield AudioChunk(data=b"", seq=0, is_final=True)  # 空文本：流尾兜底
             return
@@ -392,23 +436,20 @@ class CosyVoice2TtsEngine(TTSEngine):
         threading.Thread(target=_produce, name="cosyvoice2-synth", daemon=True).start()
 
         seq = 0
-        pending: AudioChunk | None = None  # 缓冲一段：判明流尾后给末段盖 is_final
         while True:
             item = await asyncio.to_thread(chunks_q.get)
             if item is None:
-                if pending is None:
-                    yield AudioChunk(data=b"", seq=seq, is_final=True)  # 空产出兜底
-                    return
-                pending.is_final = True
-                yield pending
+                # 流尾锚点：零长度 is_final 帧（协议既有形态，PTT 松手同款）。
+                # 不能用「扣住最后一个真 chunk 再盖 is_final」的写法——那会把**首**
+                # 音频块推迟到下个 chunk 到达（ADR-012 §4.1 实测 TTFA 7.7s→
+                # 首段其实 3.2s 就好了）。壳侧 push_pcm16 对空样本直接 return。
+                yield AudioChunk(data=b"", seq=seq, is_final=True)
                 return
             if isinstance(item, Exception):
                 raise EchoesError(
                     ErrorCode.TTS_ENGINE_ERROR, f"CosyVoice2 合成失败: {item}"
                 ) from item
-            if pending is not None:
-                yield pending
-            pending = AudioChunk(data=np_to_pcm16(item), seq=seq)
+            yield AudioChunk(data=np_to_pcm16(item), seq=seq)
             seq += 1
 
     async def clone(self, sample: AudioInputStream) -> str:
@@ -425,11 +466,7 @@ class CosyVoice2TtsEngine(TTSEngine):
         走 cross-lingual 合成：用户样本没有对应转写文本，`inference_zero_shot`
         要求 prompt 文本与 prompt wav 严格配对，硬填会让韵律跑偏。
         """
-        engine = self._engine
-        if engine is None:
-            raise EchoesError(
-                ErrorCode.MODEL_NOT_LOADED, "CosyVoice2 未 warmup 即 clone（3.4.1 报错不降级）"
-            )
+        await self._ensure_engine("clone")
         pcm = await _drain_pcm(sample)
         if not pcm:
             raise CloneError(ErrorCode.CLONE_ENGINE_FAILED, "克隆样本为空（引擎侧收到 0 字节）")

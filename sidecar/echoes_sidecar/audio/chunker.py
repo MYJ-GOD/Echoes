@@ -16,16 +16,25 @@ _CLOSERS = frozenset("”’」』）)】》〉\"'")
 _SECONDARY = frozenset("，、：,:")
 # 单句软上限（字符）：超过先按次级停顿切，仍超则硬切
 _SOFT_MAX_CHARS = 60
+# 首句短切时允许的最小头段（字符）：小于此值的碎片（"嗯，"）不切，保韵律
+_MIN_HEAD_CHARS = 4
 
 _POLICIES = ("punct", "none")
 
 
-def split_sentences(text: str, policy: str = "punct") -> list[str]:
+def split_sentences(
+    text: str, policy: str = "punct", *, first_max_chars: int | None = None
+) -> list[str]:
     """按策略切句（4.5）。
 
     - `punct`（默认）：按句末标点切分，标点与后置引号/括号随前句；
     - `none`：整段一句（给不自作聪明分句的引擎用）；
     - 其余策略名 → ValueError（3.2 报错而非降级：静默当 punct 会掩盖接线错误）。
+
+    `first_max_chars`：**首句短切**上限（引擎注入，默认不启用）。本地 TTS 的
+    RTF≈1（ADR-012 §4.1 实测），首音频块要等首句**合成完**才出——首句就是 4.2s
+    音频，TTFA 就是 4.2s。给一个上限，头段在**次级停顿**处提前断一次（找不到
+    停顿就不切，绝不硬切词），首句越短首音频越早。
 
     返回已 strip 的非空句列表；空输入返回 `[]`（调用方不必判空串）。
     """
@@ -54,10 +63,10 @@ def split_sentences(text: str, policy: str = "punct") -> list[str]:
             ):
                 buffer.append(stripped[index])
                 index += 1
-            _flush(buffer, sentences)
+            _flush(buffer, sentences, first_max_chars)
             continue
         index += 1
-    _flush(buffer, sentences)
+    _flush(buffer, sentences, first_max_chars)
     return sentences
 
 
@@ -73,13 +82,38 @@ def _is_terminator(text: str, index: int) -> bool:
     return False
 
 
-def _flush(buffer: list[str], sentences: list[str]) -> None:
-    """把缓冲落成句子：过长先按次级停顿切，仍过长再硬切（保证无文本丢失）。"""
+def _flush(buffer: list[str], sentences: list[str], first_max_chars: int | None = None) -> None:
+    """把缓冲落成句子：过长先按次级停顿切，仍过长再硬切（保证无文本丢失）。
+
+    首句（`sentences` 仍为空时）若给了 `first_max_chars`，先尝试在次级停顿处
+    提前断一刀——只影响第一句，后续句子仍按软上限走（避免整段碎成语音碎片）。
+    """
     segment = "".join(buffer).strip()
     buffer.clear()
     if not segment:
         return
-    sentences.extend(piece for piece in _split_long(segment) if piece)
+    head = None
+    if first_max_chars is not None and not sentences:
+        head = _split_head(segment, first_max_chars)
+    if head is None:
+        sentences.extend(piece for piece in _split_long(segment) if piece)
+        return
+    first, rest = head
+    sentences.append(first)
+    sentences.extend(piece for piece in _split_long(rest) if piece)
+
+
+def _split_head(segment: str, limit: int) -> tuple[str, str] | None:
+    """在 `limit` 字内找**最早的自然停顿**把首句断短；找不到返回 None（不硬切）。"""
+    for index, char in enumerate(segment[:limit]):
+        if char not in _SECONDARY:
+            continue
+        first = segment[: index + 1].strip()
+        rest = segment[index + 1 :].strip()
+        if len(first) >= _MIN_HEAD_CHARS and rest:
+            return first, rest
+        return None  # 最早的停顿太靠前（"哦，"），再切只会更碎：保持整句
+    return None
 
 
 def _split_long(segment: str) -> list[str]:

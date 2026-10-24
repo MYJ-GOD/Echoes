@@ -260,7 +260,9 @@ class TurnGraph:
                     raise TurnCancelled
                 if chunk is None:
                     continue
-                if progress.tts_first_audio_ms is None:
+                # 首音频以「有样本的帧」为准：零长度 is_final 只是流尾锚点，
+                # 拿它当首音频会把 TTFA 记成 0（ADR-012 §2 口径）。
+                if progress.tts_first_audio_ms is None and chunk.data:
                     progress.tts_first_audio_ms = self._now_ms()
                 await self._send_audio(chunk)
         finally:
