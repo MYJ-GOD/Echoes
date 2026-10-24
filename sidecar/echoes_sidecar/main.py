@@ -55,6 +55,7 @@ from echoes_sidecar.orchestration.graph import TriggerSource, TurnDeps, TurnGrap
 from echoes_sidecar.orchestration.turn import TurnFactory, TurnRunner
 from echoes_sidecar.session.manager import SessionManager
 from echoes_sidecar.session.session import Session
+from echoes_sidecar.session.summary import SessionSummarizer
 from echoes_sidecar.transport.base import Transport
 from echoes_sidecar.transport.local_ws import LocalWebSocketTransport
 from echoes_sidecar.transport.stdio import StdioTransport
@@ -596,6 +597,13 @@ async def _serve_with_storage(
     tts_engine, tts_ready = _assemble_tts(argv, assets_dir=paths.assets_dir)
     ws_transport = await _assemble_ws(argv)
     memory_store, memory_extractor = _assemble_memory(argv, storage, llm_provider)
+    # 摘要与记忆共用同一个功能门：memory off / mock / bge 权重缺失时一起关闭。
+    # mock LLM 下即使强制 --memory on 也不做摘要（否则会把 mock 台词写成摘要）。
+    summarizer = (
+        SessionSummarizer(llm_provider, storage.sessions, privacy_mode=True)
+        if memory_extractor is not None and llm_provider.name != "mock"
+        else None
+    )
     # hello.engines 的清单顺序即装配顺序（3.4：壳以最后一份 hello 为准）
     engine_states: list[EngineState] = [
         EngineState(name="asr", ready=asr_ready),
@@ -619,6 +627,7 @@ async def _serve_with_storage(
             storage=storage,
             memory=memory_store,
             extractor=memory_extractor,
+            summarizer=summarizer,
         ),
         machine,
         manager=manager,

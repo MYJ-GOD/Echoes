@@ -73,6 +73,16 @@ class SessionRow:
     last_active_at: float
 
 
+@dataclass(frozen=True)
+class SessionSummary:
+    """5.1 session_summary 行（滚动摘要；`up_to_turn` 是已摘要到的 turn）。"""
+
+    session_id: str
+    summary: str
+    up_to_turn: int
+    updated_at: float
+
+
 def _voice_status(raw: Any) -> VoiceStatus:
     try:
         return VoiceStatus(str(raw))
@@ -328,6 +338,40 @@ class SessionRepo:
         if cursor.rowcount == 0:
             raise EchoesError(ErrorCode.STORAGE_ERROR, f"会话不存在：{session_id}")
 
+    def get_summary(self, session_id: str) -> SessionSummary | None:
+        """读滚动摘要（5.2：每 10 轮/30 分钟更新；重启后仍可注入）。"""
+        row = self._conn.execute(
+            "SELECT session_id, summary, up_to_turn, updated_at"
+            " FROM session_summary WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return None if row is None else _summary_from_row(row)
+
+    def save_summary(
+        self, session_id: str, *, summary: str, up_to_turn: int, now: float
+    ) -> SessionSummary:
+        """upsert 摘要；空摘要视为错误（不能把会话上下文静默清空）。"""
+        text = summary.strip()
+        if not text:
+            raise EchoesError(ErrorCode.STORAGE_ERROR, "会话摘要不能为空")
+        with _guard(self._conn, "写入会话摘要"):
+            self._conn.execute(
+                "INSERT INTO session_summary (session_id, summary, up_to_turn, updated_at)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(session_id) DO UPDATE SET"
+                " summary = excluded.summary,"
+                " up_to_turn = excluded.up_to_turn,"
+                " updated_at = excluded.updated_at",
+                (session_id, text, up_to_turn, now),
+            )
+            self._conn.commit()
+        return SessionSummary(
+            session_id=session_id,
+            summary=text,
+            up_to_turn=up_to_turn,
+            updated_at=now,
+        )
+
 
 def _session_from_row(row: sqlite3.Row) -> SessionRow:
     return SessionRow(
@@ -337,6 +381,15 @@ def _session_from_row(row: sqlite3.Row) -> SessionRow:
         voice_id=_opt_text(row["voice_id"]),
         started_at=_num(row["started_at"]),
         last_active_at=_num(row["last_active_at"]),
+    )
+
+
+def _summary_from_row(row: sqlite3.Row) -> SessionSummary:
+    return SessionSummary(
+        session_id=_text(row["session_id"]),
+        summary=_text(row["summary"]),
+        up_to_turn=int(row["up_to_turn"]),
+        updated_at=_num(row["updated_at"]),
     )
 
 

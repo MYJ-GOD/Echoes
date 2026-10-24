@@ -36,6 +36,7 @@ from echoes_sidecar.memory.store import MemoryStore
 from echoes_sidecar.orchestration.text_clean import clean_for_tts
 from echoes_sidecar.session.manager import SessionManager
 from echoes_sidecar.session.session import Session
+from echoes_sidecar.session.summary import SessionSummarizer, SummaryState, SummaryTurn
 from echoes_sidecar.transport.base import AudioEgress, Transport
 
 # 未克隆绑定时的内置音色（2.5 none 态的解析目标；编排层解析，引擎不做状态判断）
@@ -43,6 +44,8 @@ BUILTIN_VOICE_ID = "builtin:default"
 # 5.2 上下文预算（字符口径的近似）：阶段 0 只有「人设 + 本轮输入」两张，远未触顶；
 # 阶段 1 注入记忆与历史后，本常量是裁剪的判据（先丢最旧的历史，永不裁本轮输入）。
 MAX_CONTEXT_CHARS = 12_000
+# 5.2「会话内最近 N 轮」：12 轮（24 条消息）足够覆盖摘要间隔，再长的历史归摘要。
+MAX_HISTORY_TURNS = 12
 
 TurnStatus = Literal["SUCCESS", "CANCELLED", "FAILED"]
 
@@ -68,6 +71,7 @@ class TurnDeps:
     storage: Storage | None = None  # 会话落库；单测直调可省
     memory: MemoryStore | None = None  # 5.2：turn 前检索相关事实
     extractor: MemoryExtractor | None = None  # 5.2：turn 后异步抽取
+    summarizer: SessionSummarizer | None = None  # 5.2：每 10 轮/30 分钟的滚动摘要
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,10 @@ class TurnGraph:
         self._manager = manager
         # 5.2 抽取是「turn 结束后」的后台活：任务句柄必须自持，否则可能被 GC。
         self._memory_tasks: set[asyncio.Task[None]] = set()
+        # 5.2 滚动摘要：最近 N 轮 + 摘要状态都留在内存，重启只恢复摘要与事实。
+        self._summary_tasks: set[asyncio.Task[None]] = set()
+        self._history: dict[str, list[SummaryTurn]] = {}
+        self._summaries: dict[str, SummaryState | None] = {}
 
     @property
     def machine(self) -> StateMachine:
@@ -187,8 +195,10 @@ class TurnGraph:
                 self._machine.transition(AppState.READY)
                 await self._emit_state(session)
             await self._persist_session(session)
-            # 5.2：抽取在 turn 收尾之后异步跑，不占本轮延迟、失败不回噬 turn。
+            # 5.2：抽取/摘要都在 turn 收尾之后异步跑，不占本轮延迟、失败不回噬 turn。
             if status == "SUCCESS" and reply:
+                self._append_history(session, text, reply, session.turn_seq)
+                self._schedule_summary(session, session.turn_seq)
                 self._schedule_memory(session, text, reply, session.turn_seq)
 
         return TurnOutcome(status=status, turn_seq=session.turn_seq, timings=timings)
@@ -213,21 +223,49 @@ class TurnGraph:
                 hint = memory.compose_hint(facts)
                 if hint:
                     system = f"{system}\n\n{hint}"
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_text},
-        ]
+
+        summary = self._current_summary(session)
+        if summary:
+            system = f"{system}\n\n此前对话摘要：\n{summary}"
+
+        messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+        for turn in self._history.get(session.session_id, []):
+            messages.append({"role": "user", "content": turn.user})
+            messages.append({"role": "assistant", "content": turn.assistant})
+        messages.append({"role": "user", "content": user_text})
         self._fit_budget(messages)
         return messages
 
+    def _current_summary(self, session: Session) -> str:
+        """取当前摘要（首轮从 DB 懒加载；读失败按无摘要处理）。"""
+        summarizer = self._deps.summarizer
+        if summarizer is None:
+            return ""
+        if session.session_id not in self._summaries:
+            try:
+                self._summaries[session.session_id] = summarizer.load(session.session_id)
+            except Exception as exc:  # noqa: BLE001  摘要读失败不阻断对话
+                print(f"[sidecar] 会话摘要读取失败（本轮无摘要）: {exc}", file=sys.stderr)
+                self._summaries[session.session_id] = None
+        state = self._summaries[session.session_id]
+        return "" if state is None else state.text
+
     def _fit_budget(self, messages: list[dict[str, str]]) -> None:
-        """预算守卫（5.2）：超限时从"最旧的可丢消息"开始裁，至少保留首尾两条。"""
+        """预算守卫（5.2）：超限时先丢最旧的一轮历史（user+assistant 成对），
+        系统消息与本轮输入永不裁剪。"""
         total = sum(len(m["content"]) for m in messages)
         while total > MAX_CONTEXT_CHARS and len(messages) > 2:
             dropped = messages.pop(1)
             total -= len(dropped["content"])
+            if (
+                dropped["role"] == "user"
+                and len(messages) > 2
+                and messages[1]["role"] == "assistant"
+            ):
+                partner = messages.pop(1)
+                total -= len(partner["content"])
             print(
-                f"[sidecar] 上下文超预算 {MAX_CONTEXT_CHARS} 字，已丢弃一条历史（5.2）",
+                f"[sidecar] 上下文超预算 {MAX_CONTEXT_CHARS} 字，已丢弃最旧一轮历史（5.2）",
                 file=sys.stderr,
             )
 
@@ -340,6 +378,59 @@ class TurnGraph:
             await asyncio.to_thread(_write)
         except EchoesError as exc:
             print(f"[sidecar] 会话落库失败（turn 不受影响）: {exc}", file=sys.stderr)
+
+    # ------------------------------ 会话摘要（5.2） ------------------------------
+
+    def _append_history(
+        self, session: Session, user_text: str, reply: str, turn_seq: int
+    ) -> None:
+        """只保留最近 N 轮；更早的上下文由滚动摘要覆盖。"""
+        turns = self._history.setdefault(session.session_id, [])
+        turns.append(SummaryTurn(turn=turn_seq, user=user_text, assistant=reply))
+        if len(turns) > MAX_HISTORY_TURNS:
+            del turns[:-MAX_HISTORY_TURNS]
+
+    def _schedule_summary(self, session: Session, turn_seq: int) -> None:
+        """10 轮/30 分钟到点才起任务；句柄自持，失败只记日志。"""
+        summarizer = self._deps.summarizer
+        if summarizer is None:
+            return
+        if session.session_id not in self._summaries:
+            try:
+                self._summaries[session.session_id] = summarizer.load(session.session_id)
+            except Exception as exc:  # noqa: BLE001  摘要读失败不阻断 turn
+                print(f"[sidecar] 会话摘要读取失败: {exc}", file=sys.stderr)
+                self._summaries[session.session_id] = None
+        state = self._summaries[session.session_id]
+        now = time.time()
+        if not summarizer.should_update(state, turn_seq=turn_seq, now=now):
+            return
+        turns = list(self._history.get(session.session_id, []))
+        task = asyncio.create_task(
+            self._summarize(session, turns, turn_seq, now), name="echoes-summary"
+        )
+        self._summary_tasks.add(task)
+        task.add_done_callback(self._summary_tasks.discard)
+
+    async def _summarize(
+        self, session: Session, turns: list[SummaryTurn], turn_seq: int, now: float
+    ) -> None:
+        summarizer = self._deps.summarizer
+        assert summarizer is not None
+        try:
+            state = await summarizer.update(
+                session.session_id, turns, turn_seq=turn_seq, now=now
+            )
+        except Exception as exc:  # noqa: BLE001  摘要失败保留旧摘要
+            print(f"[sidecar] 会话摘要失败（保留旧摘要）: {exc}", file=sys.stderr)
+            return
+        if state is not None:
+            self._summaries[session.session_id] = state
+
+    async def wait_summary_idle(self) -> None:
+        """等在途摘要收尾（测试 / 优雅退出用；生产不阻塞 turn）。"""
+        if self._summary_tasks:
+            await asyncio.gather(*list(self._summary_tasks), return_exceptions=True)
 
     # ------------------------------ 记忆（5.2） ------------------------------
 

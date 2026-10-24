@@ -23,6 +23,7 @@ from echoes_sidecar.memory.extractor import MemoryExtractor
 from echoes_sidecar.memory.store import MemoryStore
 from echoes_sidecar.orchestration.graph import TurnDeps, TurnGraph
 from echoes_sidecar.session.session import Session
+from echoes_sidecar.session.summary import SessionSummarizer
 from echoes_sidecar.transport.base import AudioEgress, Transport
 from echoes_sidecar.transport.local_ws import LocalWebSocketTransport
 from echoes_sidecar.transport.stdio import StdioTransport
@@ -198,6 +199,7 @@ def make_graph(
     t0: float | None = None,
     memory: MemoryStore | None = None,
     extractor: MemoryExtractor | None = None,
+    summarizer: SessionSummarizer | None = None,
 ) -> TurnGraph:
     """turn 编排的标准装配（默认 mock 引擎 + 记录型 transport）。"""
     return TurnGraph(
@@ -209,6 +211,7 @@ def make_graph(
             egress=egress,
             memory=memory,
             extractor=extractor,
+            summarizer=summarizer,
         ),
         machine if machine is not None else ready_machine(),
     )
