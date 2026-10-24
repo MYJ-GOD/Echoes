@@ -1,17 +1,17 @@
-# Echoes 开发进度与剩余工作（2026-10-23）
+# Echoes 开发进度与剩余工作（2026-10-24）
 
-> 本文是截至 **2026-10-23** 的进度快照，按「只推进开发、暂不做验收」的口径统计。  
-> 权威依据：[docs/architecture.md](docs/architecture.md)（§2.3 MVP 定义、§6 分阶段计划、§12 下一步动作、§15 工程规范）。  
-> 详细执行账本：`.superpowers/sdd/echoes-skeleton/progress.md`（本地文件，gitignored，R1–R21）。  
+> 本文是截至 **2026-10-24** 的进度快照，按「只推进开发、暂不做验收」的口径统计。
+> 权威依据：[docs/architecture.md](docs/architecture.md)（§2.3 MVP 定义、§6 分阶段计划、§12 下一步动作、§15 工程规范）。
+> 详细执行账本：`.superpowers/sdd/echoes-skeleton/progress.md`（本地文件，gitignored，R1–R21）。
 > **完成度 = 代码 + 自动化测试到位**；不含真机麦克风/扬声器、延迟实测与产品验收。
 
 ## 1. 结论
 
 | 范围                | 开发完成度        | 剩余开发（单人，中值）   |
 | ----------------- | ------------ | ------------- |
-| **阶段 0：垂直切片**     | **约 92%**   | **约 0.5 周（几乎全是上机）** |
-| **MVP：阶段 0–1**    | **约 58%**   | **约 3.5 周**     |
-| **全路线：阶段 -1 → 3** | **约 32%**   | **约 8 周**   |
+| **阶段 0：垂直切片**     | **约 92–95%** | **约 0.5 周（延迟决策/上机）** |
+| **MVP：阶段 0–1**    | **约 65%**   | **约 3 周**     |
+| **全路线：阶段 -1 → 3** | **约 30–33%** | **约 8–9 周**   |
 
 口径说明：
 
@@ -19,6 +19,7 @@
 - **2026-10-23 追加**：持久化运行层（§3.4）、分句纯函数（§3.5）、克隆闭环（§3.6）、三跳打断（§3.7）落地。阶段 0 由 50–55% → 75% → 约 82%，剩余约 0.5–1 周 = 克隆真路 ≈0.5 周 + 联调/真机验收 ≈0.5 周。阶段 0 的**功能面已全部写完**，剩下的是真路接线与真机验收，不再是「还没写」。
 - **2026-10-23 第二轮**：编排层收敛（§3.8）、克隆真路 + 分句接线（§3.9）、IPC TS 类型层与漂移守护（§3.10）落地，阶段 0 → **约 92%**。三笔技术债（编排层被绕过 / IPC TS 缺失 / 分句未接线）全部清掉。剩下 8% 不是代码：是真机数字（延迟、三跳毫秒、听感）与断网演练——**部署实际使用的 `sidecar/.venv` 实测 torch 2.7.1+cu126 / CUDA 可用**，故 TTS 侧延迟与克隆嵌入耗时本机就能采；仍缺的是 ollama（LLM 侧）与麦克风/播放设备（PTT→asr_final、三跳分摊、听感盲听）。
 - **2026-10-24 实测轮**：真机整链第一次跑通（`bench_latency.py --tts cosyvoice2`），当场暴露两个只在真路才现形的 bug，都已修：① SQLite 连接跨线程（`asyncio.to_thread` 落库 → `check_same_thread` 判死）；② TTS 流式为给末段盖 `is_final` 扣住一个 chunk，把首音频推迟一整段。修后首音频 **4211 → 2727ms**、引擎级 38 字文本 **7.7 → 2.7s**。数字与判定见 [ADR-012 §4.1](docs/decisions/ADR-012-latency-baseline.md)，缺口处置见其 §9（**需产品决策**：预算是否按本地 0.5B 的物理下界校准）。
+- **2026-10-24 复核**：规范环境是 `sidecar/.venv`（uv 管理，torch 2.7.1+cu126 / transformers 4.51.3 / sqlite-vec 0.1.9）。四闸复跑 **263 passed + 1 deselected**、mypy 36、`cargo test` 20、`npm run build` 通过。用仓库根 `.venv` 复跑会因缺 `sqlite-vec` 迁移依赖而红——那是旧骨架环境，不是代码回归；`uv.lock` 已补 `sqlite-vec`（原锁缺失，0002 迁移在冻结安装下无法复现）。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -283,7 +284,7 @@ bge 权重未下载（7.3 bootstrap 项）。
   `serialize_turn` 落地为守卫；阶段 1 的 retrieve 接在 `_compose_messages` 即可。
 - ~~**IPC TS 类型层缺失**~~：**已清**（§3.10，`d6b93a3`）。类型由 sidecar 模型生成，
   CI 与本地四闸都判漂移；前端不再手抄协议。
-- **CI 不覆盖真引擎**：`build-sidecar.yml` 只装 pydantic/websockets/pytest 等骨架依赖，`torch` / `faster-whisper` / `cosyvoice` 零覆盖。
+- **CI 不覆盖真引擎**：`build-sidecar.yml` 现在装 CPU-safe 依赖并跑 `-m "not heavy"`；`torch` / `cosyvoice` 仍零覆盖，真引擎走本机 `gpu_smoke.py`（7.2 边界）。
 - ~~**TTS 分句未接线**~~：**已接**（§3.9，`d5821ad`）。但 TTFA 收益仍未实测——
   接线不代表变快，ADR-012 出数前不许宣称延迟改善。
 - **多实例共享一个数据库**：迁移已做「竞争重试 + user_version 复核」（6 进程并发首启实测全通过），但两个 sidecar 同时跑仍会共享同一 session 行；14.1 预设单实例，未做实例锁。
@@ -313,7 +314,7 @@ bge 权重未下载（7.3 bootstrap 项）。
 **A. 上机（阶段 0 收尾）**
 
 1. ~~TTS 侧延迟~~ **已跑**（ADR-012 §4.1）；剩「输入 → 首 token」段：起 ollama（11434）
-   → `python scripts/bench_latency.py --turns 10 --real`。
+   → `.venv\Scripts\python.exe scripts\bench_latency.py --turns 10 --real`。
 2. **待决策**：ADR-012 §9 的预算缺口（首音频 5.5×、端到端 1.9×、冷启 1.44×）。
    实现侧建议「按实测校准预算 + 把开场语气词预合成排进阶段 2」，需产品拍板。
 3. 真麦克风：PTT→`asr_final` ≤600ms；真播放设备：三跳 100/50/150ms 分摊。
@@ -322,9 +323,26 @@ bge 权重未下载（7.3 bootstrap 项）。
 
 **B. 阶段 1（记忆与人设，2–3 周）**
 
-5. `memory/extractor.py` + `memory/store.py`（现为 `NotImplementedError`）；retrieve 接在
-   `TurnGraph._compose_messages`（预算裁剪已在那里，5.2）。
-6. sqlite-vec + bge-small-zh（512 维）、session_summary、人设卡 UI、Settings、50 条记忆评测门禁。
+- ✅ 存储层已完成（§3.13）：`0002_memory_vec` + `MemoryRepo` + `MemoryStore` + 嵌入 provider。
+- ⬜ `memory/extractor.py`（LLM 抽取事实 + 替代判定）+ 13.3 的 50 条评测门禁（precision ≥0.85 / recall ≥0.7 / 替代正确率 ≥0.9）。
+- ⬜ retrieve 接进 `TurnGraph._compose_messages`（预算裁剪已在那里，5.2）；session_summary、人设卡 UI、Settings（provider / 隐私模式 / API key）。
+- 依赖：bge-small-zh-v1.5 权重（7.3 bootstrap 下载，`~/.cache/echoes/models/`）。
+
+**C. 里程碑排期（2026-10-24 起，单人开发，不含验收）**
+
+| 里程碑 | 窗口 | 主要交付 | 出口条件（自动化） |
+| --- | --- | --- | --- |
+| **P0 基线** | 10/24–10/27 | 规范环境/README、`uv.lock` 补 sqlite-vec、CI CPU-safe 依赖、延迟预算决策输入 | 四闸 + `cargo test` 20 + `npm run build` 全绿 |
+| **阶段 1 记忆与人设** | 10/28–11/13（约 2.5 周） | `memory/extractor.py` + 50 条评测门禁、检索接入 `_compose_messages`、session_summary、人设卡 UI、Settings（provider/隐私/API key） | 评测集达标 + 四闸 + 记忆 e2e（隔天引用事实） |
+| **阶段 2 克隆 UX + 远程** | 11/16–12/4（约 3 周） | 克隆质检、音色列表/切换、LanWS + 配对、终端模拟器、重连去重 | Transport 一致性 + 配对/去重测试 + 四闸 |
+| **阶段 3 打包分发** | 12/7–1/8（约 4 周，缓冲到 1/15） | ADR-011 定稿、split-binary、安装器、torch/权重运行时下载、模型管理器、首启引导 | 安装包构建 + 打包后 sidecar 冷启 + 体积/离线冒烟 |
+
+- **决策门**（不阻塞当前编码，但要在对应窗口前拍板）：
+  ① ADR-012 §9 延迟预算（当前首音频 2727ms / 端到端 4705ms，预算 500/2500ms）；
+  ② 8G 档 LLM+TTS 显存冲突（阶段 2 前）；
+  ③ ADR-011 split-binary（阶段 3 前）。
+- **并行可选项**：延迟优化（开场语气词预合成 + 首句更短 + 预热）约 1–2 周，可与阶段 1 并行；不做则接受「当前预算不达标」的产品风险。
+- 每个里程碑结束都跑四闸 + 壳测试 + 构建，并回填本文与 [docs/acceptance/stage0.md](docs/acceptance/stage0.md)。
 
 ## 7. 关键提交（近端）
 
@@ -345,12 +363,17 @@ bge 权重未下载（7.3 bootstrap 项）。
 
 ## 8. 常用命令
 
+> 规范环境 = `sidecar/.venv`（uv 管理，含 torch/CUDA）；仓库根 `.venv` 是旧骨架环境，勿用。
+
 ```powershell
+# 依赖变更后（cwd = sidecar）
+uv sync --extra dev
+
 # sidecar 四闸（cwd = sidecar）
-..\.venv\Scripts\pytest.exe
-..\.venv\Scripts\ruff.exe check .
-..\.venv\Scripts\mypy.exe
-..\.venv\Scripts\lint-imports.exe
+.venv\Scripts\pytest.exe -m "not heavy"
+.venv\Scripts\ruff.exe check .
+.venv\Scripts\mypy.exe
+.venv\Scripts\lint-imports.exe
 
 # 壳测试（cwd = src-tauri；假代理残留时先置 NO_PROXY）
 $env:NO_PROXY="*"; cargo test
@@ -360,20 +383,21 @@ npm run build
 npm run ipc:types    # 协议改了就重新生成 src/lib/ipc_types.ts
 
 # 延迟基线（cwd = sidecar；--real 需权重 + ollama）
-python scripts/bench_latency.py --turns 5
-python scripts/bench_latency.py --turns 10 --real
+.venv\Scripts\python.exe scripts\bench_latency.py --turns 5
+.venv\Scripts\python.exe scripts\bench_latency.py --turns 10 --real
 
 # 启动（仓库根）
 $env:ECHOES_SIDECAR_MOCK="1"; npm run tauri dev   # 全 mock（无模型）
 npm run tauri dev                                  # 真路（需 Ollama / whisper / CosyVoice2）
 
 # L3 冒烟（cwd = sidecar；真 CosyVoice2，mock LLM/ASR）
-..\.venv\Scripts\python.exe scripts\smoke_turn_e2e.py
+.venv\Scripts\python.exe scripts\smoke_turn_e2e.py
 ```
 
 ## 9. 文档关系与更新约定
 
 - [docs/architecture.md](docs/architecture.md)：唯一执行依据；冻结契约与变更记录以它为准。
+- [README.md](README.md)：规范环境与四闸命令（`sidecar/.venv`；根 `.venv` 是旧骨架环境）。
 - [docs/decisions/](docs/decisions/)：ADR-001（LLM 路线）、ADR-009（克隆路线）、ADR-012（延迟/就绪阈值校准）、ADR-014（CosyVoice2 环境）。
 - [docs/acceptance/stage0.md](docs/acceptance/stage0.md)：阶段 0 七条验收逐条核对（判据 / 自动化证据 / 上机待验）。
 - `.superpowers/sdd/echoes-skeleton/progress.md`：逐轮执行账本（R1–R21），含根因分析与验收证据；gitignored。

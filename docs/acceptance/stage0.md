@@ -132,13 +132,15 @@ P95 3194ms；端到端 P50 **4705ms** / P95 5932ms。均超预算（5.5× / 1.9�
 
 | 闸 | 结果 |
 | --- | --- |
-| `pytest -m "not heavy"` | **243 passed**, 1 deselected |
+| `pytest -m "not heavy"` | **263 passed**, 1 deselected |
 | `ruff check` | All checks passed |
-| `mypy` | no issues in **34** source files |
+| `mypy` | no issues in **36** source files |
 | `lint-imports` | 2 contracts kept, 0 broken |
 | `cargo test` | **20 passed** |
 | `npm run build`（含 `ipc:check` + `vue-tsc`） | 通过 |
 | `bench_latency.py --turns 5 --tts cosyvoice2` | 真机跑通（数字见验收 2） |
+
+> 2026-10-24 复核（记忆存储层后）：规范环境 `sidecar/.venv`；pytest 263 + 1 deselected、mypy 36、cargo 20、`npm run build` 全通过。仓库根 `.venv` 是旧骨架环境，缺 sqlite-vec/torch，勿用于复跑。
 
 ## 未过 / 未验清单（按阻塞原因分组）
 
