@@ -24,6 +24,7 @@ def _open(tmp_path: Path) -> Storage:
 def test_migrations_apply_once_and_are_idempotent(tmp_path: Path) -> None:
     """14.2：迁移幂等 —— 二次打开不重放，user_version 停在最新版本。"""
     db_file = tmp_path / "db" / "echoes.db"
+    latest = load_migrations()[-1].version  # 别写死版本号：加迁移不该改这条测试
 
     conn = connect(db_file)
     version = conn.execute("PRAGMA user_version").fetchone()
@@ -33,11 +34,13 @@ def test_migrations_apply_once_and_are_idempotent(tmp_path: Path) -> None:
     }
     conn.close()
 
-    assert int(version[0]) == 1
+    assert int(version[0]) == latest
     assert {"persona", "voice", "session", "memory_fact", "session_summary", "setting"} <= tables
+    # 0002 起才有 vec0 虚表（-- requires: sqlite_vec）
+    assert "memory_vec" in tables
 
     again = connect(db_file)
-    assert int(again.execute("PRAGMA user_version").fetchone()[0]) == 1
+    assert int(again.execute("PRAGMA user_version").fetchone()[0]) == latest
     again.close()
 
 
@@ -94,7 +97,7 @@ def test_migration_files_must_be_continuous(tmp_path: Path) -> None:
 def test_apply_migrations_returns_current_version(tmp_path: Path) -> None:
     conn = connect(tmp_path / "echoes.db")
     try:
-        assert apply_migrations(conn) == 1
+        assert apply_migrations(conn) == load_migrations()[-1].version
     finally:
         conn.close()
 

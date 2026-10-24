@@ -215,6 +215,26 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 `ruff` / `mypy`（34 文件）/ `lint-imports` 全绿。
 报告：`sidecar/scripts/_bench_out/latency_20261024_{105459,110756}.md`（修复前/后）。
 
+### 3.13 记忆存储层（阶段 1 第一块，2026-10-24）
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| `memory_vec` 向量索引 | ✅ | `db/migrations/0002_memory_vec.sql`（头注 `-- requires: sqlite_vec`，vec0 `FLOAT[512]`） |
+| sqlite-vec 扩展装载 | ✅ | `db/connection.py::_load_vec_extension`（`enable_load_extension` → load → 立刻关回） |
+| 事实仓储 + 向量成对写 | ✅ | `db/memory_repo.py`（insert/supersede/touch/delete/search，事务内成对） |
+| 取代语义（历史可追溯） | ✅ | `superseded_by` 只藏不删；检索面 `superseded_by IS NULL AND deleted = 0` |
+| 删除即不可检索（16.2） | ✅ | 软删标记 + **向量真删**（`DELETE FROM memory_vec`） |
+| 检索（KNN + profile 隔离） | ✅ | `MemoryRepo.search`：`k*4` 候选池后置过滤再截断（vec0 的 `k` 先生效） |
+| `MemoryStore`（写/查/提示词） | ✅ | `memory/store.py`：`retrieve/remember/active/forget/compose_hint`；空 query 不跑前向 |
+| 嵌入 provider（bge-small-zh 512） | ✅ 代码就绪 | `memory/embedding.py`：`transformers` 直载 + CLS 池化 + L2 归一化（不引 `sentence-transformers`，守住 15.1 精确锁） |
+| 权重边界（7.3） | ✅ | 目录缺失 → `MODEL_NOT_LOADED`，先查目录再 import（防 hub 回退联网） |
+
+验证：pytest 243 → **264**（仓储 11、store/嵌入 10）；
+`mypy` 由 34 → **36** 文件（新增 `db/memory_repo.py`、`memory/embedding.py`、`memory/store.py`）。
+**未做**：`memory/extractor.py` 仍是桩（要 LLM 抽取 + 13.3 的 50 条评测集门禁）；
+检索还没接进 `TurnGraph._compose_messages`（等抽取线一起接，否则只有写没有读的场景不完整）；
+bge 权重未下载（7.3 bootstrap 项）。
+
 ## 4. 未完成
 
 ### 4.1 阶段 0 收尾（**一半已实测，一半卡在设备/决策**）
@@ -237,8 +257,12 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 ### 4.2 阶段 1：记忆与人设（2–3 周）
 
-- `memory/extractor.py`、`memory/store.py` 均仍为 `NotImplementedError`；`memory_vec` 表待 sqlite-vec 依赖落地（`0002_*.sql`）。
-- 需要：memory_fact 抽取 + 检索接入编排（§5.2 隐私约束）、session_summary、sqlite-vec + bge-small-zh（512 维）、人设卡 UI、Settings（provider / 隐私模式 / API key）、50 条记忆评测门禁（13.3）。
+- ✅ **存储层已完成**（§3.13）：`0002_memory_vec` + `MemoryRepo` + `MemoryStore` + 嵌入 provider。
+- ⬜ 剩下：`memory/extractor.py`（LLM 抽取事实 + 替代判定）、检索接进
+  `TurnGraph._compose_messages`（预算裁剪已在那里，5.2）、session_summary 滚动摘要、
+  人设卡 UI、Settings（provider / 隐私模式 / API key）、**13.3 的 50 条记忆评测门禁**
+  （precision ≥0.85 / recall ≥0.7 / 替代正确率 ≥0.9）。
+- 依赖：bge-small-zh-v1.5 权重（7.3 bootstrap 下载，`~/.cache/echoes/models/`）。
 
 ### 4.3 阶段 2：克隆 UX + 远程（2–3 周）
 

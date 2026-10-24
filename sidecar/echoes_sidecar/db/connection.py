@@ -203,6 +203,25 @@ def _module_available(module: str) -> bool:
         return False
 
 
+def _load_vec_extension(conn: sqlite3.Connection) -> None:
+    """把 sqlite-vec 载入连接（vec0 虚表与 `vec_version()` 的来源）。
+
+    `sqlite_vec.load()` 只调 `load_extension`，不放开授权——必须先
+    `enable_load_extension(True)`，载完立刻关回去（不让后续语句再加载任意扩展）。
+    未安装时**不在这里报错**：要不要 vec0 由迁移头的 `-- requires: sqlite_vec` 决定，
+    阶段 0 的库本来就不含 vec 表，连接层不该为此拦住启动（14.2 报错点前置到迁移）。
+    """
+    try:
+        import sqlite_vec
+    except ImportError:
+        return
+    conn.enable_load_extension(True)
+    try:
+        sqlite_vec.load(conn)
+    finally:
+        conn.enable_load_extension(False)
+
+
 def connect(db_file: Path, *, migrations_dir: Path | None = None) -> sqlite3.Connection:
     """打开（必要时创建）数据库并应用迁移；失败一律映射 STORAGE_ERROR（3.4.1）。"""
     try:
@@ -228,6 +247,7 @@ def connect(db_file: Path, *, migrations_dir: Path | None = None) -> sqlite3.Con
     conn.row_factory = sqlite3.Row
     try:
         _apply_pragmas(conn)
+        _load_vec_extension(conn)
         apply_migrations(conn, migrations_dir)
     except EchoesError:
         conn.close()

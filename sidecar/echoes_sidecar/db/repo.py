@@ -19,6 +19,7 @@ from typing import Any
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.types import Persona, VoiceStatus
 from echoes_sidecar.db.connection import connect
+from echoes_sidecar.db.memory_repo import MemoryRepo
 
 
 @contextmanager
@@ -371,13 +372,14 @@ class SettingRepo:
 
 @dataclass(frozen=True)
 class Storage:
-    """存储门面：连接 + 四个仓储（组合根持有单例，随进程生命周期）。"""
+    """存储门面：连接 + 五个仓储（组合根持有单例，随进程生命周期）。"""
 
     conn: sqlite3.Connection
     personas: PersonaRepo
     voices: VoiceRepo
     sessions: SessionRepo
     settings: SettingRepo
+    memories: MemoryRepo
 
     @classmethod
     def open(cls, db_file: Path, *, migrations_dir: Path | None = None) -> Storage:
@@ -388,6 +390,7 @@ class Storage:
             voices=VoiceRepo(conn),
             sessions=SessionRepo(conn),
             settings=SettingRepo(conn),
+            memories=MemoryRepo(conn),
         )
 
     def close(self) -> None:
