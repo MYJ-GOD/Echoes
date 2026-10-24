@@ -7,15 +7,20 @@
 - DB 版本高于应用支持的版本 → 报错引导（14.2「不符引导而非静默迁移」）。
 - 迁移头 `-- requires: <module>` 声明扩展依赖（如 `sqlite_vec`）；扩展缺失时**明确报错**，
   不静默跳过（3.2 报错而非降级）。
+- 连接**跨线程可用**（`ThreadSafeConnection`）：14.2 的「单写者」在连接上落地为一把
+  可重入锁，3.2 的「写盘入线程」才能真把落库挪出事件循环。
 """
 from __future__ import annotations
 
 import importlib.util
 import re
 import sqlite3
+import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 
@@ -26,6 +31,47 @@ BUSY_TIMEOUT_MS = 5000
 # 迁移竞争重试次数：多实例（用户双击两次）同时首次启动时，后到者会撞上
 # 「table already exists」；重试后检查 user_version 即可判定「另一进程已完成」。
 _MIGRATION_ATTEMPTS = 3
+
+
+class ThreadSafeConnection(sqlite3.Connection):
+    """单连接跨线程（3.2 写盘入线程 × 14.2 单写者）。
+
+    **为什么需要它**：sqlite3 默认 `check_same_thread=True`，任何在 worker 线程里的
+    落库（编排层 `asyncio.to_thread(storage.sessions.touch)`）都会直接抛
+    `SQLite objects created in a thread can only be used in that same thread`——
+    这条错误只在真机整链才暴露（单测的 storage 是桩，不碰线程）。14.2 的口径本来是
+    「单写者由上层串行保证」，这里把「串行」落到连接上：所有语句经一把 `RLock`
+    排队，于是「谁在哪个线程调」不再影响正确性。
+
+    只包 `execute/executemany/executescript/commit/rollback`：`cursor()` 返回的游标
+    在持锁之外迭代，WAL 下读到的是某个已提交快照（本项目的读都是短查询，够用）。
+    """
+
+    _lock: threading.RLock
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._lock = threading.RLock()
+
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        with self._lock:
+            return super().execute(sql, parameters)
+
+    def executemany(self, sql: str, parameters: Iterable[Any], /) -> sqlite3.Cursor:
+        with self._lock:
+            return super().executemany(sql, parameters)
+
+    def executescript(self, sql_script: str, /) -> sqlite3.Cursor:
+        with self._lock:
+            return super().executescript(sql_script)
+
+    def commit(self) -> None:
+        with self._lock:
+            super().commit()
+
+    def rollback(self) -> None:
+        with self._lock:
+            super().rollback()
 
 
 @dataclass(frozen=True)
@@ -167,7 +213,15 @@ def connect(db_file: Path, *, migrations_dir: Path | None = None) -> sqlite3.Con
         ) from exc
 
     try:
-        conn = sqlite3.connect(db_file, timeout=BUSY_TIMEOUT_MS / 1000, isolation_level="DEFERRED")
+        conn = sqlite3.connect(
+            db_file,
+            timeout=BUSY_TIMEOUT_MS / 1000,
+            isolation_level="DEFERRED",
+            # 落库挪进 worker 线程（3.2）就得放弃「只许创建线程使用」：
+            # 串行由 ThreadSafeConnection 的锁保证（14.2 单写者）。
+            check_same_thread=False,
+            factory=ThreadSafeConnection,
+        )
     except sqlite3.Error as exc:
         raise EchoesError(ErrorCode.STORAGE_ERROR, f"打开数据库失败：{db_file}（{exc}）") from exc
 
