@@ -20,7 +20,7 @@
 - **2026-10-23 第二轮**：编排层收敛（§3.8）、克隆真路 + 分句接线（§3.9）、IPC TS 类型层与漂移守护（§3.10）落地，阶段 0 → **约 92%**。三笔技术债（编排层被绕过 / IPC TS 缺失 / 分句未接线）全部清掉。剩下 8% 不是代码：是真机数字（延迟、三跳毫秒、听感）与断网演练——**部署实际使用的 `sidecar/.venv` 实测 torch 2.7.1+cu126 / CUDA 可用**，故 TTS 侧延迟与克隆嵌入耗时本机就能采；仍缺的是 ollama（LLM 侧）与麦克风/播放设备（PTT→asr_final、三跳分摊、听感盲听）。
 - **2026-10-24 实测轮**：真机整链第一次跑通（`bench_latency.py --tts cosyvoice2`），当场暴露两个只在真路才现形的 bug，都已修：① SQLite 连接跨线程（`asyncio.to_thread` 落库 → `check_same_thread` 判死）；② TTS 流式为给末段盖 `is_final` 扣住一个 chunk，把首音频推迟一整段。修后首音频 **4211 → 2727ms**、引擎级 38 字文本 **7.7 → 2.7s**。数字与判定见 [ADR-012 §4.1](docs/decisions/ADR-012-latency-baseline.md)，缺口处置见其 §9（**需产品决策**：预算是否按本地 0.5B 的物理下界校准）。
 - **2026-10-24 复核**：规范环境是 `sidecar/.venv`（uv 管理，torch 2.7.1+cu126 / transformers 4.51.3 / sqlite-vec 0.1.9）。四闸复跑 **263 passed + 1 deselected**、mypy 36、`cargo test` 20、`npm run build` 通过。用仓库根 `.venv` 复跑会因缺 `sqlite-vec` 迁移依赖而红——那是旧骨架环境，不是代码回归；`uv.lock` 已补 `sqlite-vec`（原锁缺失，0002 迁移在冻结安装下无法复现）。
-- **2026-10-24 第三轮（阶段 1 抽取线）**：抽取器 + 检索注入 + turn 后置异步写入 + 52 例评测管线落地（`db92e1c`）；pytest 263 → **296**。bge-small-zh 权重已预取到 `~/.cache/echoes/models/bge-small-zh-v1.5`（512 维 / L2=1.0，真 embedder 检索命中）。阶段 1 完成约 40%，剩余 session_summary、人设卡、Settings、真模型 13.3 门禁。
+- **2026-10-24 第三轮（阶段 1 抽取线）**：抽取器 + 检索注入 + turn 后置异步写入 + 52 例评测管线落地（`db92e1c`）；pytest 263 → **299**；13.3 真门禁（qwen3:8b + qwen2.5 judge）P 0.917 / R 0.957 / 替代 1.000 通过（`8c4117a`）。bge-small-zh 权重已预取到 `~/.cache/echoes/models/bge-small-zh-v1.5`（512 维 / L2=1.0，真 embedder 检索命中）。阶段 1 完成约 45%，剩余 session_summary、人设卡、Settings。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -247,10 +247,10 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 | 组合根 `--memory auto/on/off` | ✅ | auto：mock 或 bge 权重缺失时关闭；`test_main_memory.py` 6 例 |
 | 13.3 评测集 + 指标/门禁 | ✅ 管线 | 52 例（46 事实 / 6 替代 / 9 干扰）；`scripts/eval_memory.py`；scripted 1.000 PASS |
 | 真 bge 嵌入/检索 | ✅ | 权重已预取；512 维 L2=1.0；临时库检索命中「上海出差」 |
-| 真模型 13.3 门禁 | ⬜ | 本机 Ollama 未运行、无 qwen3:8b；scripted 只证管线 |
+| 真模型 13.3 门禁 | ✅ | qwen3:8b 抽取 + qwen2.5:7b judge：P 0.917 / R 0.957 / 替代 1.000（52 例，2026-10-24） |
 
-验证：pytest 263 → **296 passed**；mypy 37；ruff / lint-imports（2 contracts）；cargo 20；npm build。
-**未做**：真模型 13.3 门禁；session_summary；人设卡 UI；Settings。
+验证：pytest 263 → **299 passed**；mypy 37；ruff / lint-imports（2 contracts）；cargo 20；npm build。
+**未做**：session_summary；人设卡 UI；Settings。
 
 ## 4. 未完成
 
@@ -274,8 +274,8 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 ### 4.2 阶段 1：记忆与人设（2–3 周）
 
-- ✅ 存储层（§3.13）、抽取器（§3.14）、检索注入（§3.14）、后置异步写入（§3.14）、52 例评测管线（§3.14）。
-- ⬜ 剩下：session_summary 滚动摘要；人设卡 UI；Settings（provider / 隐私模式 / API key）；**真模型 13.3 门禁**（本机 Ollama 未运行 / 无 qwen3:8b，scripted 只证管线）。
+- ✅ 存储层（§3.13）、抽取器（§3.14）、检索注入（§3.14）、后置异步写入（§3.14）、52 例评测管线与真门禁（§3.14）。
+- ⬜ 剩下：session_summary 滚动摘要；人设卡 UI；Settings（provider / 隐私模式 / API key）。
 - 依赖：bge-small-zh-v1.5 权重已预取；部署 bootstrap 仍需在干净机复现（7.3）。
 
 ### 4.3 阶段 2：克隆 UX + 远程（2–3 周）
@@ -316,7 +316,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 - **8G 档显存冲突**：qwen3:8b ≈5.5GB + TTS ≈3.8GB；ADR-001 需按三跳实测复核。
 - **克隆路线**：闭环与真路代码均就绪（3.6 / 3.9），zero-shot 的**听感未验证**（要人耳盲听 + 播放设备；嵌入耗时本机可测）；相似度质检（`CLONE_QUALITY_LOW`）按计划推迟到阶段 2。
 - **打断**：三跳已落地（3.7），busy 期 PTT 可按下即打断；但 100/50/150ms 分摊只在 mock 下定性验证过，真机数字要等 ADR-012 的延迟实测一起量。
-- **记忆**：存储/抽取/检索/评测管线已落地（3.13 / 3.14）；**真模型 13.3 门禁未跑**（本机 Ollama 不可用、无 qwen3:8b）；bge 权重为本地预取，干净机需按 7.3 bootstrap 复现。
+- **记忆**：存储/抽取/检索/评测管线与 13.3 真门禁已落地（3.13 / 3.14；P 0.917 / R 0.957 / 替代 1.000）；bge 权重为本地预取，干净机需按 7.3 bootstrap 复现。
 - **打包**：ADR-011 未定稿；干净机安装、体积、下载流程未验证。
 - **平台**：当前 dev 形态绑定 Windows + 仓库内 `.venv`；跨平台打包未开始。
 
@@ -337,10 +337,10 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 **B. 阶段 1（记忆与人设，2–3 周）**
 
 - ✅ 存储层已完成（§3.13）：`0002_memory_vec` + `MemoryRepo` + `MemoryStore` + 嵌入 provider。
-- ⬜ `memory/extractor.py`（LLM 抽取事实 + 替代判定）+ 13.3 的 50 条评测门禁（precision ≥0.85 / recall ≥0.7 / 替代正确率 ≥0.9）。
-- ⬜ retrieve 接进 `TurnGraph._compose_messages`（预算裁剪已在那里，5.2）；session_summary、人设卡 UI、Settings（provider / 隐私模式 / API key）。
-- ⬜ 真模型 13.3 门禁：起 Ollama + `qwen3:8b` 后跑 `scripts/eval_memory.py --provider ollama`。
-- 依赖：bge-small-zh-v1.5 权重（7.3 bootstrap 下载，`~/.cache/echoes/models/`）。
+- ✅ `memory/extractor.py`（LLM 抽取事实 + 替代判定）+ 13.3 的 52 条评测集；真门禁 P 0.917 / R 0.957 / 替代 1.000。
+- ✅ retrieve 接进 `TurnGraph._compose_messages`（5.2）。
+- ⬜ 剩下：session_summary 滚动摘要、人设卡 UI、Settings（provider / 隐私模式 / API key）。
+- 依赖：bge-small-zh-v1.5 权重已预取；干净机需按 7.3 bootstrap 复现。
 
 **C. 里程碑排期（2026-10-24 起，单人开发，不含验收）**
 
@@ -363,6 +363,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 | 提交                    | 内容                                                    |
 | --------------------- | ----------------------------------------------------- |
+| `8c4117a`             | 13.3 真门禁通过：独立 judge + 抽取 prompt 收紧 |
 | `db92e1c`             | 记忆抽取 + 检索注入 + 后置异步写入 + 52 例评测管线 |
 | `d6b93a3`             | IPC TS 类型层由 sidecar 模型生成 + schema-drift CI 真接 |
 | `d5821ad`             | 分句接入引擎 + 克隆真路（zero-shot 嵌入）               |
