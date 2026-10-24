@@ -1,0 +1,52 @@
+{"id": "pref-01", "transcript": "用户：我每天早上都要喝一杯手冲咖啡。\n助手：听起来很香。", "active": [], "expected": [{"fact": "用户喜欢喝手冲咖啡", "category": "preference"}]}
+{"id": "pref-02", "transcript": "用户：我最近在学吉他，已经练了两个月了。", "active": [], "expected": [{"fact": "用户正在学吉他", "category": "preference"}]}
+{"id": "identity-01", "transcript": "用户：我对花生过敏，吃不了。", "active": [], "expected": [{"fact": "用户对花生过敏", "category": "identity"}]}
+{"id": "event-01", "transcript": "用户：我下周三要去上海出差。", "active": [], "expected": [{"fact": "用户下周三去上海出差", "category": "event"}]}
+{"id": "identity-02", "transcript": "用户：我叫小林，是做前端的。", "active": [], "expected": [{"fact": "用户叫小林", "category": "identity"}, {"fact": "用户是做前端的", "category": "identity"}]}
+{"id": "distractor-01", "transcript": "用户：今天好累啊。", "active": [], "expected": []}
+{"id": "distractor-02", "transcript": "助手：我最喜欢猫了。\n用户：哈哈。", "active": [], "expected": []}
+{"id": "distractor-03", "transcript": "用户：如果我有钱了，我想环游世界。", "active": [], "expected": []}
+{"id": "distractor-04", "transcript": "用户：我现在有点饿。", "active": [], "expected": []}
+{"id": "pref-03", "transcript": "用户：我不吃香菜。", "active": [], "expected": [{"fact": "用户不吃香菜", "category": "preference"}]}
+{"id": "identity-03", "transcript": "用户：我养了一只叫豆豆的猫。", "active": [], "expected": [{"fact": "用户养了一只叫豆豆的猫", "category": "identity"}]}
+{"id": "pref-04", "transcript": "用户：我周末通常去爬山。", "active": [], "expected": [{"fact": "用户周末通常去爬山", "category": "preference"}]}
+{"id": "identity-04", "transcript": "用户：我在杭州工作三年了。", "active": [], "expected": [{"fact": "用户在杭州工作", "category": "identity"}]}
+{"id": "event-02", "transcript": "用户：我下周要参加面试。", "active": [], "expected": [{"fact": "用户下周要参加面试", "category": "event"}]}
+{"id": "sup-01", "transcript": "用户：出差改到周五了，不是周三。", "active": [{"id": "f1", "fact": "用户下周三去上海出差", "category": "event"}], "expected": [{"fact": "用户的出差改到周五", "category": "event", "replaces": "f1"}]}
+{"id": "sup-02", "transcript": "用户：我现在改喝拿铁了，美式太苦。", "active": [{"id": "f2", "fact": "用户喜欢喝美式咖啡", "category": "preference"}], "expected": [{"fact": "用户现在喜欢喝拿铁", "category": "preference", "replaces": "f2"}]}
+{"id": "sup-03", "transcript": "用户：我的猫送人了，现在养了一只狗。", "active": [{"id": "f3", "fact": "用户养了一只猫", "category": "identity"}], "expected": [{"fact": "用户现在养了一只狗", "category": "identity", "replaces": "f3"}]}
+{"id": "sup-04", "transcript": "用户：我搬到上海了，工作也换到上海。", "active": [{"id": "f4", "fact": "用户在杭州工作", "category": "identity"}], "expected": [{"fact": "用户搬到上海了", "category": "identity", "replaces": "f4"}]}
+{"id": "sup-05", "transcript": "用户：我现在能吃香菜了。", "active": [{"id": "f5", "fact": "用户不吃香菜", "category": "preference"}], "expected": [{"fact": "用户现在能吃香菜", "category": "preference", "replaces": "f5"}]}
+{"id": "distractor-05", "transcript": "用户：你觉得我应该学吉他吗？", "active": [], "expected": []}
+{"id": "identity-05", "transcript": "用户：我妈妈的生日是 5 月 3 号。", "active": [], "expected": [{"fact": "用户妈妈的生日是5月3号", "category": "identity"}]}
+{"id": "pref-05", "transcript": "用户：我每天早上七点起床。", "active": [], "expected": [{"fact": "用户每天早上七点起床", "category": "preference"}]}
+{"id": "pref-06", "transcript": "用户：我在读《人类简史》。", "active": [], "expected": [{"fact": "用户正在读《人类简史》", "category": "preference"}]}
+{"id": "pref-07", "transcript": "用户：我最近在减肥，晚上不吃主食。", "active": [], "expected": [{"fact": "用户最近在减肥", "category": "preference"}, {"fact": "用户晚上不吃主食", "category": "preference"}]}
+{"id": "identity-06", "transcript": "用户：我有一只狗，叫旺财。", "active": [], "expected": [{"fact": "用户养了一只叫旺财的狗", "category": "identity"}]}
+{"id": "event-03", "transcript": "用户：我明年想考研。", "active": [], "expected": [{"fact": "用户明年想考研", "category": "event"}]}
+{"id": "distractor-06", "transcript": "用户：哈哈哈哈。", "active": [], "expected": []}
+{"id": "distractor-07", "transcript": "用户：你叫什么名字？", "active": [], "expected": []}
+{"id": "identity-07", "transcript": "用户：我是一名小学老师。", "active": [], "expected": [{"fact": "用户是小学老师", "category": "identity"}]}
+{"id": "pref-08", "transcript": "用户：我平时喜欢听周杰伦的歌。", "active": [], "expected": [{"fact": "用户喜欢听周杰伦的歌", "category": "preference"}]}
+{"id": "event-04", "transcript": "用户：我上周去看了海。", "active": [], "expected": [{"fact": "用户上周去看了海", "category": "event"}]}
+{"id": "pref-09", "transcript": "用户：我不喜欢吵闹的地方。", "active": [], "expected": [{"fact": "用户不喜欢吵闹的地方", "category": "preference"}]}
+{"id": "other-01", "transcript": "用户：我每天通勤要一个小时。", "active": [], "expected": [{"fact": "用户每天通勤一小时", "category": "other"}]}
+{"id": "identity-08", "transcript": "用户：我家里有两个孩子。", "active": [], "expected": [{"fact": "用户家里有两个孩子", "category": "identity"}]}
+{"id": "identity-09", "transcript": "用户：我对猫毛过敏。", "active": [], "expected": [{"fact": "用户对猫毛过敏", "category": "identity"}]}
+{"id": "distractor-08", "transcript": "用户：如果明天不下雨，我就去跑步。", "active": [], "expected": []}
+{"id": "pref-10", "transcript": "用户：我习惯晚上十一点睡觉。", "active": [], "expected": [{"fact": "用户习惯晚上十一点睡觉", "category": "preference"}]}
+{"id": "pref-11", "transcript": "用户：我在学做菜，最近在练番茄炒蛋。", "active": [], "expected": [{"fact": "用户在学做菜", "category": "preference"}]}
+{"id": "event-05", "transcript": "用户：我下个月要去日本旅行。", "active": [], "expected": [{"fact": "用户下个月去日本旅行", "category": "event"}]}
+{"id": "pref-12", "transcript": "用户：我喜欢喝无糖可乐。", "active": [], "expected": [{"fact": "用户喜欢喝无糖可乐", "category": "preference"}]}
+{"id": "event-06", "transcript": "用户：我最近换了工作，去了一家创业公司。", "active": [], "expected": [{"fact": "用户最近换了工作", "category": "event"}, {"fact": "用户在一家创业公司工作", "category": "identity"}]}
+{"id": "distractor-09", "transcript": "用户：今天天气真好啊。", "active": [], "expected": []}
+{"id": "identity-10", "transcript": "用户：我有一只猫和一只狗。", "active": [], "expected": [{"fact": "用户养了一只猫和一只狗", "category": "identity"}]}
+{"id": "pref-13", "transcript": "用户：我每周三晚上去练瑜伽。", "active": [], "expected": [{"fact": "用户每周三晚上练瑜伽", "category": "preference"}]}
+{"id": "identity-11", "transcript": "用户：我爸爸是医生。", "active": [], "expected": [{"fact": "用户爸爸是医生", "category": "identity"}]}
+{"id": "event-07", "transcript": "用户：我打算明年搬去成都。", "active": [], "expected": [{"fact": "用户打算明年搬去成都", "category": "event"}]}
+{"id": "sup-06", "transcript": "用户：瑜伽课改到周四了。", "active": [{"id": "f6", "fact": "用户每周三晚上练瑜伽", "category": "preference"}], "expected": [{"fact": "用户的瑜伽课改到周四", "category": "preference", "replaces": "f6"}]}
+{"id": "pref-14", "transcript": "用户：我喜欢看科幻电影。", "active": [], "expected": [{"fact": "用户喜欢看科幻电影", "category": "preference"}]}
+{"id": "pref-15", "transcript": "用户：我早上一般不吃早饭。", "active": [], "expected": [{"fact": "用户早上一般不吃早饭", "category": "preference"}]}
+{"id": "event-08", "transcript": "用户：我在准备一个很重要的考试。", "active": [], "expected": [{"fact": "用户在准备一个重要考试", "category": "event"}]}
+{"id": "identity-12", "transcript": "用户：我住在杭州。", "active": [], "expected": [{"fact": "用户住在杭州", "category": "identity"}]}
+{"id": "other-02", "transcript": "用户：我不太会用电脑。", "active": [], "expected": [{"fact": "用户不太会用电脑", "category": "other"}]}

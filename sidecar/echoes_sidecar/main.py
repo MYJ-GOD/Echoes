@@ -47,6 +47,9 @@ from echoes_sidecar.ipc import (
     UserTextMsg,
     parse_obj,
 )
+from echoes_sidecar.memory.embedding import DEFAULT_MODEL_DIR, TransformersEmbedder
+from echoes_sidecar.memory.extractor import MemoryExtractor
+from echoes_sidecar.memory.store import MemoryStore
 from echoes_sidecar.orchestration.clone import CloneService
 from echoes_sidecar.orchestration.graph import TriggerSource, TurnDeps, TurnGraph
 from echoes_sidecar.orchestration.turn import TurnFactory, TurnRunner
@@ -410,6 +413,48 @@ async def _assemble_ws(argv: Sequence[str] | None) -> LocalWebSocketTransport | 
     return transport
 
 
+def _assemble_memory(
+    argv: Sequence[str] | None,
+    storage: Storage,
+    llm: LLMProvider,
+    *,
+    model_dir: Path | None = None,
+) -> tuple[MemoryStore | None, MemoryExtractor | None]:
+    """组合根记忆装配（5.2）：auto 默认；mock 或权重缺失时关闭（不产假记忆）。
+
+    `--memory on` 强制启用（权重缺失会在首次检索/写入报 MODEL_NOT_LOADED，
+    用于验证错误路径）；`off` 完全关闭。bge 权重归 7.3 部署 bootstrap。
+    """
+    parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
+    parser.add_argument("--memory", choices=["auto", "on", "off"], default="auto")
+    args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
+
+    if args.memory == "off":
+        print("[sidecar] 记忆功能关闭（--memory off）", file=sys.stderr)
+        return None, None
+
+    weights = Path(model_dir) if model_dir is not None else DEFAULT_MODEL_DIR
+    available = (weights / "config.json").is_file()
+    if args.memory == "auto" and (llm.name == "mock" or not available):
+        reason = "mock LLM" if llm.name == "mock" else f"bge 权重缺失: {weights}"
+        print(f"[sidecar] 记忆功能未启用（auto：{reason}）", file=sys.stderr)
+        return None, None
+
+    if not available:
+        print(
+            f"[sidecar] 记忆权重缺失（{weights}）：首次检索/写入将报 MODEL_NOT_LOADED"
+            "（7.3 bootstrap 预取；运行时不联网补救）",
+            file=sys.stderr,
+        )
+    embedder = TransformersEmbedder(model_dir=weights)
+    store = MemoryStore(storage.memories, embedder)
+    # 默认隐私模式（ADR-001「绝不出网」）：provider 是 ollama/mock 时不受影响；
+    # 将来接云端 provider 时，抽取器会直接跳过（4.4/5.2）。
+    extractor = MemoryExtractor(llm, store, privacy_mode=True)
+    print(f"[sidecar] 记忆功能启用（bge={weights}）", file=sys.stderr)
+    return store, extractor
+
+
 class _Warmable(Protocol):
     """分级就绪引擎的最小面（whisper / CosyVoice2 的 warmup 载荷，3.4 v1.4）。
 
@@ -550,6 +595,7 @@ async def _serve_with_storage(
     asr_engine, asr_ready = _assemble_asr(argv)
     tts_engine, tts_ready = _assemble_tts(argv, assets_dir=paths.assets_dir)
     ws_transport = await _assemble_ws(argv)
+    memory_store, memory_extractor = _assemble_memory(argv, storage, llm_provider)
     # hello.engines 的清单顺序即装配顺序（3.4：壳以最后一份 hello 为准）
     engine_states: list[EngineState] = [
         EngineState(name="asr", ready=asr_ready),
@@ -571,6 +617,8 @@ async def _serve_with_storage(
             t0=t0,
             egress=ws_transport,
             storage=storage,
+            memory=memory_store,
+            extractor=memory_extractor,
         ),
         machine,
         manager=manager,

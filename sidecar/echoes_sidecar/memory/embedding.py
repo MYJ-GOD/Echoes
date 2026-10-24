@@ -21,6 +21,7 @@ from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.db.memory_repo import EMBEDDING_DIM
 
 _DEFAULT_MODEL_DIR = Path.home() / ".cache" / "echoes" / "models" / "bge-small-zh-v1.5"
+DEFAULT_MODEL_DIR = _DEFAULT_MODEL_DIR
 
 
 @runtime_checkable
@@ -98,4 +99,4 @@ class TransformersEmbedder:
         return [normalize(row.tolist()) for row in cls]
 
 
-__all__ = ["EMBEDDING_DIM", "Embedder", "TransformersEmbedder", "normalize"]
+__all__ = ["DEFAULT_MODEL_DIR", "EMBEDDING_DIM", "Embedder", "TransformersEmbedder", "normalize"]

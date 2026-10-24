@@ -31,6 +31,8 @@ from echoes_sidecar.db import Storage
 from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.tts.base import TTSEngine
 from echoes_sidecar.ipc import AssistantTextMsg, ErrorMsg, StateMsg, Timings, TurnCompleteMsg
+from echoes_sidecar.memory.extractor import MemoryExtractor
+from echoes_sidecar.memory.store import MemoryStore
 from echoes_sidecar.orchestration.text_clean import clean_for_tts
 from echoes_sidecar.session.manager import SessionManager
 from echoes_sidecar.session.session import Session
@@ -64,6 +66,8 @@ class TurnDeps:
     t0: float  # sidecar 单调时钟原点（3.4 观测字段 t）
     egress: AudioEgress | None = None  # 无壳连接（--ws off）时为 None，音频丢弃
     storage: Storage | None = None  # 会话落库；单测直调可省
+    memory: MemoryStore | None = None  # 5.2：turn 前检索相关事实
+    extractor: MemoryExtractor | None = None  # 5.2：turn 后异步抽取
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,8 @@ class TurnGraph:
         self._deps = deps
         self._machine = machine
         self._manager = manager
+        # 5.2 抽取是「turn 结束后」的后台活：任务句柄必须自持，否则可能被 GC。
+        self._memory_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def machine(self) -> StateMachine:
@@ -136,12 +142,13 @@ class TurnGraph:
         status: TurnStatus = "SUCCESS"
         progress = _Progress()
         timings = Timings(total_ms=0)
+        reply = ""
 
         self._machine.transition(AppState.GENERATING)
         await self._emit_state(session)
 
         try:
-            messages = self._compose_messages(session, text)
+            messages = await self._compose_messages(session, text)
             reply = await self._generate(session, messages, progress, token)
             self._machine.transition(AppState.SPEAKING)
             await self._emit_state(session)
@@ -180,20 +187,34 @@ class TurnGraph:
                 self._machine.transition(AppState.READY)
                 await self._emit_state(session)
             await self._persist_session(session)
+            # 5.2：抽取在 turn 收尾之后异步跑，不占本轮延迟、失败不回噬 turn。
+            if status == "SUCCESS" and reply:
+                self._schedule_memory(session, text, reply, session.turn_seq)
 
         return TurnOutcome(status=status, turn_seq=session.turn_seq, timings=timings)
 
     # ------------------------------ 三节点 ------------------------------
 
-    def _compose_messages(self, session: Session, user_text: str) -> list[dict[str, str]]:
+    async def _compose_messages(self, session: Session, user_text: str) -> list[dict[str, str]]:
         """节点 1：提示组装（5.2 预算/裁剪的唯一执行点）。
 
-        阶段 0 只有「人设 + 本轮输入」；阶段 1 的 retrieve 结果（记忆/摘要）插在
-        system 与 user 之间，裁剪按 `MAX_CONTEXT_CHARS` 先丢最旧的历史——
-        **永不裁本轮输入**（用户刚说的话是不可替换的）。
+        system = 人设 + 检索到的 fact（5.2：记忆拼进 system，不跟在 user 后面）。
+        记忆是增强项：检索失败只记 stderr，本轮照常无记忆回答——错误记忆比没有
+        记忆更毒，但「检索坏了就聊不了」同样不可接受。
         """
+        system = session.persona.system_prompt
+        memory = self._deps.memory
+        if memory is not None:
+            try:
+                facts = await memory.retrieve(session.profile_id, user_text, k=5)
+            except Exception as exc:  # noqa: BLE001  记忆面失败不阻断对话
+                print(f"[sidecar] 记忆检索失败（本轮无记忆）: {exc}", file=sys.stderr)
+            else:
+                hint = memory.compose_hint(facts)
+                if hint:
+                    system = f"{system}\n\n{hint}"
         messages = [
-            {"role": "system", "content": session.persona.system_prompt},
+            {"role": "system", "content": system},
             {"role": "user", "content": user_text},
         ]
         self._fit_budget(messages)
@@ -319,6 +340,40 @@ class TurnGraph:
             await asyncio.to_thread(_write)
         except EchoesError as exc:
             print(f"[sidecar] 会话落库失败（turn 不受影响）: {exc}", file=sys.stderr)
+
+    # ------------------------------ 记忆（5.2） ------------------------------
+
+    def _schedule_memory(
+        self, session: Session, user_text: str, reply: str, turn_seq: int
+    ) -> None:
+        """turn 成功后起后台抽取任务；句柄自持，避免被 GC 静默取消。"""
+        if self._deps.extractor is None:
+            return
+        transcript = f"用户：{user_text}\n助手：{reply}"
+        task = asyncio.create_task(
+            self._remember(session, transcript, turn_seq), name="echoes-memory"
+        )
+        self._memory_tasks.add(task)
+        task.add_done_callback(self._memory_tasks.discard)
+
+    async def _remember(self, session: Session, transcript: str, turn_seq: int) -> None:
+        """抽取失败只记日志：记忆是增强项，不能回噬已成功的 turn。"""
+        extractor = self._deps.extractor
+        assert extractor is not None
+        try:
+            await extractor.ingest(
+                session.profile_id,
+                transcript,
+                source_session_id=session.session_id,
+                source_turn=turn_seq,
+            )
+        except Exception as exc:  # noqa: BLE001  最后一道防线（同 TurnRunner）
+            print(f"[sidecar] 记忆抽取失败（不影响对话）: {exc}", file=sys.stderr)
+
+    async def wait_memory_idle(self) -> None:
+        """等在途抽取收尾（测试 / 优雅退出用；生产不阻塞 turn）。"""
+        if self._memory_tasks:
+            await asyncio.gather(*list(self._memory_tasks), return_exceptions=True)
 
 
 def _require_text(payload: dict[str, Any]) -> str:

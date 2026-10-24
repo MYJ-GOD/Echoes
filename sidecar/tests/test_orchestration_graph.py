@@ -123,7 +123,7 @@ async def test_budget_keeps_user_input_and_drops_history() -> None:
     graph, transport, _egress, session = _run()
     user_text = "这" * (MAX_CONTEXT_CHARS // 2)
 
-    messages = graph._compose_messages(session, user_text)
+    messages = await graph._compose_messages(session, user_text)
     assert messages[0]["role"] == "system"
     assert messages[-1] == {"role": "user", "content": user_text}
 

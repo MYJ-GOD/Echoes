@@ -19,6 +19,8 @@ from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.tts.base import TTSEngine
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
+from echoes_sidecar.memory.extractor import MemoryExtractor
+from echoes_sidecar.memory.store import MemoryStore
 from echoes_sidecar.orchestration.graph import TurnDeps, TurnGraph
 from echoes_sidecar.session.session import Session
 from echoes_sidecar.transport.base import AudioEgress, Transport
@@ -194,6 +196,8 @@ def make_graph(
     egress: AudioEgress | None = None,
     machine: StateMachine | None = None,
     t0: float | None = None,
+    memory: MemoryStore | None = None,
+    extractor: MemoryExtractor | None = None,
 ) -> TurnGraph:
     """turn 编排的标准装配（默认 mock 引擎 + 记录型 transport）。"""
     return TurnGraph(
@@ -203,6 +207,8 @@ def make_graph(
             tts=tts if tts is not None else MockTTSEngine(),
             t0=t0 if t0 is not None else time.perf_counter(),
             egress=egress,
+            memory=memory,
+            extractor=extractor,
         ),
         machine if machine is not None else ready_machine(),
     )
