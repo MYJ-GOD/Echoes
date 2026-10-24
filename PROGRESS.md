@@ -10,8 +10,8 @@
 | 范围                | 开发完成度        | 剩余开发（单人，中值）   |
 | ----------------- | ------------ | ------------- |
 | **阶段 0：垂直切片**     | **约 92–95%** | **约 0.5 周（延迟决策/上机）** |
-| **MVP：阶段 0–1**    | **约 78–82%** | **约 1–1.5 周** |
-| **全路线：阶段 -1 → 3** | **约 43–46%** | **约 7 周**   |
+| **MVP：阶段 0–1**    | **约 95–100%** | **约 0.5 周（阶段 0 收尾）** |
+| **全路线：阶段 -1 → 3** | **约 52–55%** | **约 6 周**   |
 
 口径说明：
 
@@ -22,6 +22,7 @@
 - **2026-10-24 复核**：规范环境是 `sidecar/.venv`（uv 管理，torch 2.7.1+cu126 / transformers 4.51.3 / sqlite-vec 0.1.9）。四闸复跑 **263 passed + 1 deselected**、mypy 36、`cargo test` 20、`npm run build` 通过。用仓库根 `.venv` 复跑会因缺 `sqlite-vec` 迁移依赖而红——那是旧骨架环境，不是代码回归；`uv.lock` 已补 `sqlite-vec`（原锁缺失，0002 迁移在冻结安装下无法复现）。
 - **2026-10-24 第三轮（阶段 1 抽取线）**：抽取器 + 检索注入 + turn 后置异步写入 + 52 例评测管线落地（`db92e1c`）；pytest 263 → **299**；13.3 真门禁（qwen3:8b + qwen2.5 judge）P 0.917 / R 0.957 / 替代 1.000 通过（`8c4117a`）。bge-small-zh 权重已预取到 `~/.cache/echoes/models/bge-small-zh-v1.5`（512 维 / L2=1.0，真 embedder 检索命中）。阶段 1 完成约 45%，剩余 session_summary、人设卡、Settings。
 - **2026-10-24 第四轮（阶段 1 摘要线）**：`session_summary` 仓储 + `SessionSummarizer` + 最近 12 轮历史 + 预算成对裁剪落地（`8697d04`）；pytest 299 → **317**；qwen3:8b 真摘要 smoke 落库成功（`用户养了一只名为豆豆的猫`）。阶段 1 完成约 60%，剩余人设卡 UI、Settings（需新增 IPC 消息，走 12.2）。
+- **2026-10-24 第五轮（阶段 1 收口）**：人设卡 + Settings 按 3.4 拉取语义落地（`ab03f93`）——壳用 rusqlite 直写 `setting` 表，sidecar 每轮读取；人设覆盖走 `persona_name` / `persona_system_prompt`，provider 由 `ProviderRouter` 在 turn 边界切换。pytest 317 → **333**，cargo 20 → **25**；真机 smoke：mock 启动 → 写 settings → 下一轮切 ollama/qwen3:8b 并应用新人设。阶段 1 **代码面完成**；验收（隔天记忆引用/隐私抓包/首 token 增幅）未跑。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -267,6 +268,24 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 验证：pytest 299 → **317 passed**；mypy 38；ruff / lint-imports（2 contracts）。
 **未做**：人设卡 UI、Settings（需新增 IPC 契约，走 12.2 变更记录）。
 
+### 3.16 人设卡 + Settings（2026-10-24，阶段 1 收口）
+
+按 3.4 **拉取语义**落地，**无 IPC 契约变更**：壳写 SQLite，sidecar 每轮读取。
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| `RuntimeSettings`（provider/model/privacy/persona 覆盖） | ✅ | `session/runtime.py`；`test_runtime_settings.py` |
+| `ProviderRouter`（turn 边界切换 + 关闭旧客户端） | ✅ | `engines/llm/router.py`；`test_llm_router.py` |
+| 每轮应用设置 + 人设覆盖 | ✅ | `TurnGraph._apply_runtime_settings`；`test_orchestration_settings.py` |
+| 壳侧固定 SQL（rusqlite） | ✅ | `src-tauri/src/profile.rs`；25 Rust tests |
+| 四条 Tauri 命令 | ✅ | `get_persona` / `save_persona` / `get_settings` / `save_settings` |
+| 前端面板 | ✅ | `App.vue` 人设名字/提示词 + provider/model/隐私；`ipc.ts` 门面 |
+| API key | ⏸ | 当前仅 mock/ollama，本地 provider 无需 key；接云端时按 16.1 走系统凭据 |
+| 真机拉取 smoke | ✅ | mock 启动 → 写 settings → 下一轮 ollama/qwen3:8b + 新人设 |
+
+验证：pytest **333 passed**；mypy 39；ruff / lint-imports；cargo **25 passed**；`npm run build`。
+**边界**：切换 provider/model 首轮会冷加载（实测 qwen3:8b 切后首 token 32.9s）；隐私模式已持久化，但当前无云端 provider，实际不触发网络分支。
+
 ## 4. 未完成
 
 ### 4.1 阶段 0 收尾（**一半已实测，一半卡在设备/决策**）
@@ -289,9 +308,8 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 ### 4.2 阶段 1：记忆与人设（2–3 周）
 
-- ✅ 存储层（§3.13）、抽取器（§3.14）、检索注入（§3.14）、后置异步写入（§3.14）、52 例评测管线与真门禁（§3.14）、滚动摘要（§3.15）。
-- ⬜ 剩下：人设卡 UI、Settings（provider / 隐私模式 / API key）；两者需要新增 IPC 消息，走 12.2 变更记录。
-- 依赖：bge-small-zh-v1.5 权重已预取；部署 bootstrap 仍需在干净机复现（7.3）。
+- ✅ 存储（§3.13）、抽取（§3.14）、检索（§3.14）、摘要（§3.15）、人设/Settings（§3.16）——**代码面完成**。
+- ⬜ 验收未跑（按当前决定暂缓）：隔天引用事实、隐私模式抓包、首 token 增幅 ≤200ms。
 
 ### 4.3 阶段 2：克隆 UX + 远程（2–3 周）
 
@@ -332,6 +350,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 - **克隆路线**：闭环与真路代码均就绪（3.6 / 3.9），zero-shot 的**听感未验证**（要人耳盲听 + 播放设备；嵌入耗时本机可测）；相似度质检（`CLONE_QUALITY_LOW`）按计划推迟到阶段 2。
 - **打断**：三跳已落地（3.7），busy 期 PTT 可按下即打断；但 100/50/150ms 分摊只在 mock 下定性验证过，真机数字要等 ADR-012 的延迟实测一起量。
 - **记忆**：存储/抽取/检索/评测管线/滚动摘要与 13.3 真门禁已落地（3.13–3.15；P 0.917 / R 0.957 / 替代 1.000）；bge 权重为本地预取，干净机需按 7.3 bootstrap 复现。
+- **设置切换冷启动**：provider/model 切换后首轮重新加载模型（实测 qwen3:8b 切后首 token 32.9s）；隐私模式已持久化，但当前无云端 provider，实际不触发网络分支。
 - **打包**：ADR-011 未定稿；干净机安装、体积、下载流程未验证。
 - **平台**：当前 dev 形态绑定 Windows + 仓库内 `.venv`；跨平台打包未开始。
 
@@ -351,8 +370,8 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 **B. 阶段 1（记忆与人设，2–3 周）**
 
-- ✅ 存储层（§3.13）、抽取器 + 13.3 真门禁（§3.14）、检索注入（§3.14）、滚动摘要（§3.15）。
-- ⬜ 剩下：人设卡 UI、Settings（provider / 隐私模式 / API key）；需新增 persona/settings IPC 消息（12.2 变更记录）。
+- ✅ 存储层（§3.13）、抽取器 + 13.3 真门禁（§3.14）、检索注入（§3.14）、滚动摘要（§3.15）、人设/Settings（§3.16）——代码面完成。
+- ⬜ 验收暂缓：隔天引用事实 / 隐私模式抓包 / 首 token 增幅 ≤200ms。
 - 依赖：bge-small-zh-v1.5 权重已预取；干净机需按 7.3 bootstrap 复现。
 
 **C. 里程碑排期（2026-10-24 起，单人开发，不含验收）**
@@ -369,13 +388,14 @@ ruff / mypy(33) / lint-imports(2) 全绿。
   ② 8G 档 LLM+TTS 显存冲突（阶段 2 前）；
   ③ ADR-011 split-binary（阶段 3 前）。
 - **并行可选项**：延迟优化（开场语气词预合成 + 首句更短 + 预热）约 1–2 周，可与阶段 1 并行；不做则接受「当前预算不达标」的产品风险。
-- **阶段 1 当前（10/24）**：存储 / 抽取 / 检索 / 评测 / 摘要已完成；剩余人设卡 + Settings（IPC 12.2），按约 1 周收口。
+- **阶段 1（10/24）**：代码面完成（含人设/Settings）；验收按当前决定暂缓。下一步阶段 2。
 - 每个里程碑结束都跑四闸 + 壳测试 + 构建，并回填本文与 [docs/acceptance/stage0.md](docs/acceptance/stage0.md)。
 
 ## 7. 关键提交（近端）
 
 | 提交                    | 内容                                                    |
 | --------------------- | ----------------------------------------------------- |
+| `ab03f93`             | 人设卡 + Settings 拉取语义（壳直写 SQLite / 每轮应用 / provider 路由） |
 | `8697d04`             | 滚动摘要 + 最近 N 轮历史 + 预算成对裁剪（5.2） |
 | `8c4117a`             | 13.3 真门禁通过：独立 judge + 抽取 prompt 收紧 |
 | `db92e1c`             | 记忆抽取 + 检索注入 + 后置异步写入 + 52 例评测管线 |

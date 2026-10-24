@@ -37,4 +37,6 @@ npm run tauri dev                                  # 真路：Ollama + whisper +
 
 记忆默认 `--memory auto`（mock LLM 或 bge 权重缺失时自动关闭）；真门禁需 Ollama + `qwen3:8b`。
 
+人设与引擎设置在应用右上角「设置」；按 3.4 拉取语义保存后下一轮生效（无需重启）。
+
 进度与剩余工作见 [PROGRESS.md](PROGRESS.md)；阶段 0 验收逐条见 [docs/acceptance/stage0.md](docs/acceptance/stage0.md)。
