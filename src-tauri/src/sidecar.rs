@@ -99,7 +99,10 @@ fn forward_events<R: BufRead>(mut reader: R, sink: &mut dyn FnMut(ShellEvent)) {
         }
         match serde_json::from_str::<SidecarEvent>(trimmed) {
             Ok(event) => {
-                if let SidecarEvent::Hello { protocol_version, .. } = &event {
+                if let SidecarEvent::Hello {
+                    protocol_version, ..
+                } = &event
+                {
                     if protocol_version.split('.').next() != Some(PROTOCOL_MAJOR) {
                         sink(ShellEvent::Protocol {
                             code: "PROTOCOL_MISMATCH".into(),
@@ -161,6 +164,51 @@ fn parse_ws_port(line: &str) -> Option<u16> {
     digits.parse().ok()
 }
 
+/// sidecar 启动形态（ADR-011 split-binary）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchSpec {
+    program: std::path::PathBuf,
+    args: Vec<String>,
+    cwd: std::path::PathBuf,
+}
+
+/// dev：`<sidecar>/.venv/.../python -m echoes_sidecar.main`；
+/// 安装包：`<resource>/sidecar/echoes-sidecar[.exe]`（ONEDIR 根）。
+fn resolve_launch(sidecar_dir: &Path) -> Result<LaunchSpec, String> {
+    let exe_name = if cfg!(windows) {
+        "echoes-sidecar.exe"
+    } else {
+        "echoes-sidecar"
+    };
+    let bundled = sidecar_dir.join(exe_name);
+    if bundled.is_file() {
+        return Ok(LaunchSpec {
+            program: bundled,
+            args: Vec::new(),
+            cwd: sidecar_dir.to_path_buf(),
+        });
+    }
+
+    let python = if cfg!(windows) {
+        sidecar_dir.join(".venv").join("Scripts").join("python.exe")
+    } else {
+        sidecar_dir.join(".venv").join("bin").join("python")
+    };
+    if python.is_file() {
+        return Ok(LaunchSpec {
+            program: python,
+            args: vec!["-m".into(), "echoes_sidecar.main".into()],
+            cwd: sidecar_dir.to_path_buf(),
+        });
+    }
+
+    Err(format!(
+        "未找到 sidecar 可执行文件：bundled={} / dev={}（ADR-011）",
+        bundled.display(),
+        python.display()
+    ))
+}
+
 /// sidecar 子进程：stdin 写入端常驻，Drop 时杀进程（3.3 sidecar.rs 职责的最小面）。
 pub struct Sidecar {
     child: Child,
@@ -168,8 +216,8 @@ pub struct Sidecar {
 }
 
 impl Sidecar {
-    /// dev 形态：`<仓库根>/sidecar/.venv/Scripts/python -m echoes_sidecar.main`
-    /// （cwd=sidecar/，与终端运行形态一致；生产 split-binary 由 ADR-011 定稿后替换）。
+    /// dev：`<仓库根>/sidecar/.venv/Scripts/python -m echoes_sidecar.main`；
+    /// 安装包：ONEDIR `echoes-sidecar.exe`（ADR-011；资源目录由组合根传入）。
     ///
     /// `args` 为引擎装配参数（真路/ mock 由组合根决定，12.3）；`on_ws_port` 在
     /// stderr 出现 WS 端口行时回调一次（`--ws auto` 时；便携形态见 lib.rs）。
@@ -182,17 +230,12 @@ impl Sidecar {
         sink: Box<dyn FnMut(ShellEvent) + Send>,
         on_ws_port: Box<dyn FnMut(u16) + Send>,
     ) -> Result<Self, String> {
-        let python = sidecar_dir
-            .parent()
-            .expect("sidecar 必有父目录")
-            .join(".venv")
-            .join("Scripts")
-            .join("python.exe");
-        let mut command = Command::new(&python);
+        let launch = resolve_launch(sidecar_dir)?;
+        let mut command = Command::new(&launch.program);
         command
-            .args(["-m", "echoes_sidecar.main"])
+            .args(&launch.args)
             .args(args)
-            .current_dir(sidecar_dir);
+            .current_dir(&launch.cwd);
         for (key, value) in envs {
             command.env(key, value);
         }
@@ -201,7 +244,7 @@ impl Sidecar {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("sidecar 启动失败 ({}): {e}", python.display()))?;
+            .map_err(|e| format!("sidecar 启动失败 ({}): {e}", launch.program.display()))?;
 
         let stdout = child
             .stdout
@@ -248,11 +291,7 @@ impl Sidecar {
     }
 
     /// 壳→sidecar：样本已通过 WS bit2 帧上送完毕，请开始克隆（3.4/4.6）。
-    pub fn send_clone_start(
-        &self,
-        session_id: &str,
-        sample_keys: &[String],
-    ) -> Result<(), String> {
+    pub fn send_clone_start(&self, session_id: &str, sample_keys: &[String]) -> Result<(), String> {
         self.send_line(&serde_json::json!({
             "type": "clone_start",
             "session_id": session_id,
@@ -333,26 +372,39 @@ mod tests {
         .expect("sidecar 启动");
 
         // hello 握手 + 版本校验
-        let hello =
-            recv_matches(&rx, |e| matches!(e, ShellEvent::Sidecar(..)), Duration::from_secs(20));
+        let hello = recv_matches(
+            &rx,
+            |e| matches!(e, ShellEvent::Sidecar(..)),
+            Duration::from_secs(20),
+        );
         match hello {
-            ShellEvent::Sidecar(SidecarEvent::Hello { protocol_version, .. }) => {
+            ShellEvent::Sidecar(SidecarEvent::Hello {
+                protocol_version, ..
+            }) => {
                 assert_eq!(protocol_version, "1.0");
             }
             other => panic!("首事件应为 hello，实得 {other:?}"),
         }
 
-        sidecar.send_user_text("default", "测试").expect("user_text");
+        sidecar
+            .send_user_text("default", "测试")
+            .expect("user_text");
 
         // 回复文本：至少一片、全量语义（后片包含前片）
         let mut seen_increasing: Option<String> = None;
         loop {
-            let ev =
-                recv_matches(&rx, |e| matches!(e, ShellEvent::Sidecar(..)), Duration::from_secs(20));
+            let ev = recv_matches(
+                &rx,
+                |e| matches!(e, ShellEvent::Sidecar(..)),
+                Duration::from_secs(20),
+            );
             if let ShellEvent::Sidecar(SidecarEvent::AssistantText { text, .. }) = ev {
                 let is_final_piece = text.contains("了");
                 match &seen_increasing {
-                    Some(prev) => assert!(text.contains(prev.as_str()), "递增语义破坏：{prev:?} ⊄ {text:?}"),
+                    Some(prev) => assert!(
+                        text.contains(prev.as_str()),
+                        "递增语义破坏：{prev:?} ⊄ {text:?}"
+                    ),
                     None => assert!(text.contains("mock"), "mock 回复文本异常：{text:?}"),
                 }
                 seen_increasing = Some(text);
@@ -376,7 +428,11 @@ mod tests {
         }
     }
 
-    fn recv_matches(rx: &mpsc::Receiver<ShellEvent>, f: fn(&ShellEvent) -> bool, timeout: Duration) -> ShellEvent {
+    fn recv_matches(
+        rx: &mpsc::Receiver<ShellEvent>,
+        f: fn(&ShellEvent) -> bool,
+        timeout: Duration,
+    ) -> ShellEvent {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -401,7 +457,7 @@ mod tests {
     /// asr_final → turn_complete(SUCCESS) → 下行 0x02 帧。播放设备不参与（回调收帧）。
     #[test]
     fn ptt_audio_end_to_end() {
-        use crate::ws_audio::{pcm16_le, WsAudioClient};
+        use crate::ws_audio::{WsAudioClient, pcm16_le};
 
         let (tx, rx) = mpsc::channel::<ShellEvent>();
         let (port_tx, port_rx) = mpsc::channel::<u16>();
@@ -437,13 +493,9 @@ mod tests {
             .expect("WS 端口回调");
 
         let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>();
-        let client = WsAudioClient::connect(
-            port,
-            crate::ws_audio::OutputGate::new(),
-            move |pcm| {
-                let _ = pcm_tx.send(pcm);
-            },
-        );
+        let client = WsAudioClient::connect(port, crate::ws_audio::OutputGate::new(), move |pcm| {
+            let _ = pcm_tx.send(pcm);
+        });
         // 400ms 16k mono（内容无关：mock ASR 恒定文本）+ is_final 空帧
         let pcm: Vec<i16> = (0..6400)
             .map(|n| ((n as f64 * 0.4).sin() * 4000.0) as i16)
@@ -512,7 +564,9 @@ mod tests {
             Duration::from_secs(20),
         );
 
-        sidecar.send_user_text("default", "测试打断").expect("user_text");
+        sidecar
+            .send_user_text("default", "测试打断")
+            .expect("user_text");
         // 首片到达 = turn 已在 generating；此刻 mock 正卡在片间时延里
         recv_matches(
             &rx,
@@ -533,7 +587,9 @@ mod tests {
         let elapsed = started.elapsed();
 
         match done {
-            ShellEvent::Sidecar(SidecarEvent::TurnComplete { status, turn_seq, .. }) => {
+            ShellEvent::Sidecar(SidecarEvent::TurnComplete {
+                status, turn_seq, ..
+            }) => {
                 assert_eq!(status, "CANCELLED");
                 assert_eq!(turn_seq, 1, "被打断的 turn 仍然占一个 turn_seq");
             }
@@ -550,7 +606,10 @@ mod tests {
             |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::State { state, .. }) if state == "ready"),
             Duration::from_secs(10),
         );
-        assert!(matches!(state, ShellEvent::Sidecar(SidecarEvent::State { .. })));
+        assert!(matches!(
+            state,
+            ShellEvent::Sidecar(SidecarEvent::State { .. })
+        ));
     }
 
     /// 无在途 turn 时的 `control` 是可容忍的协议噪声：不得产生 turn_complete，
@@ -579,7 +638,9 @@ mod tests {
             .expect("control(cancel_turn)");
 
         // 之后仍能正常跑完一轮 = 进程没被 protocol 噪声带歪
-        sidecar.send_user_text("default", "还在吗").expect("user_text");
+        sidecar
+            .send_user_text("default", "还在吗")
+            .expect("user_text");
         let done = recv_matches(
             &rx,
             |e| matches!(e, ShellEvent::Sidecar(SidecarEvent::TurnComplete { .. })),
@@ -591,5 +652,67 @@ mod tests {
             }
             other => panic!("应为 turn_complete，实得 {other:?}"),
         }
+    }
+
+    fn temp_launch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("echoes-launch-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir parent");
+        }
+        std::fs::write(path, b"").expect("touch");
+    }
+
+    #[test]
+    fn resolve_launch_prefers_sidecar_venv_in_dev() {
+        let dir = temp_launch_dir("dev");
+        let python = if cfg!(windows) {
+            dir.join(".venv").join("Scripts").join("python.exe")
+        } else {
+            dir.join(".venv").join("bin").join("python")
+        };
+        touch(&python);
+
+        let spec = resolve_launch(&dir).expect("dev launch");
+        assert_eq!(spec.program, python);
+        assert_eq!(spec.args, vec!["-m", "echoes_sidecar.main"]);
+        assert_eq!(spec.cwd, dir);
+        let _ = std::fs::remove_dir_all(&spec.cwd);
+    }
+
+    #[test]
+    fn resolve_launch_prefers_bundled_exe() {
+        let dir = temp_launch_dir("bundled");
+        let exe = dir.join(if cfg!(windows) {
+            "echoes-sidecar.exe"
+        } else {
+            "echoes-sidecar"
+        });
+        touch(&exe);
+        // 同时存在 dev venv 也应优先安装包形态
+        let python = if cfg!(windows) {
+            dir.join(".venv").join("Scripts").join("python.exe")
+        } else {
+            dir.join(".venv").join("bin").join("python")
+        };
+        touch(&python);
+
+        let spec = resolve_launch(&dir).expect("bundled launch");
+        assert_eq!(spec.program, exe);
+        assert!(spec.args.is_empty());
+        let _ = std::fs::remove_dir_all(&spec.cwd);
+    }
+
+    #[test]
+    fn resolve_launch_missing_is_an_error() {
+        let dir = temp_launch_dir("missing");
+        let err = resolve_launch(&dir).expect_err("应报缺可执行文件");
+        assert!(err.contains("未找到 sidecar 可执行文件"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

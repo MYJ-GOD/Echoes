@@ -252,10 +252,16 @@ pub fn run() {
       });
 
       // 阶段 0 dev 形态：仓库根 sidecar/（.venv Python）。
-      let sidecar_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("sidecar"))
-        .expect("CARGO_MANIFEST_DIR 必有父目录");
+      // dev：仓库 sidecar/.venv；安装包：Tauri resource 下的 sidecar/（ADR-011）。
+      let sidecar_dir = if cfg!(debug_assertions) {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+          .parent()
+          .map(|p| p.join("sidecar"))
+          .expect("CARGO_MANIFEST_DIR 必有父目录")
+      } else {
+        app.path().resource_dir()?.join("sidecar")
+      };
+      log::info!("sidecar 目录: {}", sidecar_dir.display());
       let args = sidecar_args();
       log::info!("sidecar 参数: {args:?}");
 
