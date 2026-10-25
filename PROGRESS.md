@@ -11,8 +11,9 @@
 | ----------------- | ------------ | ------------- |
 | **阶段 0：垂直切片**     | **约 92–95%** | **约 0.5 周（延迟决策/上机）** |
 | **阶段 2：克隆 UX + 远程** | **代码面 100%** | fine-tune 评估可选 |
+| **阶段 3：打包分发** | **约 20%** | **约 3 周** |
 | **MVP：阶段 0–1**    | **约 95–100%** | **约 0.5 周（阶段 0 收尾）** |
-| **全路线：阶段 -1 → 3** | **约 70–72%** | **约 3.5–4 周** |
+| **全路线：阶段 -1 → 3** | **约 75–77%** | **约 3 周** |
 
 口径说明：
 
@@ -27,6 +28,7 @@
 - **2026-10-25 第六轮（阶段 2 起步）**：音色槽位列表/切换（ADR-008）落地（`0127ee2`）——壳读 voice 表 + 写 `session.voice_id`，sidecar 每轮拉取，turn 收尾不再回写；内置音色虚拟项、只允许 ready 克隆音色；设置面板音色单选。pytest **334**，cargo **29**，npm build。阶段 2 剩余：克隆质检、LAN + 配对、终端模拟器、重连去重。
 - **2026-10-25 第七轮（LAN）**：`LanWebSocketTransport` + token 配对 + 终端模拟器落地（`18e5e99`）——`--transport lan` 时 LAN WS 同时承载 JSON 与音频；hello/state 重放、断线保活；文本与 WAV 两条真机链路通过。pytest **338**。多终端并发/公网/加密不做（8.3）。
 - **2026-10-25 第八轮（阶段 2 收口）**：克隆相似度质检（campplus 余弦 + `CLONE_QUALITY_LOW`）落地（`fa9f648`）；pytest 338 → **343**；npm build。阶段 2 代码面完成（音色槽位 / LAN / 终端 / 质检）；真 campplus 质检未跑（无真麦克风，用户不验收）。下一步阶段 3。
+- **2026-10-25 第九轮（阶段 3 起步）**：ADR-011 split-binary 定稿 + 模型管理器落地（`686ab69`）；pytest 343 → **351**；CLI 正确识别本机 bge/CosyVoice2/qwen3。阶段 3 剩余：ONEDIR 构建、Tauri 安装器、首启引导、CI 矩阵。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -334,6 +336,22 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 验证：pytest **343 passed**；ruff / mypy / lint-imports；`npm run build`。
 **边界**：质检只在真 CosyVoice2 路径启用；0.6 是保守初值，可能误拒/漏放。
 
+### 3.20 ADR-011 + 模型管理器（2026-10-25，阶段 3 起步）
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| ADR-011 split-binary | ✅ | `docs/decisions/ADR-011-packaging-split.md`；ONEDIR 34.9MB 基线 |
+| 模型清单 | ✅ | `models/manifest.json`：bge / CosyVoice2 / whisper / Ollama |
+| repo 多源 | ✅ | ModelScope → HuggingFace fallback；`test_model_manager.py` |
+| file 断点 + sha256 | ✅ | Range 续传、sha 校验、`.part` 原子 rename |
+| Ollama 复用 / pull | ✅ | `/api/tags` 扫描 + `/api/pull` 流式进度 |
+| 缓存扫描 / CLI | ✅ | `list` / `status` / `ensure` / `verify` |
+| Whisper 本地路径 | ✅ | 优先 `~/.cache/echoes/models/faster-whisper-small` |
+| ONEDIR 构建 / 安装器 / 首启引导 | ⬜ | 阶段 3 后续 |
+
+验证：pytest **351 passed**；mypy 42；ruff / lint-imports。
+**边界**：模型清单未列 wetext（当前 wetext 仍走 HF cache，待接线）；torch/CUDA 运行时包下载未实现。
+
 ## 4. 未完成
 
 ### 4.1 阶段 0 收尾（**一半已实测，一半卡在设备/决策**）
@@ -367,10 +385,12 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 ### 4.4 阶段 3：打包与分发（3–4 周）
 
-- 三平台 CI、sidecar split-binary 打包、Tauri 安装器。
-- torch / CUDA / 模型权重运行时下载，模型管理器（多源 / 校验 / 缓存 / Ollama 复用扫描）。
-- 首次启动硬件检测 → 档位推荐 → 下载引导。
-- 现状：仅完成 PyInstaller 体积探测（`d6d39b3`）；ADR-011 未定稿。
+- ✅ ADR-011 split-binary（§3.20）；✅ 模型管理器（§3.20）。
+- ⬜ ONEDIR sidecar 构建 + Tauri bundle resource + spawn 解析。
+- ⬜ torch / CUDA 运行时包下载（模型管理器已覆盖模型权重）。
+- ⬜ 首次启动硬件检测 → 档位推荐 → 下载引导。
+- ⬜ 三平台 CI（CPU 面）。
+- 现状：PyInstaller 探测 + ADR-011 + 模型管理器完成；安装器/首启/CI 未做。
 
 ### 4.5 技术债（2026-10-23 审计发现，不阻塞但会在阶段 1 反噬）
 
@@ -401,7 +421,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 - **记忆**：存储/抽取/检索/评测管线/滚动摘要与 13.3 真门禁已落地（3.13–3.15；P 0.917 / R 0.957 / 替代 1.000）；bge 权重为本地预取，干净机需按 7.3 bootstrap 复现。
 - **设置切换冷启动**：provider/model 切换后首轮重新加载模型（实测 qwen3:8b 切后首 token 32.9s）；隐私模式已持久化，但当前无云端 provider，实际不触发网络分支。
 - **LAN 安全边界**：token 在配对 URL/日志明文；局域网阶段不做 TLS/端到端加密（8.3）；单活动端点，断线期间事件不重放（turn 去重是终端侧 `turn_seq`）。
-- **打包**：ADR-011 未定稿；干净机安装、体积、下载流程未验证。
+- **打包**：ADR-011 已定 split-binary；模型管理器已落地；**ONEDIR 构建 / 安装器 / 首启引导 / CI 未做**，干净机流程未验证。
 - **平台**：当前 dev 形态绑定 Windows + 仓库内 `.venv`；跨平台打包未开始。
 
 ## 6. 下一步
@@ -431,7 +451,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 | **P0 基线** | 10/24–10/27 | 规范环境/README、`uv.lock` 补 sqlite-vec、CI CPU-safe 依赖、延迟预算决策输入 | 四闸 + `cargo test` 20 + `npm run build` 全绿 |
 | **阶段 1 记忆与人设** | 10/28–11/13（约 2.5 周） | `memory/extractor.py` + 50 条评测门禁、检索接入 `_compose_messages`、session_summary、人设卡 UI、Settings（provider/隐私/API key） | 评测集达标 + 四闸 + 记忆 e2e（隔天引用事实） |
 | **阶段 2 克隆 UX + 远程** | 已完成（10/25） | 音色槽位 + LanWS/配对/终端/保活 + 克隆质检 | 四闸 + 配对/去重测试已过；真机验收暂缓 |
-| **阶段 3 打包分发** | 12/7–1/8（约 4 周，缓冲到 1/15） | ADR-011 定稿、split-binary、安装器、torch/权重运行时下载、模型管理器、首启引导 | 安装包构建 + 打包后 sidecar 冷启 + 体积/离线冒烟 |
+| **阶段 3 打包分发** | 进行中 | ADR-011 + 模型管理器（已完成）、ONEDIR 构建、安装器、首启引导、CI | 安装包构建 + 打包后 sidecar 冷启 + 体积/离线冒烟 |
 
 - **决策门**（不阻塞当前编码，但要在对应窗口前拍板）：
   ① ADR-012 §9 延迟预算（当前首音频 2727ms / 端到端 4705ms，预算 500/2500ms）；
@@ -445,6 +465,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 | 提交                    | 内容                                                    |
 | --------------------- | ----------------------------------------------------- |
+| `686ab69`             | ADR-011 split-binary + 模型管理器（7.3） |
 | `fa9f648`             | 克隆相似度质检（campplus 余弦 + CLONE_QUALITY_LOW） |
 | `18e5e99`             | LAN transport + token 配对 + 终端模拟器（8.2） |
 | `0127ee2`             | 音色槽位列表/切换（ADR-008） |
@@ -504,6 +525,10 @@ npm run tauri dev                                  # 真路（需 Ollama / whisp
 # LAN 终端（headless sidecar；单活动端点；URL 从 stderr 取）
 .venv\Scripts\python.exe -m echoes_sidecar.main --transport lan --llm mock --asr mock --tts mock
 .venv\Scripts\python.exe scripts\lan_terminal.py --url "ws://<ip>:<port>/?token=..."
+
+# 模型管理器（7.3）
+.venv\Scripts\python.exe scripts\model_manager.py list
+.venv\Scripts\python.exe scripts\model_manager.py ensure bge-small-zh-v1.5 cosyvoice2-0.5b
 ```
 
 ## 9. 文档关系与更新约定
