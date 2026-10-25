@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 
+from echoes_sidecar.db.repo import Storage
 from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.router import ProviderRouter
 from echoes_sidecar.orchestration.graph import TriggerSource
@@ -134,3 +136,29 @@ async def test_persona_override_requires_both_fields() -> None:
 
     assert session.persona.name == "默认人设"
     assert llm.messages[0][0]["content"] == "s"
+
+
+async def test_voice_selection_is_pulled_from_db_each_turn(tmp_path: Path) -> None:
+    storage = Storage.open(tmp_path / "db" / "echoes.db")
+    try:
+        storage.personas.sync(
+            persona_id="default", name="默认人设", system_prompt="s", now=1.0
+        )
+        storage.sessions.create(session_id="default", persona_id="default", now=1.0)
+        storage.voices.insert_training(
+            voice_id="clone:v1", display_name="音色 1", sample_path="a.wav", now=1.0
+        )
+        storage.voices.mark_ready("clone:v1")
+        storage.sessions.bind_voice("default", "clone:v1")
+
+        graph = make_graph(storage=storage, settings_loader=SettingsBox(_settings()))
+        session = make_session()
+
+        await graph.run_turn(session, TriggerSource.USER_INPUT, {"text": "第一轮"})
+        assert session.voice_id == "clone:v1"
+
+        storage.sessions.bind_voice("default", None)
+        await graph.run_turn(session, TriggerSource.USER_INPUT, {"text": "第二轮"})
+        assert session.voice_id is None
+    finally:
+        storage.close()

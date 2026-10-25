@@ -9,6 +9,7 @@ mod audio;
 mod capture;
 mod profile;
 mod sidecar;
+mod voices;
 mod ws_audio;
 
 use std::path::PathBuf;
@@ -131,6 +132,17 @@ fn get_settings() -> Result<profile::SettingsView, String> {
 #[tauri::command]
 fn save_settings(settings: profile::SettingsView) -> Result<(), String> {
     profile::write_settings(&profile::db_path(), &settings)
+}
+
+/// 音色槽位（ADR-008）：列表 + 切换；写 session.voice_id，sidecar 下一轮拉取。
+#[tauri::command]
+fn list_voices() -> Result<Vec<voices::VoiceView>, String> {
+    voices::list_voices(&profile::db_path())
+}
+
+#[tauri::command]
+fn select_voice(voice_id: String) -> Result<(), String> {
+    voices::select_voice(&profile::db_path(), &voice_id)
 }
 
 /// 克隆录音开始：复位重采样器（克隆与播放无关，不动播放缓冲）。
@@ -312,6 +324,8 @@ pub fn run() {
       save_persona,
       get_settings,
       save_settings,
+      list_voices,
+      select_voice,
       interrupt_turn,
       cancel_turn,
       clone_record_start,

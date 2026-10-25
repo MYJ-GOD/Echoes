@@ -16,6 +16,7 @@ import pytest
 
 from echoes_sidecar.core.state_machine import AppState, StateMachine
 from echoes_sidecar.core.types import AudioChunk, Persona
+from echoes_sidecar.db.repo import Storage
 from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.tts.base import TTSEngine
@@ -203,6 +204,7 @@ def make_graph(
     extractor: MemoryExtractor | None = None,
     summarizer: SessionSummarizer | None = None,
     settings_loader: Callable[[], RuntimeSettings] | None = None,
+    storage: Storage | None = None,
 ) -> TurnGraph:
     """turn 编排的标准装配（默认 mock 引擎 + 记录型 transport）。"""
     return TurnGraph(
@@ -216,6 +218,7 @@ def make_graph(
             extractor=extractor,
             summarizer=summarizer,
             settings_loader=settings_loader,
+            storage=storage,
         ),
         machine if machine is not None else ready_machine(),
     )

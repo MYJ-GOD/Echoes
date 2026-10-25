@@ -56,6 +56,8 @@ const settingsDraft = ref<ipc.SettingsView>({
   model: "qwen3:8b",
   privacyMode: true,
 });
+const voices = ref<ipc.VoiceView[]>([]);
+const voicesStatus = ref("");
 const profileStatus = ref("");
 let profileRetry: number | null = null;
 let profileAttempts = 0;
@@ -101,6 +103,35 @@ async function saveSettings(): Promise<void> {
   }
 }
 
+async function loadVoices(): Promise<void> {
+  try {
+    voices.value = await ipc.listVoices();
+    hasClonedVoice.value = voices.value.some(
+      (voice) => voice.id !== "builtin:default" && voice.status === "ready",
+    );
+    voicesStatus.value = "";
+  } catch (err) {
+    voicesStatus.value = `⚠ ${String(err)}`;
+  }
+}
+
+async function chooseVoice(voiceId: string): Promise<void> {
+  try {
+    await ipc.selectVoice(voiceId);
+    await loadVoices();
+    profileStatus.value = "音色已切换（下一轮对话生效）";
+  } catch (err) {
+    profileStatus.value = `⚠ ${String(err)}`;
+  }
+}
+
+function voiceLabel(voice: ipc.VoiceView): string {
+  if (voice.status === "ready") {
+    return voice.id === "builtin:default" ? "内置" : "已就绪";
+  }
+  return voice.status === "training" ? "克隆中" : "失败";
+}
+
 function protocolDown(code: string, message: string): void {
   engineState.value = "error";
   messages.value.push({ role: "assistant", text: `⚠ ${code}：${message}` });
@@ -111,6 +142,7 @@ onMounted(async () => {
     protocolDown(failure.code, failure.message);
   });
   void loadProfile();
+  void loadVoices();
 });
 
 onUnmounted(() => {
@@ -177,6 +209,7 @@ function handleFrame(frame: SidecarMessage): void {
         hasClonedVoice.value = true;
         clonePhase.value = null;
         clonePct.value = 100;
+        void loadVoices();
       }
       break;
     case "error":
@@ -613,6 +646,29 @@ async function send(): Promise<void> {
           当前仅本地 provider，无需 API key。保存后在下一轮对话生效；人设覆盖默认人设。
         </p>
         <button @click="saveSettings">保存设置</button>
+
+        <hr />
+        <div class="voice-head">
+          <h3>音色</h3>
+          <button class="link" @click="loadVoices">刷新</button>
+        </div>
+        <p v-if="voicesStatus" class="settings-status">{{ voicesStatus }}</p>
+        <label
+          v-for="voice in voices"
+          :key="voice.id"
+          class="voice-option"
+        >
+          <input
+            type="radio"
+            name="voice"
+            :checked="voice.selected"
+            :disabled="voice.status !== 'ready' || busy || clonePhase !== null"
+            @change="chooseVoice(voice.id)"
+          />
+          <span>{{ voice.displayName }}</span>
+          <span class="voice-meta">{{ voiceLabel(voice) }}</span>
+        </label>
+        <p class="hint">切换后下一轮生效；旧回复不受影响。</p>
       </section>
     </div>
   </main>
@@ -854,5 +910,27 @@ footer .mic {
   font-size: 12px;
   color: #8a8494;
   line-height: 1.5;
+}
+.settings-panel h3 {
+  font-size: 13px;
+  color: #d6d0df;
+}
+.voice-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.settings-panel label.voice-option {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.settings-panel label.voice-option input {
+  accent-color: #6750a4;
+}
+.voice-meta {
+  margin-left: auto;
+  font-size: 11px;
+  color: #8a8494;
 }
 </style>

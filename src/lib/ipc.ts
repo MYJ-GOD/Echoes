@@ -128,6 +128,24 @@ export function saveSettings(settings: SettingsView): Promise<void> {
   return invoke("save_settings", { settings });
 }
 
+/** 音色槽位（ADR-008）：内置 + 克隆列表；selected 由服务端标记。 */
+export interface VoiceView {
+  id: string;
+  displayName: string;
+  status: "ready" | "training" | "failed" | string;
+  qualityScore: number | null;
+  createdAt: number;
+  selected: boolean;
+}
+
+export function listVoices(): Promise<VoiceView[]> {
+  return invoke("list_voices");
+}
+
+export function selectVoice(voiceId: string): Promise<void> {
+  return invoke("select_voice", { voiceId });
+}
+
 /**
  * 类型对拍的「反向使用」：这几条断言保证前端构造的控制消息与生成类型一致
  * （壳侧真正发送走命令而非直接写 JSON 行，故只做编译期校验）。

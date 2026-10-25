@@ -269,6 +269,14 @@ class TurnGraph:
                 updated_at=time.time(),
             )
 
+        # 音色槽位（ADR-008）：壳写 session.voice_id，sidecar 每轮拉取；
+        # 不在 turn 收尾回写，避免覆盖用户在轮间切换的选择。
+        storage = self._deps.storage
+        if storage is not None:
+            row = storage.sessions.get(session.session_id)
+            if row is not None:
+                session.voice_id = row.voice_id
+
     def _current_summary(self, session: Session) -> str:
         """取当前摘要（首轮从 DB 懒加载；读失败按无摘要处理）。"""
         summarizer = self._deps.summarizer
@@ -404,8 +412,6 @@ class TurnGraph:
 
         def _write() -> None:
             storage.sessions.touch(session.session_id, now=time.time())
-            if session.voice_id is not None:
-                storage.sessions.bind_voice(session.session_id, session.voice_id)
 
         try:
             await asyncio.to_thread(_write)
