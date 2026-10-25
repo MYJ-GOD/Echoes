@@ -1,6 +1,6 @@
-# Echoes 开发进度与剩余工作（2026-10-24）
+# Echoes 开发进度与剩余工作（2026-10-25）
 
-> 本文是截至 **2026-10-24** 的进度快照，按「只推进开发、暂不做验收」的口径统计。
+> 本文是截至 **2026-10-25** 的进度快照，按「只推进开发、暂不做验收」的口径统计。
 > 权威依据：[docs/architecture.md](docs/architecture.md)（§2.3 MVP 定义、§6 分阶段计划、§12 下一步动作、§15 工程规范）。
 > 详细执行账本：`.superpowers/sdd/echoes-skeleton/progress.md`（本地文件，gitignored，R1–R21）。
 > **完成度 = 代码 + 自动化测试到位**；不含真机麦克风/扬声器、延迟实测与产品验收。
@@ -11,7 +11,7 @@
 | ----------------- | ------------ | ------------- |
 | **阶段 0：垂直切片**     | **约 92–95%** | **约 0.5 周（延迟决策/上机）** |
 | **MVP：阶段 0–1**    | **约 95–100%** | **约 0.5 周（阶段 0 收尾）** |
-| **全路线：阶段 -1 → 3** | **约 52–55%** | **约 6 周**   |
+| **全路线：阶段 -1 → 3** | **约 54–57%** | **约 5.5–6 周**   |
 
 口径说明：
 
@@ -23,6 +23,7 @@
 - **2026-10-24 第三轮（阶段 1 抽取线）**：抽取器 + 检索注入 + turn 后置异步写入 + 52 例评测管线落地（`db92e1c`）；pytest 263 → **299**；13.3 真门禁（qwen3:8b + qwen2.5 judge）P 0.917 / R 0.957 / 替代 1.000 通过（`8c4117a`）。bge-small-zh 权重已预取到 `~/.cache/echoes/models/bge-small-zh-v1.5`（512 维 / L2=1.0，真 embedder 检索命中）。阶段 1 完成约 45%，剩余 session_summary、人设卡、Settings。
 - **2026-10-24 第四轮（阶段 1 摘要线）**：`session_summary` 仓储 + `SessionSummarizer` + 最近 12 轮历史 + 预算成对裁剪落地（`8697d04`）；pytest 299 → **317**；qwen3:8b 真摘要 smoke 落库成功（`用户养了一只名为豆豆的猫`）。阶段 1 完成约 60%，剩余人设卡 UI、Settings（需新增 IPC 消息，走 12.2）。
 - **2026-10-24 第五轮（阶段 1 收口）**：人设卡 + Settings 按 3.4 拉取语义落地（`ab03f93`）——壳用 rusqlite 直写 `setting` 表，sidecar 每轮读取；人设覆盖走 `persona_name` / `persona_system_prompt`，provider 由 `ProviderRouter` 在 turn 边界切换。pytest 317 → **333**，cargo 20 → **25**；真机 smoke：mock 启动 → 写 settings → 下一轮切 ollama/qwen3:8b 并应用新人设。阶段 1 **代码面完成**；验收（隔天记忆引用/隐私抓包/首 token 增幅）未跑。
+- **2026-10-25 第六轮（阶段 2 起步）**：音色槽位列表/切换（ADR-008）落地（`0127ee2`）——壳读 voice 表 + 写 `session.voice_id`，sidecar 每轮拉取，turn 收尾不再回写；内置音色虚拟项、只允许 ready 克隆音色；设置面板音色单选。pytest **334**，cargo **29**，npm build。阶段 2 剩余：克隆质检、LAN + 配对、终端模拟器、重连去重。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -286,6 +287,20 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 验证：pytest **333 passed**；mypy 39；ruff / lint-imports；cargo **25 passed**；`npm run build`。
 **边界**：切换 provider/model 首轮会冷加载（实测 qwen3:8b 切后首 token 32.9s）；隐私模式已持久化，但当前无云端 provider，实际不触发网络分支。
 
+### 3.17 音色槽位（2026-10-25，阶段 2 起步）
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| 内置音色虚拟项 + 克隆列表 | ✅ | `voices.rs::list_voices`；未就绪/失败项 UI 置灰 |
+| 只允许 ready 音色选中 | ✅ | `select_voice` 校验 status；`builtin:default` 写 NULL |
+| 壳写 `session.voice_id` + sidecar 每轮拉取 | ✅ | `TurnGraph._apply_runtime_settings`；`test_orchestration_settings` |
+| turn 收尾不回写 voice | ✅ | `_persist_session` 只 touch，避免覆盖轮间切换 |
+| 前端音色单选 + 刷新 | ✅ | 设置面板；克隆完成自动刷新 |
+| 质检 `CLONE_QUALITY_LOW` | ⬜ | 需要说话人相似度模型；阶段 2 后续 |
+
+验证：pytest **334 passed**；cargo **29 passed**；`npm run build`。
+**边界**：`quality_score` 仍为 NULL；音色切换只影响新 turn 的 TTS，旧回复不变。
+
 ## 4. 未完成
 
 ### 4.1 阶段 0 收尾（**一半已实测，一半卡在设备/决策**）
@@ -313,9 +328,10 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 ### 4.3 阶段 2：克隆 UX + 远程（2–3 周）
 
-- 克隆质检（`CLONE_QUALITY_LOW`）、音色槽位列表 / 切换（ADR-008）。
-- LanWebSocketTransport + IP / 一次性 token 配对、终端协议最小实现、断线重连去重。
-- fine-tune 质量升级评估（若需要）。
+- ✅ 音色槽位列表 / 切换（ADR-008，§3.17）。
+- ⬜ 克隆质检（`CLONE_QUALITY_LOW`，需要说话人相似度模型）。
+- ⬜ LanWebSocketTransport + IP / 一次性 token 配对、终端协议最小实现、断线重连去重。
+- ⬜ fine-tune 质量升级评估（若需要）。
 
 ### 4.4 阶段 3：打包与分发（3–4 周）
 
@@ -380,7 +396,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 | --- | --- | --- | --- |
 | **P0 基线** | 10/24–10/27 | 规范环境/README、`uv.lock` 补 sqlite-vec、CI CPU-safe 依赖、延迟预算决策输入 | 四闸 + `cargo test` 20 + `npm run build` 全绿 |
 | **阶段 1 记忆与人设** | 10/28–11/13（约 2.5 周） | `memory/extractor.py` + 50 条评测门禁、检索接入 `_compose_messages`、session_summary、人设卡 UI、Settings（provider/隐私/API key） | 评测集达标 + 四闸 + 记忆 e2e（隔天引用事实） |
-| **阶段 2 克隆 UX + 远程** | 11/16–12/4（约 3 周） | 克隆质检、音色列表/切换、LanWS + 配对、终端模拟器、重连去重 | Transport 一致性 + 配对/去重测试 + 四闸 |
+| **阶段 2 克隆 UX + 远程** | 11/16–12/4（约 3 周） | 音色槽位（已完成）、克隆质检、LanWS + 配对、终端模拟器、重连去重 | Transport 一致性 + 配对/去重测试 + 四闸 |
 | **阶段 3 打包分发** | 12/7–1/8（约 4 周，缓冲到 1/15） | ADR-011 定稿、split-binary、安装器、torch/权重运行时下载、模型管理器、首启引导 | 安装包构建 + 打包后 sidecar 冷启 + 体积/离线冒烟 |
 
 - **决策门**（不阻塞当前编码，但要在对应窗口前拍板）：
@@ -395,6 +411,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 | 提交                    | 内容                                                    |
 | --------------------- | ----------------------------------------------------- |
+| `0127ee2`             | 音色槽位列表/切换（ADR-008） |
 | `ab03f93`             | 人设卡 + Settings 拉取语义（壳直写 SQLite / 每轮应用 / provider 路由） |
 | `8697d04`             | 滚动摘要 + 最近 N 轮历史 + 预算成对裁剪（5.2） |
 | `8c4117a`             | 13.3 真门禁通过：独立 judge + 抽取 prompt 收紧 |
