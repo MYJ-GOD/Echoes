@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import sys
 import time
@@ -27,6 +28,7 @@ from typing import Literal
 from uuid import uuid4
 
 from echoes_sidecar.audio.stream import AudioInputStream
+from echoes_sidecar.core.cancel import aclose
 from echoes_sidecar.core.errors import CloneError, EchoesError, ErrorCode
 from echoes_sidecar.core.types import AudioChunk
 from echoes_sidecar.db import Storage
@@ -42,6 +44,9 @@ MIN_SAMPLE_SECONDS = 3.0
 # 电平校验：近乎静音或大量削波的样本对克隆毫无价值（阶段 2 的相似度质检是另一层）
 MIN_RMS_DBFS = -45.0
 MAX_CLIPPING_RATIO = 0.05
+# 阶段 2 相似度质检（campplus 余弦）；阈值先保守取 0.6，真机校准后走 ADR 修订。
+MIN_SPEAKER_SIMILARITY = 0.6
+QUALITY_REFERENCE_TEXT = "你好，这是音色质检。"
 
 ClonePhase = Literal["recording", "training", "checking"]
 
@@ -134,6 +139,7 @@ class CloneService:
         assets_root: Path,
         t0: float,
         clock: Callable[[], float] = time.time,
+        min_similarity: float = MIN_SPEAKER_SIMILARITY,
     ) -> None:
         self._transport = transport
         self._storage = storage
@@ -142,6 +148,7 @@ class CloneService:
         self._assets_root = assets_root
         self._t0 = t0
         self._clock = clock
+        self._min_similarity = min_similarity
         self._cancel = asyncio.Event()
 
     # ------------------------------ 对外接口 ------------------------------
@@ -180,6 +187,29 @@ class CloneService:
             await self._emit_progress("training", 100)
             self._storage.voices.adopt_id(voice_id, engine_voice_id)
             current_id = engine_voice_id
+            self._raise_if_cancelled("质检前取消")
+
+            # 阶段 2 质检：引擎若有说话人相似度能力（CosyVoice2 campplus），
+            # 用克隆音色合成一句参考文本，与原样本算余弦；mock 引擎无此能力则跳过。
+            scorer = getattr(self._tts, "speaker_similarity", None)
+            if scorer is not None:
+                await self._emit_progress("checking", 10)
+                reference = await self._collect_reference(engine_voice_id)
+                raw_score = await scorer(pcm, reference)
+                score = float(raw_score)
+                if not math.isfinite(score):
+                    raise CloneError(
+                        ErrorCode.CLONE_ENGINE_FAILED, "音色质检返回非法分数"
+                    )
+                score = max(0.0, min(1.0, score))
+                self._storage.voices.set_quality(engine_voice_id, score)
+                if score < self._min_similarity:
+                    raise CloneError(
+                        ErrorCode.CLONE_QUALITY_LOW,
+                        f"音色相似度 {score:.2f} < {self._min_similarity:.2f}，请重新录制",
+                    )
+                self._raise_if_cancelled("质检后取消")
+
             self._storage.voices.mark_ready(
                 engine_voice_id, model_path=self._existing_model_rel(engine_voice_id)
             )
@@ -228,6 +258,21 @@ class CloneService:
                 t=self._now_ms(),
             ).model_dump(mode="json")
         )
+
+    async def _collect_reference(self, voice_id: str) -> bytes:
+        """用克隆音色合成质检参考音频（24k PCM16），供说话人相似度比较。"""
+        parts: list[bytes] = []
+        stream = self._tts.synthesize(QUALITY_REFERENCE_TEXT, voice_id)
+        try:
+            async for chunk in stream:
+                if chunk.data:
+                    parts.append(chunk.data)
+        finally:
+            await aclose(stream)
+        pcm = b"".join(parts)
+        if not pcm:
+            raise CloneError(ErrorCode.CLONE_ENGINE_FAILED, "音色质检参考音频为空")
+        return pcm
 
     def _voices_dir(self) -> Path:
         return self._assets_root / "voices"

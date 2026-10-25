@@ -223,6 +223,20 @@ class VoiceRepo:
         if cursor.rowcount == 0:
             raise EchoesError(ErrorCode.VOICE_NOT_AVAILABLE, f"音色不存在：{voice_id}")
 
+    def set_quality(self, voice_id: str, score: float) -> None:
+        """阶段 2 质检分（0–1）；失败音色也可以记录分数供 UI 解释。"""
+        if not 0.0 <= score <= 1.0:
+            raise EchoesError(
+                ErrorCode.STORAGE_ERROR, f"音色质量分越界：{score}（应在 0–1）"
+            )
+        with _guard(self._conn, "写入音色质量分"):
+            cursor = self._conn.execute(
+                "UPDATE voice SET quality_score = ? WHERE id = ?",
+                (score, voice_id),
+            )
+            self._conn.commit()
+        self._require_row(cursor, voice_id)
+
     def fail_orphans(self) -> int:
         """启动自检（14.1）：上次被 kill/断电遗留的 training 孤儿置 failed。"""
         with _guard(self._conn, "清理孤儿音色"):

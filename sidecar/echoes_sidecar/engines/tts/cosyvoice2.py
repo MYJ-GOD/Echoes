@@ -41,6 +41,7 @@ import asyncio
 import os
 import queue
 import sys
+import tempfile
 import threading
 import wave
 from collections.abc import AsyncIterator
@@ -482,6 +483,52 @@ class CosyVoice2TtsEngine(TTSEngine):
                 ErrorCode.CLONE_ENGINE_FAILED, f"克隆嵌入提取失败：{exc.message}"
             ) from exc
         return voice_id
+
+    async def speaker_similarity(self, sample_pcm: bytes, synth_pcm: bytes) -> float:
+        """阶段 2 质检：原样本 vs 克隆音色合成音频的 campplus 余弦（0–1）。
+
+        TTS 输出是 24k，campplus 要 16k；2/3 重采样后写临时 WAV 再提嵌入。
+        本方法不在 4.5 TTS ABC 里（质检是引擎可选能力，mock 没有）——编排层
+        用 getattr 探测，不把质量面塞进冻结契约。
+        """
+        engine = await self._ensure_engine("speaker_similarity")
+        frontend = getattr(engine, "frontend", None)
+        extract = getattr(frontend, "_extract_spk_embedding", None)
+        if extract is None:
+            raise EchoesError(ErrorCode.TTS_ENGINE_ERROR, "CosyVoice2 前端缺少说话人嵌入")
+        if not sample_pcm or not synth_pcm:
+            raise EchoesError(ErrorCode.TTS_ENGINE_ERROR, "质检音频为空")
+        return await asyncio.to_thread(
+            self._similarity_sync, extract, sample_pcm, synth_pcm
+        )
+
+    def _similarity_sync(self, extract: Any, sample_pcm: bytes, synth_pcm: bytes) -> float:
+        import numpy as np
+        import torch
+        from scipy.signal import resample_poly
+
+        def _write_wav(path: Path, pcm: bytes) -> None:
+            with wave.open(str(path), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(_SAMPLE_WIDTH)
+                handle.setframerate(_CLONE_SAMPLE_RATE)
+                handle.writeframes(pcm[: len(pcm) - (len(pcm) % _SAMPLE_WIDTH)])
+
+        synth = np.frombuffer(synth_pcm, dtype="<i2").astype(np.float32)
+        synth16 = resample_poly(synth, 2, 3)  # 24k -> 16k（2/3）
+        synth16_pcm = np.clip(synth16, -32768, 32767).astype("<i2").tobytes()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sample_wav = Path(tmp) / "sample.wav"
+            synth_wav = Path(tmp) / "synth.wav"
+            _write_wav(sample_wav, sample_pcm)
+            _write_wav(synth_wav, synth16_pcm)
+            emb_sample = extract(str(sample_wav))
+            emb_synth = extract(str(synth_wav))
+            score = torch.nn.functional.cosine_similarity(
+                emb_sample, emb_synth, dim=1
+            ).item()
+        return float(max(-1.0, min(1.0, score)))
 
     def _write_clone_wav(self, voice_id: str, pcm: bytes) -> Path:
         """样本落盘（temp+rename）：文件名 = voice_id 的 ':' → '_'（5.1 相对路径）。"""

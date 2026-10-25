@@ -126,10 +126,17 @@ async function chooseVoice(voiceId: string): Promise<void> {
 }
 
 function voiceLabel(voice: ipc.VoiceView): string {
+  const score =
+    voice.qualityScore === null
+      ? ""
+      : ` · 相似度 ${Math.round(voice.qualityScore * 100)}%`;
   if (voice.status === "ready") {
-    return voice.id === "builtin:default" ? "内置" : "已就绪";
+    return (voice.id === "builtin:default" ? "内置" : "已就绪") + score;
   }
-  return voice.status === "training" ? "克隆中" : "失败";
+  if (voice.status === "training") {
+    return "克隆中";
+  }
+  return voice.qualityScore === null ? "失败" : `失败${score}`;
 }
 
 function protocolDown(code: string, message: string): void {
