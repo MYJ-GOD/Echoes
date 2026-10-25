@@ -10,8 +10,9 @@
 | 范围                | 开发完成度        | 剩余开发（单人，中值）   |
 | ----------------- | ------------ | ------------- |
 | **阶段 0：垂直切片**     | **约 92–95%** | **约 0.5 周（延迟决策/上机）** |
+| **阶段 2：克隆 UX + 远程** | **代码面 100%** | fine-tune 评估可选 |
 | **MVP：阶段 0–1**    | **约 95–100%** | **约 0.5 周（阶段 0 收尾）** |
-| **全路线：阶段 -1 → 3** | **约 58–60%** | **约 5 周**   |
+| **全路线：阶段 -1 → 3** | **约 70–72%** | **约 3.5–4 周** |
 
 口径说明：
 
@@ -25,6 +26,7 @@
 - **2026-10-24 第五轮（阶段 1 收口）**：人设卡 + Settings 按 3.4 拉取语义落地（`ab03f93`）——壳用 rusqlite 直写 `setting` 表，sidecar 每轮读取；人设覆盖走 `persona_name` / `persona_system_prompt`，provider 由 `ProviderRouter` 在 turn 边界切换。pytest 317 → **333**，cargo 20 → **25**；真机 smoke：mock 启动 → 写 settings → 下一轮切 ollama/qwen3:8b 并应用新人设。阶段 1 **代码面完成**；验收（隔天记忆引用/隐私抓包/首 token 增幅）未跑。
 - **2026-10-25 第六轮（阶段 2 起步）**：音色槽位列表/切换（ADR-008）落地（`0127ee2`）——壳读 voice 表 + 写 `session.voice_id`，sidecar 每轮拉取，turn 收尾不再回写；内置音色虚拟项、只允许 ready 克隆音色；设置面板音色单选。pytest **334**，cargo **29**，npm build。阶段 2 剩余：克隆质检、LAN + 配对、终端模拟器、重连去重。
 - **2026-10-25 第七轮（LAN）**：`LanWebSocketTransport` + token 配对 + 终端模拟器落地（`18e5e99`）——`--transport lan` 时 LAN WS 同时承载 JSON 与音频；hello/state 重放、断线保活；文本与 WAV 两条真机链路通过。pytest **338**。多终端并发/公网/加密不做（8.3）。
+- **2026-10-25 第八轮（阶段 2 收口）**：克隆相似度质检（campplus 余弦 + `CLONE_QUALITY_LOW`）落地（`fa9f648`）；pytest 338 → **343**；npm build。阶段 2 代码面完成（音色槽位 / LAN / 终端 / 质检）；真 campplus 质检未跑（无真麦克风，用户不验收）。下一步阶段 3。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -297,10 +299,10 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 | 壳写 `session.voice_id` + sidecar 每轮拉取 | ✅ | `TurnGraph._apply_runtime_settings`；`test_orchestration_settings` |
 | turn 收尾不回写 voice | ✅ | `_persist_session` 只 touch，避免覆盖轮间切换 |
 | 前端音色单选 + 刷新 | ✅ | 设置面板；克隆完成自动刷新 |
-| 质检 `CLONE_QUALITY_LOW` | ⬜ | 需要说话人相似度模型；阶段 2 后续 |
+| 质检 `CLONE_QUALITY_LOW` | ✅ | §3.19：campplus 余弦 + 阈值 0.6 |
 
 验证：pytest **334 passed**；cargo **29 passed**；`npm run build`。
-**边界**：`quality_score` 仍为 NULL；音色切换只影响新 turn 的 TTS，旧回复不变。
+**边界**：`quality_score` 由 §3.19 质检写入；音色切换只影响新 turn 的 TTS，旧回复不变。
 
 ### 3.18 LAN 传输 + 配对 + 终端模拟器（2026-10-25，阶段 2）
 
@@ -317,6 +319,20 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 真机：文本 mock 回复 + WAV 6 帧 → `asr_final` → `TURN SUCCESS` → 下行 PCM。
 验证：pytest **338 passed**；ruff / mypy / lint-imports。
 **边界**：token 在 URL/日志明文（局域网阶段不做 TLS，8.3）；断线期间事件不重放，turn 去重是终端侧 `turn_seq`。
+
+### 3.19 克隆相似度质检（2026-10-25，阶段 2 收口）
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| campplus 相似度 | ✅ | `CosyVoice2TtsEngine.speaker_similarity`：16k 原样本 vs 24k 合成 2/3 重采样 |
+| 参考文本合成 | ✅ | `CloneService._collect_reference`（用克隆音色合成一句质检文本） |
+| 阈值门禁 | ✅ | <0.6 → `CLONE_QUALITY_LOW`；音色 `failed`、不绑定、清样本 |
+| 质量分入库 | ✅ | `VoiceRepo.set_quality`；设置面板显示相似度百分比 |
+| mock 引擎跳过 | ✅ | `getattr` 探测；旧克隆测试进度不变 |
+| 真机校准 | ⬜ | 无真麦克风；阈值 0.6 待真机样本校准 |
+
+验证：pytest **343 passed**；ruff / mypy / lint-imports；`npm run build`。
+**边界**：质检只在真 CosyVoice2 路径启用；0.6 是保守初值，可能误拒/漏放。
 
 ## 4. 未完成
 
@@ -345,9 +361,8 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 ### 4.3 阶段 2：克隆 UX + 远程（2–3 周）
 
-- ✅ 音色槽位（§3.17）、LAN + token 配对 + 终端模拟器 + 断线保活（§3.18）。
-- ⬜ 克隆质检（`CLONE_QUALITY_LOW`，需要说话人相似度模型）。
-- ⬜ fine-tune 质量升级评估（若需要）。
+- ✅ 音色槽位（§3.17）、LAN + token 配对 + 终端模拟器 + 断线保活（§3.18）、克隆质检（§3.19）。
+- ⬜ fine-tune 质量升级评估（可选，不阻塞阶段 3）。
 - 不做：多终端并发 / 公网 / 端到端加密（8.3）。
 
 ### 4.4 阶段 3：打包与分发（3–4 周）
@@ -380,7 +395,8 @@ ruff / mypy(33) / lint-imports(2) 全绿。
   处置建议见 [ADR-012 §9](docs/decisions/ADR-012-latency-baseline.md)（含「开场语气词
   预合成」这条唯一能进 500ms 量级的路径），**需产品决策**。
 - **8G 档显存冲突**：qwen3:8b ≈5.5GB + TTS ≈3.8GB；ADR-001 需按三跳实测复核。
-- **克隆路线**：闭环与真路代码均就绪（3.6 / 3.9），zero-shot 的**听感未验证**（要人耳盲听 + 播放设备；嵌入耗时本机可测）；相似度质检（`CLONE_QUALITY_LOW`）按计划推迟到阶段 2。
+- **克隆路线**：闭环、真路与相似度质检均就绪（3.6 / 3.9 / 3.19）；zero-shot 的**听感未验证**（要人耳盲听 + 播放设备）；质检阈值 0.6 为保守初值，未见真机分布。
+- **克隆质检阈值**：campplus 余弦 0.6 未用真麦克风样本校准（用户不验收）；可能误拒或漏放，阶段 3 前可用真实样本复核。
 - **打断**：三跳已落地（3.7），busy 期 PTT 可按下即打断；但 100/50/150ms 分摊只在 mock 下定性验证过，真机数字要等 ADR-012 的延迟实测一起量。
 - **记忆**：存储/抽取/检索/评测管线/滚动摘要与 13.3 真门禁已落地（3.13–3.15；P 0.917 / R 0.957 / 替代 1.000）；bge 权重为本地预取，干净机需按 7.3 bootstrap 复现。
 - **设置切换冷启动**：provider/model 切换后首轮重新加载模型（实测 qwen3:8b 切后首 token 32.9s）；隐私模式已持久化，但当前无云端 provider，实际不触发网络分支。
@@ -414,7 +430,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 | --- | --- | --- | --- |
 | **P0 基线** | 10/24–10/27 | 规范环境/README、`uv.lock` 补 sqlite-vec、CI CPU-safe 依赖、延迟预算决策输入 | 四闸 + `cargo test` 20 + `npm run build` 全绿 |
 | **阶段 1 记忆与人设** | 10/28–11/13（约 2.5 周） | `memory/extractor.py` + 50 条评测门禁、检索接入 `_compose_messages`、session_summary、人设卡 UI、Settings（provider/隐私/API key） | 评测集达标 + 四闸 + 记忆 e2e（隔天引用事实） |
-| **阶段 2 克隆 UX + 远程** | 11/16–12/4（约 3 周） | 音色槽位 + LanWS/配对/终端/保活（已完成）、克隆质检 | Transport 一致性 + 配对/去重测试 + 四闸 |
+| **阶段 2 克隆 UX + 远程** | 已完成（10/25） | 音色槽位 + LanWS/配对/终端/保活 + 克隆质检 | 四闸 + 配对/去重测试已过；真机验收暂缓 |
 | **阶段 3 打包分发** | 12/7–1/8（约 4 周，缓冲到 1/15） | ADR-011 定稿、split-binary、安装器、torch/权重运行时下载、模型管理器、首启引导 | 安装包构建 + 打包后 sidecar 冷启 + 体积/离线冒烟 |
 
 - **决策门**（不阻塞当前编码，但要在对应窗口前拍板）：
@@ -429,6 +445,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 | 提交                    | 内容                                                    |
 | --------------------- | ----------------------------------------------------- |
+| `fa9f648`             | 克隆相似度质检（campplus 余弦 + CLONE_QUALITY_LOW） |
 | `18e5e99`             | LAN transport + token 配对 + 终端模拟器（8.2） |
 | `0127ee2`             | 音色槽位列表/切换（ADR-008） |
 | `ab03f93`             | 人设卡 + Settings 拉取语义（壳直写 SQLite / 每轮应用 / provider 路由） |
