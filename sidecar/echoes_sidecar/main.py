@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+import secrets
 import sys
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -59,6 +61,7 @@ from echoes_sidecar.session.runtime import load_runtime_settings
 from echoes_sidecar.session.session import Session
 from echoes_sidecar.session.summary import SessionSummarizer
 from echoes_sidecar.transport.base import Transport
+from echoes_sidecar.transport.lan_ws import LanWebSocketTransport
 from echoes_sidecar.transport.local_ws import LocalWebSocketTransport
 from echoes_sidecar.transport.stdio import StdioTransport
 
@@ -415,6 +418,33 @@ def _assemble_tts(
     return engine, False
 
 
+async def _assemble_transports(
+    argv: Sequence[str] | None,
+) -> tuple[Transport, LocalWebSocketTransport | None]:
+    """3.4/8.2：stdio（默认，壳）或 LAN WS（单活动端点，token 配对）。"""
+    parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
+    parser.add_argument("--transport", choices=["stdio", "lan"], default="stdio")
+    parser.add_argument("--lan-token", default=None)
+    args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
+
+    if args.transport == "stdio":
+        return StdioTransport(_ThreadedReader(), _StdOutWriter()), await _assemble_ws(argv)
+
+    token = (args.lan_token or os.environ.get("ECHOES_LAN_TOKEN", "") or "").strip()
+    if not token:
+        token = secrets.token_urlsafe(18)
+    if len(token) < 16:
+        raise SystemExit("--lan-token 至少 16 字符（8.2 配对令牌）")
+    lan = LanWebSocketTransport(token)
+    await lan.start()
+    print(
+        f"[sidecar] LAN 终端接入 {lan.url()}",
+        file=sys.stderr,
+    )
+    print("[sidecar] LAN 模式：单活动端点；token 配对（8.2）", file=sys.stderr)
+    return lan, lan
+
+
 async def _assemble_ws(argv: Sequence[str] | None) -> LocalWebSocketTransport | None:
     """组合根 WS 音频面装配：off 默认（阶段 0 壳侧接线在第三周拨）；auto 起 server。"""
     parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
@@ -610,7 +640,7 @@ async def _serve_with_storage(
     llm_provider, llm_ready = await _assemble_llm(argv)
     asr_engine, asr_ready = _assemble_asr(argv)
     tts_engine, tts_ready = _assemble_tts(argv, assets_dir=paths.assets_dir)
-    ws_transport = await _assemble_ws(argv)
+    transport, ws_transport = await _assemble_transports(argv)
     memory_store, memory_extractor = _assemble_memory(argv, storage, llm_provider)
     # 摘要与记忆共用同一个功能门：memory off / mock / bge 权重缺失时一起关闭。
     # mock LLM 下即使强制 --memory on 也不做摘要（否则会把 mock 台词写成摘要）。
@@ -626,7 +656,6 @@ async def _serve_with_storage(
         EngineState(name="llm", ready=llm_ready),
     ]
 
-    transport = StdioTransport(_ThreadedReader(), _StdOutWriter())
     machine = StateMachine()
     # 4.6：会话登记与串行化守卫（编排层的 turn 从这里进出）
     manager = SessionManager()

@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import struct
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from echoes_sidecar.audio.stream import AudioInputStream
 from echoes_sidecar.core.types import AudioChunk, WSFrameFlags
@@ -83,7 +85,16 @@ class _WsAudioInputStream(AudioInputStream):
 class LocalWebSocketTransport(Transport):
     """本机 WS server（127.0.0.1 动态端口）：JSON text 帧 = 控制面，binary = 音频面。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        token: str | None = None,
+        keep_alive: bool = False,
+    ) -> None:
+        self._host = host
+        self._token = token
+        self._keep_alive = keep_alive
         self._server: Any | None = None
         self._conn: Any | None = None
         self._inbound: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -92,18 +103,45 @@ class LocalWebSocketTransport(Transport):
         self._clone_in: asyncio.Queue[AudioChunk | None] = asyncio.Queue()
         self._closing = False
         self._eof = False
+        # 连接建立前发出的 JSON（hello/state）：LAN 终端晚于 sidecar 启动时重放，
+        # 否则首个 hello 会丢。音频帧不排队（旧音频没有重放价值）。
+        self._pending: list[dict[str, Any]] = []
+        # 重连快照：hello/state 只保留最新一份，每次新连接都重放（8.2 单活动端点）。
+        self._replay: dict[str, dict[str, Any]] = {}
 
-    async def start(self) -> int:
-        """监听 127.0.0.1（port=0 内核分配），返回实际端口；可重复调用覆盖旧 server。"""
+    async def start(self, port: int = 0) -> int:
+        """监听 host（默认 127.0.0.1；LAN 传 0.0.0.0），返回实际端口。"""
         from websockets.asyncio.server import serve
 
-        self._server = await serve(self._handler, "127.0.0.1", 0)
+        self._server = await serve(self._handler, self._host, port)
         socks = getattr(self._server, "sockets", None)
         assert socks is not None, "websockets server 建立后应有监听 socket"
         return int(next(iter(socks)).getsockname()[1])
 
+    def _authorized(self, conn: Any) -> bool:
+        if self._token is None:
+            return True
+        request = getattr(conn, "request", None)
+        path = getattr(request, "path", "") if request is not None else ""
+        provided = (parse_qs(urlparse(str(path)).query).get("token") or [""])[0]
+        return hmac.compare_digest(
+            provided.encode("utf-8"), self._token.encode("utf-8")
+        )
+
     async def _handler(self, conn: Any) -> None:
+        if not self._authorized(conn):
+            with contextlib.suppress(Exception):
+                await conn.close(code=1008, reason="invalid token")
+            return
+
         self._conn = conn
+        for msg in self._replay.values():
+            with contextlib.suppress(Exception):
+                await conn.send(json.dumps(msg, ensure_ascii=False))
+        for msg in self._pending:
+            with contextlib.suppress(Exception):
+                await conn.send(json.dumps(msg, ensure_ascii=False))
+        self._pending.clear()
         try:
             async for raw in conn:
                 if isinstance(raw, bytes):
@@ -118,7 +156,8 @@ class LocalWebSocketTransport(Transport):
         finally:
             if self._conn is conn:  # 仅当仍是活跃连接才标 EOF（新连接已接替时不误标）
                 self._conn = None
-                self._mark_eof()
+                if not self._keep_alive:
+                    self._mark_eof()
 
     def _mark_eof(self) -> None:
         self._eof = True
@@ -193,7 +232,14 @@ class LocalWebSocketTransport(Transport):
         return item
 
     async def send(self, msg: dict[str, Any]) -> None:
+        msg_type = str(msg.get("type", ""))
+        if msg_type in {"hello", "state"}:
+            self._replay[msg_type] = msg
         if self._conn is None:
+            if msg_type not in {"hello", "state"}:
+                self._pending.append(msg)
+                if len(self._pending) > 64:
+                    self._pending.pop(0)
             return
         await self._conn.send(json.dumps(msg, ensure_ascii=False))
 
