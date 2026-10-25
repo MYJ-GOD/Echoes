@@ -384,8 +384,17 @@ def _assemble_asr(argv: Sequence[str] | None) -> tuple[ASREngine, bool]:
     if args.asr == "mock":
         return MockASREngine(), True
 
+    from echoes_sidecar.models.manager import default_root
+
+    local_model = default_root() / "faster-whisper-small"
+    model_path = str(local_model) if (local_model / "model.bin").is_file() else None
+    if model_path is not None:
+        print(f"[sidecar] Whisper 使用本地权重: {model_path}", file=sys.stderr)
     engine: WhisperASREngine = WhisperASREngine(
-        model_size=args.asr_model, device="cpu", compute_type="int8"
+        model_size=args.asr_model,
+        model_path=model_path,
+        device="cpu",
+        compute_type="int8",
     )
     print(
         f"[sidecar] WhisperASREngine(model={args.asr_model}, CPU int8): 后台 warmup 中",

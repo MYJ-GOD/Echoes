@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "bge-small-zh-v1.5",
+      "display_name": "bge-small-zh-v1.5（记忆嵌入）",
+      "kind": "repo",
+      "target": "bge-small-zh-v1.5",
+      "required_files": ["config.json", "model.safetensors"],
+      "sources": [
+        {"type": "modelscope", "id": "BAAI/bge-small-zh-v1.5"},
+        {"type": "huggingface", "id": "BAAI/bge-small-zh-v1.5"}
+      ],
+      "size_mb": 95,
+      "tier": "all"
+    },
+    {
+      "id": "cosyvoice2-0.5b",
+      "display_name": "CosyVoice2-0.5B（TTS）",
+      "kind": "repo",
+      "target": "CosyVoice2-0.5B",
+      "required_files": [
+        "cosyvoice2.yaml",
+        "campplus.onnx",
+        "llm.pt",
+        "flow.pt",
+        "hift.pt",
+        "speech_tokenizer_v2.onnx"
+      ],
+      "sources": [
+        {"type": "modelscope", "id": "iic/CosyVoice2-0.5B"},
+        {"type": "huggingface", "id": "FunAudioLLM/CosyVoice2-0.5B"}
+      ],
+      "size_mb": 3800,
+      "tier": "all"
+    },
+    {
+      "id": "faster-whisper-small",
+      "display_name": "faster-whisper small（ASR，CPU int8）",
+      "kind": "repo",
+      "target": "faster-whisper-small",
+      "required_files": ["config.json", "model.bin", "tokenizer.json"],
+      "sources": [
+        {"type": "huggingface", "id": "Systran/faster-whisper-small"}
+      ],
+      "size_mb": 461,
+      "tier": "all"
+    },
+    {
+      "id": "qwen3-8b",
+      "display_name": "qwen3:8b（Ollama LLM）",
+      "kind": "ollama",
+      "target": "qwen3:8b",
+      "required_files": [],
+      "sources": [],
+      "size_mb": 4870,
+      "tier": "8g+"
+    }
+  ]
+}

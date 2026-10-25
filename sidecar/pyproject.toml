@@ -76,6 +76,7 @@ files = [
   "echoes_sidecar/session",
   "echoes_sidecar/orchestration",
   "echoes_sidecar/memory",
+  "echoes_sidecar/models",
   "echoes_sidecar/engines/asr/base.py",
   "echoes_sidecar/engines/tts/base.py",
   "echoes_sidecar/engines/llm/base.py",
@@ -96,6 +97,11 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["transformers", "transformers.*"]
 follow_imports = "skip"
+
+# 模型下载库（模型管理器惰性 import；运行时引擎不依赖它们的类型面）。
+[[tool.mypy.overrides]]
+module = ["modelscope", "modelscope.*", "huggingface_hub", "huggingface_hub.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

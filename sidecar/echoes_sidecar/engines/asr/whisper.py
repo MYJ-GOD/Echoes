@@ -26,11 +26,13 @@ class WhisperASREngine(ASREngine):
         self,
         model_size: str = "small",
         *,
+        model_path: str | None = None,
         device: str = "cpu",
         compute_type: str = "int8",
         language: str = "zh",
     ) -> None:
         self._model_size = model_size
+        self._model_path = model_path
         self._device = device
         self._compute_type = compute_type
         self._language = language
@@ -66,7 +68,7 @@ class WhisperASREngine(ASREngine):
         from faster_whisper import WhisperModel
 
         self._model = WhisperModel(
-            model_size_or_path=self._model_size,
+            model_size_or_path=self._model_path or self._model_size,
             device=self._device,
             compute_type=self._compute_type,
         )

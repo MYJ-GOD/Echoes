@@ -678,7 +678,7 @@ CREATE TABLE setting (
 | 模型权重（ASR / TTS / LLM / 嵌入） | 运行时按需下载 | 数 GB（嵌入默认 ~100MB） |
 | 音色资产 | 用户本地生成 | 量级随 ADR-009 路线定：zero-shot ≈ KB 级嵌入缓存；LoRA ≈ 数十 MB；全量 checkpoint ≈ 数百 MB（按落地路线写实，不预设统一上限） |
 
-> **ADR-011（决策待定，阶段 0 第一周定稿）**：「分体 torch 运行时包」vs「接受 1–2.5GB 安装包」。**默认建议：分体**——torch 包由模型管理器按档位下载（CPU 轮子或 CUDA 轮子），主程序安装包保持小体积、更新解耦。阶段 0 的 PyInstaller 实测数据（6/阶段 0 范围）是本 ADR 定稿依据。
+> **ADR-011（已定，2026-10-25）**：采用**分体**——torch 包与模型权重由模型管理器按档位运行时下载，主程序安装包保持小体积、更新解耦；sidecar 用 PyInstaller ONEDIR（mock 基线 34.9MB），onefile 仅作备选。详见 [ADR-011](docs/decisions/ADR-011-packaging-split.md)。
 
 ### 7.2 构建矩阵
 
@@ -772,7 +772,7 @@ strategy:
 | ADR-008 | 多音色管理引入时机 | 已定：阶段 2，轻量 | v1.1 |
 | ADR-009 | 克隆技术路线（zero-shot vs fine-tune） | 已按兜底规则走 zero-shot，真路已接线（见 docs/decisions/ADR-009 + PROGRESS §3.9） | 阶段 0 第一周 |
 | ADR-010 | 音频播放实现（rodio vs Web Audio） | 已定：rodio | v1.2 |
-| ADR-011 | 打包分体策略（torch 运行时包 vs 大安装包） | 决策待定，默认建议分体；依据 7.1 + 阶段 0 探测 | 阶段 0 第一周 |
+| ADR-011 | 打包分体策略（torch 运行时包 vs 大安装包） | **已定：split-binary（ONEDIR sidecar + 运行时下载）**，见 docs/decisions/ADR-011 | 阶段 3 |
 | ADR-012 | 阶段 0 阈值校准记录（就绪/延迟 ±20%） | 已定稿：口径与工具见 docs/decisions/ADR-012（真机数字待采，采后按 §7 校准规则回填） | 阶段 0 第四周 |
 | ADR-013 | 用户数据导出/删除语义 | 已定：见 16.2 | v1.3 |
 | ADR-014 | CosyVoice2 搬运环境（裸装 uv + vendored 范围 + torch 口径 + 权重通路） | 已定：见 docs/decisions/ADR-014；pynini 侦察闭环已过 | v1.4.2 |
