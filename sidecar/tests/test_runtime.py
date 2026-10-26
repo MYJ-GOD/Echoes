@@ -17,13 +17,15 @@ CORE_DEPS = {"pydantic", "websockets", "httpx", "sqlite-vec", "keyring"}
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """每个用例独占 sys.path 与注入标记；env 不串味。"""
+    """每个用例独占 sys.path / meta_path 与注入标记；env 不串味。"""
     before = list(sys.path)
+    before_meta = list(sys.meta_path)
     runtime._INJECTED.clear()
     for name in (runtime.ENV_PROFILE, runtime.ENV_RUNTIME_DIR, runtime.ENV_FORCE):
         monkeypatch.delenv(name, raising=False)
     yield
     sys.path[:] = before
+    sys.meta_path[:] = before_meta
     runtime._INJECTED.clear()
     sys.modules.pop("demo_runtime_pkg", None)
 
@@ -161,6 +163,33 @@ def test_inject_is_idempotent(tmp_path: Path) -> None:
     runtime.inject(root=tmp_path, force=True)
     runtime.inject(root=tmp_path, force=True)
     assert sys.path.count(site) == 1
+    finders = [f for f in sys.meta_path if isinstance(f, runtime._RuntimeFinder)]
+    assert len(finders) == 1
+
+
+def test_runtime_wins_over_earlier_bundle_copy(tmp_path: Path) -> None:
+    """包内残缺副本（PyInstaller PYZ）不得盖住运行时完整包。
+
+    模拟：把一个「旧版」demo 包放在 sys.path[0]（相当于 FrozenImporter 的效果是
+    更早被命中），注入后必须导入到运行时那份。
+    """
+    bundle = tmp_path / "bundle"
+    (bundle / "demo_runtime_pkg").mkdir(parents=True)
+    (bundle / "demo_runtime_pkg" / "__init__.py").write_text("VALUE = 1\n")
+    sys.path.insert(0, str(bundle))
+    # 先让解释器缓存住「包内」那份：这就是残缺副本抢占的真实形态
+    import demo_runtime_pkg as bundled
+
+    assert bundled.VALUE == 1
+
+    _write_runtime(tmp_path, "cpu")
+    runtime.inject(root=tmp_path, force=True)
+    spec = runtime._RuntimeFinder(tmp_path / "cpu" / "site-packages").find_spec(
+        "demo_runtime_pkg"
+    )
+    assert spec is not None
+    assert spec.origin is not None
+    assert str(tmp_path) in spec.origin
 
 
 def test_inject_skips_python_mismatch(tmp_path: Path) -> None:
@@ -263,3 +292,30 @@ def test_install_writes_manifest_from_spec(tmp_path: Path) -> None:
     layout = runtime.install_bundle(archive, "cuda126", root=root, spec=spec)
     assert layout.installed.python == spec.python
     assert layout.installed.platform == spec.platform
+
+
+# ------------------------------ 档案下载（file://） ------------------------------
+
+
+def test_download_bundle_from_file_url(tmp_path: Path) -> None:
+    """离线/内网档案：file:// 直接拷贝，sha256 照验。"""
+    archive = _zip(tmp_path / "local.zip", {"site-packages/demo_runtime_pkg/__init__.py": "V=1\n"})
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    got = runtime.download_bundle(
+        runtime.BundleSource(url=archive.as_uri(), sha256=digest),
+        dest_dir=tmp_path / "downloads",
+    )
+
+    assert got.is_file()
+    assert got.read_bytes() == archive.read_bytes()
+    assert not (tmp_path / "downloads" / f".{got.name}.part").exists()
+
+
+def test_download_bundle_file_url_sha_mismatch(tmp_path: Path) -> None:
+    archive = _zip(tmp_path / "local.zip", {"site-packages/demo_runtime_pkg/__init__.py": "V=1\n"})
+    with pytest.raises(ValueError, match="sha256"):
+        runtime.download_bundle(
+            runtime.BundleSource(url=archive.as_uri(), sha256="0" * 64),
+            dest_dir=tmp_path / "downloads",
+        )

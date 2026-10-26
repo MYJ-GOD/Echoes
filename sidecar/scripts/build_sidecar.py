@@ -61,11 +61,29 @@ EXCLUDES = [
     "openai_whisper",
     "tiktoken",
     "av",
+    # 纯开发/可选依赖：被静态分析带进包会把运行时里的完整副本挡在 PYZ 后面，
+    # 且 sidecar 自己一行都没用到（实测 rich 的残缺副本让 CosyVoice2 缺 rich.tree）。
+    "rich",
+    "pygments",
+    "mypy",
 ]
 
 
 def _data(source: Path, target: str) -> str:
     return f"{source}{os.pathsep}{target}"
+
+
+def _stdlib_hidden_imports() -> list[str]:
+    """运行时（torch/transformers）动态 import 的 stdlib 清单（见同名 txt）。"""
+    manifest = ROOT / "scripts" / "stdlib_hidden_imports.txt"
+    if not manifest.is_file():
+        return []
+    modules: list[str] = []
+    for raw in manifest.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            modules.append(line)
+    return modules
 
 
 def build() -> Path:
@@ -125,9 +143,18 @@ def build() -> Path:
         # `_MEIPASS/vendor/cosyvoice2` 解析；排除 --exclude-module 只是不做静态分析。
         "--add-data",
         _data(ROOT / "vendor" / "cosyvoice2", "vendor/cosyvoice2"),
+        # 稳定 ABI 转发 DLL：tokenizers 这类 Py_LIMITED_API 扩展开在冻结版里找不到它
+        # （dev 有 base Python 的 python3.dll 在 PATH 上，所以只会在安装包现形）。
+        *(
+            ["--add-binary", _data(Path(sys.base_prefix) / "python3.dll", ".")]
+            if (Path(sys.base_prefix) / "python3.dll").is_file()
+            else []
+        ),
     ]
     for module in EXCLUDES:
         args.extend(["--exclude-module", module])
+    for module in _stdlib_hidden_imports():
+        args.extend(["--hidden-import", module])
     args.append(str(ENTRY))
 
     print("[build] " + " ".join(args))

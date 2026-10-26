@@ -39,8 +39,8 @@ def test_cpu_machine_needs_runtime_and_all_models(tmp_path: Path) -> None:
     assert report.needs_runtime is True
     assert report.dev_venv is False
     assert report.missing_models == setup.REQUIRED_MODELS
-    # whisper 461 + bge 95 + cosyvoice 3800 + cpu 档位 1200
-    assert report.download_mb >= 5500
+    # whisper 461 + bge 95 + cosyvoice 3800 + cpu 档位 650（实测档案 0.68GB）
+    assert report.download_mb >= 4900
     assert report.runtime_archive_ready is False
     assert any("未发布" in note for note in report.notes)
 

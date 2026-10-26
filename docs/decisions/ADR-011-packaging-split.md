@@ -89,3 +89,43 @@ zip-slip 校验，装失败不动旧档（`os.replace` 交换 + 回滚），`ins
 另外补上了一处冻结缺件：vendored `cosyvoice2` 源码此前没进 ONEDIR，而
 `_ensure_vendor_boot()` 按 `_MEIPASS/vendor/cosyvoice2` 解析——现在随包（2.1MB），
 否则即便装上 torch，真 TTS 也会在 `import cosyvoice` 处失败。
+
+## 实施补充：档案构建与冻结踩坑（2026-10-26）
+
+**档案怎么来**：`sidecar/scripts/build_runtime_bundle.py`
+
+1. 从 `runtime_manifest.json` 取该档 requirements（含 `--index-url`/`--extra-index-url`）；
+2. `uv pip install --target <staging>/site-packages`（允许纯 Python sdist：`antlr4-python3-runtime`
+   只有源码包；`--index-strategy unsafe-best-match` 让镜像能补主索引缺的版本）；
+3. 以 `site-packages/` 为根打 zip，算 sha256，输出可直接回填 manifest 的 JSON。
+4. 本机验证：`runtime_manager.py install cpu --url file:///…zip`（`file://` 已支持，
+   离线/内网部署同样走这条路）。
+
+**整合与实测**：cpu 档案 **681MB**（解压 2.35GB，116 个包）；`uv` 首次下载约 1 分钟，
+打包约 5–6 分钟。装进 `~/.cache/echoes/runtime/cpu` 后，冻结 exe 的 `torch.__file__`
+指向该目录；满载（whisper + CosyVoice2 同时加载）时 ASR 70s / TTS 89s 就绪，单独加载
+ASR 1s、TTS 23s。
+
+**冻结版三个必踩的坑**（都已修，且只有真跑才现形）：
+
+1. **stdlib 动态 import**：ONEDIR 不含 torch，PyInstaller 看不到 torch 内部的 import。
+   实测缺 `timeit` → `pickletools` → `http.cookies`。现在由一次真实 warmup 生成
+   `scripts/stdlib_hidden_imports.txt`（271 个模块），构建时统一 `--hidden-import`。
+2. **`python3.dll`**：`tokenizers` 这类 `Py_LIMITED_API` 扩展链接的是 `python3.dll`，
+   而 PyInstaller 只带 `python313.dll`；dev 有 base Python 的 `python3.dll` 在 PATH 上，
+   所以只在安装包现形。构建脚本现在把它 `--add-binary` 进 `_internal`。
+3. **PYZ 里的残缺副本会盖住运行时**：PyInstaller 静态分析把 `rich`（经 pydantic/mypy
+   钩子）带进 PYZ，但只带被追踪到的模块——`rich.tree` 缺失，CosyVoice2 直接报
+   `ModuleNotFoundError`。`sys.path` 插队没用，因为 FrozenImporter 在 `meta_path` 最前。
+   处理：① 把纯开发依赖（`rich`/`pygments`/`mypy`）排除出 ONEDIR，`rich` 改为运行时
+   正经依赖（已进 `pyproject` 与档案）；② 注入时插一个 `_RuntimeFinder`，顶层模块先在
+   运行时目录找，找不到再落回包内。
+
+**端到端证据**（冻结 exe + `ECHOES_RUNTIME_DIR` 指向档案解压目录）：
+
+    [runtime] injected profile=cpu site=…\runtime\cpu\site-packages
+    [2s]  hello {asr: false, tts: false, llm: true}   # --asr whisper --tts cosyvoice2
+    [70s] hello {asr: true,  tts: false, llm: true}
+    [89s] hello {asr: true,  tts: true,  llm: true}
+
+**仍未做**：档案托管地址（`bundles[].url` 空）、CUDA 档位实建、CI。

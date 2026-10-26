@@ -5,7 +5,7 @@
       "display_name": "CPU（无独显 / 集显）",
       "python": "3.13",
       "platform": "win_amd64",
-      "size_mb": 1200,
+      "size_mb": 681,
       "index_url": "https://download.pytorch.org/whl/cpu",
       "extra_index_url": "https://mirrors.aliyun.com/pypi/simple/",
       "requirements": [
@@ -37,6 +37,7 @@
         "pyarrow==18.1.0",
         "pyworld==0.3.5",
         "onnxruntime-gpu==1.22.0",
+        "rich>=13,<16",
         "setuptools<81"
       ],
       "bundles": [
@@ -92,6 +93,7 @@
         "pyarrow==18.1.0",
         "pyworld==0.3.5",
         "onnxruntime-gpu==1.22.0",
+        "rich>=13,<16",
         "setuptools<81"
       ],
       "bundles": [

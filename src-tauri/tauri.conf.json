@@ -25,7 +25,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "publisher": "Echoes",
+    "shortDescription": "离线语音陪伴",
+    "longDescription": "声音与记忆留在本机；LLM 可选本地 Ollama 或云端 API。",
+    "category": "Productivity",
     "resources": {
       "../sidecar/dist/echoes-sidecar/": "sidecar/"
     },
@@ -36,6 +40,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"]
+      }
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }

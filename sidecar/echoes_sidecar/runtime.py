@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.machinery
 import json
 import os
 import shutil
@@ -29,6 +30,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import httpx
 
@@ -46,6 +49,29 @@ Progress = Callable[[int], None]
 # Windows: `os.add_dll_directory` 返回的句柄一关就失效，必须活到进程结束。
 _DLL_HANDLES: list[Any] = []
 _INJECTED: set[str] = set()
+
+
+class _RuntimeFinder:
+    """让运行时目录优先于 PyInstaller 的 FrozenImporter。
+
+    `sys.path` 只影响 PathFinder，而 PyInstaller 把模块塞在 PYZ 里、由 meta_path
+    最前面的 FrozenImporter 提供——**哪怕只是被静态分析带进来的残缺副本**，也会
+    盖住运行时的完整包（实测：包里那份 rich 没有 tree.py，CosyVoice2 直接炸）。
+    所以这里插一个 finder：顶层模块先在运行时 site-packages 里找，找不到再落回包内。
+    """
+
+    def __init__(self, site: Path) -> None:
+        self._site = str(site)
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Any = None,
+        target: Any = None,
+    ) -> Any:
+        if "." in fullname:  # 子模块交给父包 __path__（已指向运行时目录）
+            return None
+        return importlib.machinery.PathFinder.find_spec(fullname, [self._site], target)
 
 
 @dataclass(frozen=True)
@@ -264,9 +290,17 @@ def inject(*, root: Path | None = None, force: bool = False) -> RuntimeLayout | 
             sys.path.remove(site)
         sys.path.insert(0, site)  # 必须压过 ONEDIR 自带的 numpy 等
         importlib.invalidate_caches()
+        _install_finder(layout.site_packages)
         _add_dll_dirs(layout.site_packages)
         _INJECTED.add(site)
     return layout
+
+
+def _install_finder(site: Path) -> None:
+    """把运行时 finder 插到 meta_path 最前（见 `_RuntimeFinder` 的理由）。"""
+    if any(isinstance(finder, _RuntimeFinder) for finder in sys.meta_path):
+        return
+    sys.meta_path.insert(0, _RuntimeFinder(site))
 
 
 def verify(layout: RuntimeLayout, modules: tuple[str, ...] | None = None) -> list[str]:
@@ -356,7 +390,10 @@ def download_bundle(
     dest_dir: Path | None = None,
     progress: Progress | None = None,
 ) -> Path:
-    """下载归档到 `<runtime>/.downloads/`（断点续传 + sha256 校验）。"""
+    """下载归档到 `<runtime>/.downloads/`（断点续传 + sha256 校验）。
+
+    `file://` 走本地拷贝（离线/内网/自建档案的落地点），其余走 HTTP。
+    """
     if not source.url:
         raise ValueError("运行时来源未配置 url")
     name = source.url.rsplit("/", 1)[-1] or "runtime.zip"
@@ -368,6 +405,31 @@ def download_bundle(
     ):
         return target
 
+    if source.url.startswith("file://"):
+        _copy_local(source.url, target, progress=progress)
+    else:
+        _download_http(source, target, progress=progress)
+
+    if source.sha256 is not None and _sha256(target) != source.sha256:
+        target.unlink(missing_ok=True)
+        raise ValueError(f"下载校验失败（sha256）：{source.url}")
+    if progress is not None:
+        progress(100)
+    return target
+
+
+def _copy_local(url: str, target: Path, *, progress: Progress | None) -> None:
+    source = Path(url2pathname(urlparse(url).path))
+    if not source.is_file():
+        raise FileNotFoundError(f"本地运行时档案不存在：{source}")
+    part = target.with_name(f".{target.name}.part")
+    shutil.copyfile(source, part)
+    if progress is not None:
+        progress(99)
+    os.replace(part, target)
+
+
+def _download_http(source: BundleSource, target: Path, *, progress: Progress | None) -> None:
     part = target.with_name(f".{target.name}.part")
     existing = part.stat().st_size if part.is_file() else 0
     headers = {"Range": f"bytes={existing}-"} if existing else {}
@@ -390,13 +452,7 @@ def download_bundle(
                     done += len(chunk)
                     if progress is not None and total > 0:
                         progress(min(99, int(done * 100 / total)))
-    if source.sha256 is not None and _sha256(part) != source.sha256:
-        part.unlink(missing_ok=True)
-        raise ValueError(f"下载校验失败（sha256）：{source.url}")
     os.replace(part, target)
-    if progress is not None:
-        progress(100)
-    return target
 
 
 # ------------------------------ 内部 ------------------------------

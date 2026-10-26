@@ -11,9 +11,9 @@
 | ----------------- | ------------ | ------------- |
 | **阶段 0：垂直切片**     | **约 92–95%** | **约 0.5 周（延迟决策/上机）** |
 | **阶段 2：克隆 UX + 远程** | **代码面 100%** | fine-tune 评估可选 |
-| **阶段 3：打包分发** | **约 72%** | **约 0.5–1 周** |
+| **阶段 3：打包分发** | **约 85%** | **约 0.3–0.5 周** |
 | **MVP：阶段 0–1**    | **约 95–100%** | **约 0.5 周（阶段 0 收尾）** |
-| **全路线：阶段 -1 → 3** | **约 87–89%** | **约 0.5–1 周** |
+| **全路线：阶段 -1 → 3** | **约 91–93%** | **约 0.3–0.5 周** |
 
 口径说明：
 
@@ -34,6 +34,7 @@
 - **2026-10-26 第十二轮（运行时包）**：`runtime.py` + `runtime_manifest.json` + `scripts/runtime_manager.py` 落地——按档位（cpu / cuda126）预构建 zip，启动注入 `sys.path` 与 DLL 目录；冻结 exe 87.5MB、有档位打印 `[runtime] injected profile=…`、无档位安静跳过；单测 351 → **372**。顺带补上 vendored cosyvoice2 未进 ONEDIR 的缺件。**未完成**：档案托管地址与真 torch 档位构建（归首启引导 + CI）。
 - **2026-10-26 第十三轮（LLM 可插拔）**：ADR-016 定稿——LLM 支持「本地 Ollama / OpenAI 兼容云端」二选一，TTS/ASR/嵌入保持本地；API key 存 Windows 凭据管理器（Rust 写 / Python 读，已实测冻结 exe 取到 key 并打到真实 401）；隐私模式与云端互斥、Router 硬阻断不降级。新增 `LLM_KEY_MISSING`；设置页可填 base URL / key。pytest 372 → **388**，cargo 32 → **33**。
 - **2026-10-26 第十四轮（首启向导）**：`--setup` 一次性进程 + 三屏向导（检测 → 准备运行环境 → 选 LLM）落地——硬件探测（`nvidia-smi`/内存/磁盘/Ollama）、档位推荐、缺失权重与下载量、运行时/模型下载进度、完成写 `first_run_done`。pytest 388 → **400**，cargo 33 → **36**；冻结 exe `--setup detect` 已验证。**缺口**：运行时档案仍未托管，向导的运行时下载会提示「未发布」；安装器与 CI 仍未做。
+- **2026-10-26 第十五轮（运行时闭环 + 安装器）**：真建 CPU 运行时档案（**681MB**，116 包）+ `file://` 安装 + 冻结 exe 端到端（ASR 70s / TTS 89s 就绪，单独加载 1s / 23s）；期间修掉三个只在冻结版现形的坑（stdlib 动态 import、`python3.dll`、PYZ 残缺副本压住运行时）。NSIS 安装器 **24.7MB** 产出并通过静默装/卸验证。pytest **403**，cargo **36**，`npx tauri build` 通过。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -445,6 +446,38 @@ ruff / mypy 43 files / lint-imports；`npm run build`；`tauri build --no-bundle
 冻结 exe `--setup detect` 返回 `frozen=true / cuda126 / whisper 缺失`。
 **未做像素级验收**（向导 UI 只过构建与类型）。
 
+### 3.26 运行时闭环：档案构建 + 冻结三坑（2026-10-26）
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| 档案构建脚本 | ✅ | `scripts/build_runtime_bundle.py`：`uv pip install --target`（允许纯 Python sdist + `unsafe-best-match`）→ zip → sha256 → manifest 片段 |
+| 离线/内网档案 | ✅ | `runtime.download_bundle` 支持 `file://`（拷贝 + sha256） |
+| CPU 档案实建 | ✅ | **681MB**（解压 2.35GB / 116 包 / sha256 `7d42cfde…`） |
+| 冻结注入 | ✅ | 最终档案装进独立 root，`torch.__file__` 指向档案目录 |
+| 真引擎就绪 | ✅ | 冻结 exe：ASR **70s** / TTS **89s**（同时加载）；单独 ASR **1s**、TTS **23s** |
+| stdlib 动态导入 | ✅ | `scripts/stdlib_hidden_imports.txt`（271 项，warmup 探针生成） |
+| `python3.dll` | ✅ | `--add-binary` 进 `_internal`（`tokenizers` 等 LIMETED_API 扩展必需） |
+| PYZ 残缺副本 | ✅ | 排除 `rich`/`pygments`/`mypy` + 注入 `_RuntimeFinder`；`rich` 转为运行时依赖 |
+| 档案托管 / CUDA 档位 | ⬜ | `bundles[].url` 仍空；CUDA 未实建 |
+
+### 3.27 Tauri 安装器（NSIS，2026-10-26）
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| NSIS 产物 | ✅ | `Echoes_0.1.0_x64-setup.exe` **24.7MB** |
+| 安装模式 | ✅ | `currentUser` + SimpChinese/English；快捷方式与卸载项由 NSIS 模板生成 |
+| 资源落位 | ✅ | 静默装到临时目录：`sidecar\echoes-sidecar.exe`（8.64MB）、`_internal\python3.dll`、`runtime_manifest.json`、`vendor\cosyvoice2` 全在 |
+| 装后自检 | ✅ | 安装目录里的 `sidecar\echoes-sidecar.exe --setup detect` 正常返回 JSON |
+| 卸载 | ✅ | `uninstall.exe /S` 后目录清空 |
+| 签名 | ⬜ | 未签名，SmartScreen 会拦（发布前需证书） |
+
+**构建环境坑**：`tauri build` 会从 GitHub 现拉 NSIS；本机网络超时。已手工把
+`nsis-3.13.zip` + `nsis_tauri_utils.dll`（v0.5.3）铺到 `%LOCALAPPDATA%\tauri\NSIS`，
+并核对 `NSIS.exe` 的 SHA1（`6D45D4E8…`）与 Tauri 期望一致。CI 上需要同样的预置或可达网络。
+
+验证：pytest **403 passed**（新增 3：`file://` 下载 + finder 优先级 + 断言修正）；cargo **36**；
+`npx tauri build` 产出安装器；静默装/自检/卸载全通。
+
 ## 4. 未完成
 
 ### 4.1 阶段 0 收尾（**一半已实测，一半卡在设备/决策**）
@@ -478,11 +511,11 @@ ruff / mypy 43 files / lint-imports；`npm run build`；`tauri build --no-bundle
 
 ### 4.4 阶段 3：打包与分发（3–4 周）
 
-- ✅ ADR-011 split-binary（§3.20）；✅ 模型管理器（§3.20）；✅ ONEDIR 构建 + 双形态 spawn + Tauri resource（§3.21）；✅ 运行时档位档案 + 启动注入 + 管理 CLI（§3.23）；✅ LLM 本地/云端可插拔 + 凭据管理器（§3.24，ADR-016）；✅ 首启向导三屏 + `--setup` 进程协议（§3.25）。
-- ⬜ 运行时档案托管（`bundles[].url`）与真 torch/cpu、torch/cu126 档位构建。
-- ⬜ Tauri 安装器（NSIS/MSI）与基础包体积检查。
-- ⬜ 三平台 CI（CPU 面）。
-- 现状：向导、注入、LLM 双后端与密钥链路已通；档案未上传，安装器未做。
+- ✅ ADR-011 split-binary（§3.20）；✅ 模型管理器（§3.20）；✅ ONEDIR 构建 + 双形态 spawn + Tauri resource（§3.21）；✅ 运行时档位档案 + 启动注入 + 管理 CLI（§3.23）；✅ LLM 本地/云端可插拔 + 凭据管理器（§3.24，ADR-016）；✅ 首启向导三屏 + `--setup` 进程协议（§3.25）；✅ 运行时档案实建 + 冻结三坑（§3.26）；✅ NSIS 安装器（§3.27）。
+- ⬜ 运行时档案托管（`bundles[].url`）与 CUDA 档位实建。
+- ⬜ 安装包签名（未签名会被 SmartScreen 拦）。
+- ⬜ 三平台 CI（CPU 面；含 NSIS 工具链预置）。
+- 现状：向导、注入、LLM 双后端、密钥、安装器全通；只差“把档案放上去 + 签名 + CI”。
 
 ### 4.5 技术债（2026-10-23 审计发现，不阻塞但会在阶段 1 反噬）
 
@@ -513,7 +546,7 @@ ruff / mypy 43 files / lint-imports；`npm run build`；`tauri build --no-bundle
 - **记忆**：存储/抽取/检索/评测管线/滚动摘要与 13.3 真门禁已落地（3.13–3.15；P 0.917 / R 0.957 / 替代 1.000）；bge 权重为本地预取，干净机需按 7.3 bootstrap 复现。
 - **设置切换冷启动**：provider/model 切换后首轮重新加载模型（实测 qwen3:8b 切后首 token 32.9s）；隐私模式已持久化，但当前无云端 provider，实际不触发网络分支。
 - **LAN 安全边界**：token 在配对 URL/日志明文；局域网阶段不做 TLS/端到端加密（8.3）；单活动端点，断线期间事件不重放（turn 去重是终端侧 `turn_seq`）。
-- **打包**：ADR-011 已定 split-binary；ONEDIR（88.0MB）+ 双形态 spawn + 运行时注入已通；**档案托管 / 安装器 / 首启引导 / CI 未做**，干净机流程未验证。
+- **打包**：ADR-011 split-binary；ONEDIR **68.1MB**（排除 torch/ML 与开发依赖）+ 双形态 spawn + 运行时注入（CPU 档案 **681MB** 实测可用）；NSIS 安装器 **24.7MB**；**档案托管 / CUDA 档位 / 签名 / CI 未做**。
 - **平台**：当前 dev 形态绑定 Windows + 仓库内 `.venv`；跨平台打包未开始。
 
 ## 6. 下一步
@@ -626,8 +659,12 @@ npm run tauri dev                                  # 真路（需 Ollama / whisp
 # 运行时档位（ADR-011 补充：cpu / cuda126）
 .venv\Scripts\python.exe scripts\runtime_manager.py list
 .venv\Scripts\python.exe scripts\runtime_manager.py export cpu --hint   # 构建机产档案用
-.venv\Scripts\python.exe scripts\runtime_manager.py install cpu --from-bundle D:\runtime-cpu.zip
+.venv\Scripts\python.exe scripts\build_runtime_bundle.py --profile cpu --out ..\tmp\runtime
+.venv\Scripts\python.exe scripts\runtime_manager.py install cpu --url file:///D:/tmp/runtime/runtime-cpu-win_amd64.zip
 .venv\Scripts\python.exe scripts\runtime_manager.py verify cpu
+
+# 运行时档案里的 stdlib 清单（缺件时重生成；会跑一次真 warmup）
+.venv\Scripts\python.exe scripts\_gen_stdlib_imports.py
 
 # sidecar ONEDIR（ADR-011；仓库根 / cwd=sidecar）
 npm run sidecar:build
