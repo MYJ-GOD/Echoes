@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from echoes_sidecar import __version__
+from echoes_sidecar import __version__, runtime
 from echoes_sidecar.audio.stream import AudioInputStream
 from echoes_sidecar.core.cancel import CancelToken
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
@@ -630,7 +630,18 @@ async def _clone_job(
 
 
 async def serve(argv: Sequence[str] | None = None) -> None:
-    """进程入口：开存储 → 跑服务 → 关存储（存储失败即 STORAGE_ERROR 冒泡，14.1）。"""
+    """进程入口：注入运行时 → 开存储 → 跑服务 → 关存储（存储失败即 STORAGE_ERROR 冒泡，14.1）。
+
+    运行时注入必须发生在任何引擎 import 之前（ADR-011）：冻结版只带契约链，
+    torch/transformers 在外部档位目录里；dev 形态（`.venv`）不注入。
+    """
+    layout = runtime.inject()
+    if layout is not None:
+        # ASCII 标记：壳/首启引导按 `injected profile=` 解析 stderr（中文在 Windows 管道会变码）
+        print(
+            f"[runtime] injected profile={layout.profile} site={layout.site_packages}",
+            file=sys.stderr,
+        )
     paths, storage = _open_storage()
     try:
         await _serve_with_storage(argv, storage, paths)

@@ -52,3 +52,40 @@
 2. 模型清单/manifest + 管理器（多源、sha256、缓存、Ollama 复用）。
 3. Tauri bundle resource + spawn 解析 + 首启硬件检测/档位推荐/下载引导。
 4. CI 打包矩阵（CPU 面）与安装包体积检查。
+
+## 实施补充：运行时档案（2026-10-26）
+
+**结论**：运行时不是「运行时 pip 解析」，而是**按档位预构建的 zip 档案**（CI/构建机产出），
+用户机只做「下载 → 校验 → 解压 → 激活」。理由：冻结进程里跑 pip 依赖解析不可控
+（证书、构建隔离、`sys.executable`、断点续传都要另造），而 zip 路径与模型管理器同构。
+
+**目录布局**（`~/.cache/echoes/runtime/`，`ECHOES_RUNTIME_DIR` 可覆盖）：:
+
+    active                      # 当前档位（纯文本）
+    <profile>/runtime.json      # 安装清单：python/platform/installed_at/bundle_sha256
+    <profile>/site-packages/    # 档案解压结果
+
+**档位**：`cpu`（pytorch/whl/cpu）与 `cuda126`（pytorch/whl/cu126），依赖清单随包
+（`echoes_sidecar/runtime_manifest.json`），与 `pyproject.toml` 的重依赖有测试守卫防漂移。
+
+**启动注入**（`echoes_sidecar.runtime.inject()`，组合根 `serve()` 第一句）：
+
+1. 冻结形态（`sys.frozen`）或 `ECHOES_RUNTIME_INJECT=1` 才注入；dev `.venv` 不注入。
+2. 档位优先级：`ECHOES_RUNTIME_PROFILE` > `active` 指针 > 唯一已装 > 最近安装。
+3. `sys.path.insert(0, site-packages)`（必须压过 ONEDIR 自带的 numpy），再
+   `importlib.invalidate_caches()`，最后登记 DLL 目录：`site-packages`、`torch/lib`、
+   `nvidia/*/bin`、`*.libs`，并前置到 `PATH`（`os.add_dll_directory` 句柄常驻）。
+4. Python 主次版本不符则跳过注入并告警（ABI 不兼容），由引擎报 `MODEL_NOT_LOADED`。
+
+**档案约定**：zip 根目录含 `site-packages/`（推荐）或内容即 site-packages；解压前做
+zip-slip 校验，装失败不动旧档（`os.replace` 交换 + 回滚），`install` 写完 `active` 指针。
+
+**验证**：单测 20 例（清单/档位/注入/zip-slip/原子换档/sha 失败保留旧档）；冻结 exe
+（87.5MB）在有档位时打印 `[runtime] injected profile=…`、无档位时安静跳过。
+
+**未完成**：档案托管地址（`bundles[].url` 仍为空）与真 torch 档位构建，归
+「首启引导 + CI」；档案未上传前，`runtime_manager.py install` 会提示用 `--from-bundle`。
+
+另外补上了一处冻结缺件：vendored `cosyvoice2` 源码此前没进 ONEDIR，而
+`_ensure_vendor_boot()` 按 `_MEIPASS/vendor/cosyvoice2` 解析——现在随包（2.1MB），
+否则即便装上 torch，真 TTS 也会在 `import cosyvoice` 处失败。

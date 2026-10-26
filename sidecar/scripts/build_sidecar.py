@@ -101,6 +101,11 @@ def build() -> Path:
         _data(ROOT / "echoes_sidecar" / "models" / "manifest.json", "echoes_sidecar/models"),
         "--add-data",
         _data(
+            ROOT / "echoes_sidecar" / "runtime_manifest.json",
+            "echoes_sidecar",
+        ),
+        "--add-data",
+        _data(
             ROOT / "echoes_sidecar" / "db" / "migrations",
             "echoes_sidecar/db/migrations",
         ),
@@ -109,6 +114,10 @@ def build() -> Path:
             ROOT / "echoes_sidecar" / "engines" / "tts" / "assets",
             "echoes_sidecar/engines/tts/assets",
         ),
+        # vendored CosyVoice2 源码（ADR-014）：_ensure_vendor_boot 按
+        # `_MEIPASS/vendor/cosyvoice2` 解析；排除 --exclude-module 只是不做静态分析。
+        "--add-data",
+        _data(ROOT / "vendor" / "cosyvoice2", "vendor/cosyvoice2"),
     ]
     for module in EXCLUDES:
         args.extend(["--exclude-module", module])

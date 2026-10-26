@@ -78,6 +78,7 @@ files = [
   "echoes_sidecar/orchestration",
   "echoes_sidecar/memory",
   "echoes_sidecar/models",
+  "echoes_sidecar/runtime.py",
   "echoes_sidecar/engines/asr/base.py",
   "echoes_sidecar/engines/tts/base.py",
   "echoes_sidecar/engines/llm/base.py",
@@ -126,7 +127,7 @@ layers = [
   "echoes_sidecar.orchestration",
   "echoes_sidecar.session | echoes_sidecar.transport",
   "echoes_sidecar.engines | echoes_sidecar.memory",
-  "echoes_sidecar.audio | echoes_sidecar.ipc | echoes_sidecar.db",
+  "echoes_sidecar.audio | echoes_sidecar.ipc | echoes_sidecar.db | echoes_sidecar.runtime",
   "echoes_sidecar.core",
 ]
 
