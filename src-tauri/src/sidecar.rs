@@ -166,15 +166,15 @@ fn parse_ws_port(line: &str) -> Option<u16> {
 
 /// sidecar 启动形态（ADR-011 split-binary）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LaunchSpec {
-    program: std::path::PathBuf,
-    args: Vec<String>,
-    cwd: std::path::PathBuf,
+pub(crate) struct LaunchSpec {
+    pub(crate) program: std::path::PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) cwd: std::path::PathBuf,
 }
 
 /// dev：`<sidecar>/.venv/.../python -m echoes_sidecar.main`；
 /// 安装包：`<resource>/sidecar/echoes-sidecar[.exe]`（ONEDIR 根）。
-fn resolve_launch(sidecar_dir: &Path) -> Result<LaunchSpec, String> {
+pub(crate) fn resolve_launch(sidecar_dir: &Path) -> Result<LaunchSpec, String> {
     let exe_name = if cfg!(windows) {
         "echoes-sidecar.exe"
     } else {

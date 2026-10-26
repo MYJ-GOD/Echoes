@@ -97,3 +97,29 @@
 2. 安装器（NSIS/MSI）。
 3. 云端连通性测试按钮（`GET /models` 已在 `health()` 实现，壳侧只差一个命令）。
 4. 多 provider 的 key 命名（当前单条 `llm-api-key`；多云端并存时按 provider 分账户）。
+
+## 实施补充：首启向导（2026-10-26）
+
+**结论**：向导不进聊天协议（3.4 的 hello/state 是冻结契约），而是一次性进程
+`sidecar --setup <action>`，stdout 每行一个 JSON，壳逐行转成 `setup://event`。
+
+```
+echoes-sidecar --setup detect
+echoes-sidecar --setup install-runtime --profile cuda126
+echoes-sidecar --setup install-models [--ids a,b]
+```
+
+- 事件：`detect`（report）/ `progress`（step,item,pct）/ `result` / `error`。
+- 壳侧：`src-tauri/src/setup.rs` 复用 `resolve_launch`（dev `.venv` / 安装包 exe），
+  stderr 单独抽干防管道写满；命令 `setup_detect` / `setup_install` 在
+  `spawn_blocking` 里跑，进度 `app.emit("setup://event", …)`。
+- 检测面：CPU、内存（GlobalMemoryStatusEx）、`nvidia-smi`（名称/显存）、磁盘可用、
+  Ollama 可达性与模型、已装运行时档位、缺失权重、`dev_venv`。
+- 推荐：NVIDIA 且显存 ≥ 6GB → `cuda126`，否则 `cpu`。
+- 第一步「稍后再说」与第三步「先用默认设置」都只写 `first_run_done`，不写运行时/权重。
+- `first_run_done` 单独一列（`write_first_run_done`），保存设置不会把向导重新弹出来；
+  设置抽屉里有「重新运行首启向导」。
+
+**已知缺口**：`bundles[].url` 仍为空，向导的运行时下载会返回「档案未发布」，
+但**模型下载是通的**（真清单 + 断点续传 + sha256）。开发形态（有 `.venv` 与 torch）
+自动把运行时标记为已就绪，所以向导在开发机上只需下权重。

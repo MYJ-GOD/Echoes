@@ -857,6 +857,11 @@ async def _serve_with_storage(
 
 
 if __name__ == "__main__":
+    if "--setup" in sys.argv[1:]:
+        # 首启向导是一次性进程（JSON 行协议），不进聊天状态机
+        from echoes_sidecar.setup_cli import main as setup_main
+
+        raise SystemExit(setup_main(sys.argv[1:]))
     try:
         asyncio.run(serve(sys.argv[1:]))
     except KeyboardInterrupt:

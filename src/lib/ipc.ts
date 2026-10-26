@@ -115,6 +115,8 @@ export interface SettingsView {
   baseUrl: string;
   /** 只读：凭据管理器是否已存 key（写入时忽略） */
   hasKey: boolean;
+  /** 只读：首启向导是否已完成（写入时忽略） */
+  firstRunDone: boolean;
 }
 
 export function getPersona(): Promise<PersonaView> {
@@ -140,6 +142,76 @@ export function saveLlmKey(key: string): Promise<void> {
 
 export function clearLlmKey(): Promise<void> {
   return invoke("clear_llm_key");
+}
+
+// ---- 首启向导（ADR-011/016）：壳跑 sidecar `--setup`，进度走独立事件面 ----
+
+export const SETUP_EVENT = "setup://event";
+
+export interface SetupReport {
+  platform: string;
+  python: string;
+  frozen: boolean;
+  cpu: string;
+  ramGb: number | null;
+  gpu: { name: string; vramGb: number } | null;
+  diskFreeGb: number;
+  diskPath: string;
+  ollama: { url: string; reachable: boolean; models: string[] };
+  runtimeProfiles: string[];
+  activeProfile: string | null;
+  devVenv: boolean;
+  models: Record<string, boolean>;
+  recommendedProfile: string;
+  needsRuntime: boolean;
+  missingModels: string[];
+  downloadMb: number;
+  runtimeArchiveReady: boolean;
+  notes: string[];
+}
+
+export type SetupEvent =
+  | { type: "detect"; report: SetupReport }
+  | { type: "progress"; step: string; item: string; pct: number }
+  | {
+      type: "result";
+      step: string;
+      ok: boolean;
+      detail?: Record<string, string>;
+      report?: SetupReport;
+    }
+  | { type: "error"; step: string; code: string; message: string };
+
+/** 订阅向导进度（下载 pct）。返回退订函数。 */
+export async function onSetupEvent(
+  handler: (event: SetupEvent) => void
+): Promise<UnlistenFn> {
+  return listen<SetupEvent>(SETUP_EVENT, (event) => handler(event.payload));
+}
+
+export function setupDetect(): Promise<SetupEvent> {
+  return invoke("setup_detect");
+}
+
+/** 下载运行时或模型；进度经 `onSetupEvent` 推送。 */
+export function setupInstall(
+  action: "install-runtime" | "install-models",
+  options: { profile?: string; ids?: string[] } = {}
+): Promise<SetupEvent> {
+  return invoke("setup_install", {
+    action,
+    profile: options.profile ?? null,
+    ids: options.ids ?? [],
+  });
+}
+
+export function completeSetup(): Promise<void> {
+  return invoke("complete_setup");
+}
+
+/** 让首启向导重新出现（设置抽屉里的「重新运行首启」）。 */
+export function resetSetup(): Promise<void> {
+  return invoke("reset_setup");
 }
 
 /** 音色槽位（ADR-008）：内置 + 克隆列表；selected 由服务端标记。 */

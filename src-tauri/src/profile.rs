@@ -25,6 +25,7 @@ const KEY_PROVIDER: &str = "llm_provider";
 const KEY_MODEL: &str = "llm_model";
 const KEY_BASE_URL: &str = "llm_base_url";
 const KEY_PRIVACY: &str = "privacy_mode";
+const KEY_FIRST_RUN: &str = "first_run_done";
 const KEY_PERSONA_NAME: &str = "persona_name";
 const KEY_PERSONA_PROMPT: &str = "persona_system_prompt";
 
@@ -80,6 +81,9 @@ pub struct SettingsView {
     /// 只读：凭据管理器里是否已有 key（写入时忽略）。
     #[serde(default)]
     pub has_key: bool,
+    /// 只读：首启向导是否已完成（写入时忽略；`complete_setup` 单独置位）。
+    #[serde(default)]
+    pub first_run_done: bool,
 }
 
 impl Default for SettingsView {
@@ -90,6 +94,7 @@ impl Default for SettingsView {
             privacy_mode: true,
             base_url: String::new(),
             has_key: false,
+            first_run_done: false,
         }
     }
 }
@@ -169,7 +174,19 @@ pub fn read_settings(path: &Path) -> Result<SettingsView, String> {
             settings.privacy_mode = value;
         }
     }
+    if let Some(done) = read_json(&conn, KEY_FIRST_RUN)? {
+        if let Some(value) = done.as_bool() {
+            settings.first_run_done = value;
+        }
+    }
     Ok(settings)
+}
+
+/// 首启完成标记（ADR-016）：与 settings 分开写，避免「保存设置」把向导又弹出来。
+pub fn write_first_run_done(path: &Path, done: bool) -> Result<(), String> {
+    let conn = open(path)?;
+    write_json(&conn, KEY_FIRST_RUN, &Value::Bool(done))
+        .map_err(|err| format!("写入首启标记失败（{}）：{err}", path.display()))
 }
 
 /// 写设置（校验后一次事务写入四个键）。
@@ -306,6 +323,24 @@ mod tests {
     }
 
     #[test]
+    fn first_run_flag_is_independent_of_settings() {
+        let path = temp_db();
+        seed(&path);
+        assert!(!read_settings(&path).expect("defaults").first_run_done);
+
+        write_first_run_done(&path, true).expect("mark");
+        assert!(read_settings(&path).expect("read").first_run_done);
+
+        // 保存设置不该重置向导状态
+        write_settings(&path, &SettingsView::default()).expect("save settings");
+        assert!(read_settings(&path).expect("read").first_run_done);
+
+        write_first_run_done(&path, false).expect("reset");
+        assert!(!read_settings(&path).expect("read").first_run_done);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn openai_settings_require_base_url_and_local_privacy() {
         let path = temp_db();
         seed(&path);
@@ -316,6 +351,7 @@ mod tests {
             privacy_mode: true,
             base_url: "https://api.deepseek.com/v1".to_string(),
             has_key: false,
+            first_run_done: true,
         };
         let err = write_settings(&path, &cloud_with_privacy).expect_err("隐私模式应拒绝云端");
         assert!(err.contains("隐私模式"), "{err}");

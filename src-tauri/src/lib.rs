@@ -9,6 +9,7 @@ mod audio;
 mod capture;
 mod profile;
 mod secrets;
+mod setup;
 mod sidecar;
 mod voices;
 mod ws_audio;
@@ -23,6 +24,11 @@ use tauri::{Emitter, Manager};
 use ws_audio::{pcm16_le, OutputGate, WsAudioClient};
 
 /// 壳独占持有的 sidecar 句柄（命令经 State 取用）。
+/// 首启向导命令的共享状态：sidecar 目录在启动时解析一次。
+struct SetupState {
+  sidecar_dir: PathBuf,
+}
+
 struct SidecarState(Sidecar);
 
 /// 音频面状态：播放线程 + PTT 重采样器 + WS 上行端（端口解析后装配）+ 下行闸门。
@@ -148,6 +154,67 @@ fn clear_llm_key() -> Result<(), String> {
     secrets::clear()
 }
 
+/// 首启向导完成（ADR-016）：与「保存设置」分开，避免保存时又弹回向导。
+#[tauri::command]
+fn complete_setup() -> Result<(), String> {
+    profile::write_first_run_done(&profile::db_path(), true)
+}
+
+#[tauri::command]
+fn reset_setup() -> Result<(), String> {
+    profile::write_first_run_done(&profile::db_path(), false)
+}
+
+/// 首启向导：硬件/依赖探测（返回 report JSON）。
+#[tauri::command]
+async fn setup_detect(state: tauri::State<'_, SetupState>) -> Result<serde_json::Value, String> {
+    let dir = state.sidecar_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        setup::run(&dir, &["detect".to_string()], |_| {})
+    })
+    .await
+    .map_err(|err| format!("向导线程失败：{err}"))?
+}
+
+/// 首启向导：下载运行时或模型；进度经 `setup://event` 推给前端。
+#[tauri::command]
+async fn setup_install(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SetupState>,
+    action: String,
+    profile: Option<String>,
+    ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let mut args = vec![action.clone()];
+    match action.as_str() {
+        "install-runtime" => {
+            if let Some(profile) = profile {
+                args.push("--profile".to_string());
+                args.push(profile);
+            }
+        }
+        "install-models" => {
+            if !ids.is_empty() {
+                args.push("--ids".to_string());
+                args.push(ids.join(","));
+            }
+        }
+        other => return Err(format!("未知向导动作 {other}")),
+    }
+
+    let dir = state.sidecar_dir.clone();
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        setup::run(&dir, &args, |line| {
+            if let Err(err) = handle.emit("setup://event", line.clone()) {
+                log::warn!("setup 事件发送失败: {err}");
+            }
+        })
+    })
+    .await
+    .map_err(|err| format!("向导线程失败：{err}"))?
+}
+
 /// 音色槽位（ADR-008）：列表 + 切换；写 session.voice_id，sidecar 下一轮拉取。
 #[tauri::command]
 fn list_voices() -> Result<Vec<voices::VoiceView>, String> {
@@ -244,6 +311,20 @@ fn sidecar_args() -> Vec<String> {
     args.iter().map(|s| s.to_string()).collect()
 }
 
+/// 首启向导的 sidecar 目录（dev 用仓库、安装包用 resource）。
+fn locate_sidecar_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if cfg!(debug_assertions) {
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|root| root.join("sidecar"))
+            .ok_or_else(|| "CARGO_MANIFEST_DIR 必有父目录".to_string());
+    }
+    app.path()
+        .resource_dir()
+        .map(|dir| dir.join("sidecar"))
+        .map_err(|err| format!("资源目录解析失败：{err}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -267,14 +348,10 @@ pub fn run() {
 
       // 阶段 0 dev 形态：仓库根 sidecar/（.venv Python）。
       // dev：仓库 sidecar/.venv；安装包：Tauri resource 下的 sidecar/（ADR-011）。
-      let sidecar_dir = if cfg!(debug_assertions) {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-          .parent()
-          .map(|p| p.join("sidecar"))
-          .expect("CARGO_MANIFEST_DIR 必有父目录")
-      } else {
-        app.path().resource_dir()?.join("sidecar")
-      };
+      let sidecar_dir = locate_sidecar_dir(app.handle())?;
+      app.manage(SetupState {
+        sidecar_dir: sidecar_dir.clone(),
+      });
       log::info!("sidecar 目录: {}", sidecar_dir.display());
       let args = sidecar_args();
       log::info!("sidecar 参数: {args:?}");
@@ -346,6 +423,10 @@ pub fn run() {
       save_settings,
       save_llm_key,
       clear_llm_key,
+      complete_setup,
+      reset_setup,
+      setup_detect,
+      setup_install,
       list_voices,
       select_voice,
       interrupt_turn,

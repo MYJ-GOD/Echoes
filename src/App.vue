@@ -4,6 +4,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import * as ipc from "./lib/ipc";
 import type { SidecarMessage } from "./lib/ipc";
+import FirstRun from "./FirstRun.vue";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -110,7 +111,10 @@ const settingsDraft = ref<ipc.SettingsView>({
   privacyMode: true,
   baseUrl: "",
   hasKey: false,
+  firstRunDone: false,
 });
+// 首启向导：设置还没读到时保持关闭，读到 firstRunDone=false 才弹
+const firstRun = ref(false);
 // 云端 key 只提交、不回显：输入框永远从空开始（ADR-016）
 const llmKeyDraft = ref("");
 const keyStatus = ref("");
@@ -144,6 +148,7 @@ async function loadProfile(): Promise<void> {
     ]);
     personaDraft.value = persona;
     settingsDraft.value = settings;
+    firstRun.value = !settings.firstRunDone;
     profileStatus.value = "";
     profileAttempts = 0;
   } catch (err) {
@@ -605,6 +610,23 @@ function cancelClone(): void {
   });
 }
 
+function onSetupDone(): void {
+  firstRun.value = false;
+  // 向导可能刚写入了 provider/model/key：重新拉一次设置与音色
+  void loadProfile();
+  void loadVoices();
+}
+
+async function rerunSetup(): Promise<void> {
+  try {
+    await ipc.resetSetup();
+    firstRun.value = true;
+    showSettings.value = false;
+  } catch (err) {
+    profileStatus.value = `⚠ ${String(err)}`;
+  }
+}
+
 function onWindowBlur(): void {
   void stopCapture();
 }
@@ -662,6 +684,7 @@ async function send(): Promise<void> {
 
 <template>
   <div class="app">
+    <FirstRun v-if="firstRun" @done="onSetupDone" />
     <header class="letterhead">
       <div class="lh-id">
         <p class="wordmark">Echoes</p>
@@ -1006,6 +1029,7 @@ async function send(): Promise<void> {
           <h3>设备</h3>
           <button type="button" class="ghost" @click="micProbe">麦克风自检</button>
           <p v-if="micNotice" class="note" :data-tone="micTone">{{ micNotice }}</p>
+          <button type="button" class="quiet" @click="rerunSetup">重新运行首启向导</button>
         </section>
       </aside>
     </transition>

@@ -11,9 +11,9 @@
 | ----------------- | ------------ | ------------- |
 | **阶段 0：垂直切片**     | **约 92–95%** | **约 0.5 周（延迟决策/上机）** |
 | **阶段 2：克隆 UX + 远程** | **代码面 100%** | fine-tune 评估可选 |
-| **阶段 3：打包分发** | **约 62%** | **约 1–1.5 周** |
+| **阶段 3：打包分发** | **约 72%** | **约 0.5–1 周** |
 | **MVP：阶段 0–1**    | **约 95–100%** | **约 0.5 周（阶段 0 收尾）** |
-| **全路线：阶段 -1 → 3** | **约 85–87%** | **约 1–1.5 周** |
+| **全路线：阶段 -1 → 3** | **约 87–89%** | **约 0.5–1 周** |
 
 口径说明：
 
@@ -33,6 +33,7 @@
 - **2026-10-26 第十一轮（前端重设计）**：`App.vue` 按「安静书房 / 信纸」重做视觉与布局（信笺页眉 + 衬线正文 + 圆形按住说话 + 右侧抽屉设置），功能与 IPC 逻辑不变；补自动跟读（上翻不抢滚动）、流式光标、错误提示条、focus-visible、reduced-motion、800×600/窄屏适配。`npm run build` 通过；**未做像素级验收**（浏览器截图在当前环境不可用，仅用 DOM 度量核对 800×600 布局）。
 - **2026-10-26 第十二轮（运行时包）**：`runtime.py` + `runtime_manifest.json` + `scripts/runtime_manager.py` 落地——按档位（cpu / cuda126）预构建 zip，启动注入 `sys.path` 与 DLL 目录；冻结 exe 87.5MB、有档位打印 `[runtime] injected profile=…`、无档位安静跳过；单测 351 → **372**。顺带补上 vendored cosyvoice2 未进 ONEDIR 的缺件。**未完成**：档案托管地址与真 torch 档位构建（归首启引导 + CI）。
 - **2026-10-26 第十三轮（LLM 可插拔）**：ADR-016 定稿——LLM 支持「本地 Ollama / OpenAI 兼容云端」二选一，TTS/ASR/嵌入保持本地；API key 存 Windows 凭据管理器（Rust 写 / Python 读，已实测冻结 exe 取到 key 并打到真实 401）；隐私模式与云端互斥、Router 硬阻断不降级。新增 `LLM_KEY_MISSING`；设置页可填 base URL / key。pytest 372 → **388**，cargo 32 → **33**。
+- **2026-10-26 第十四轮（首启向导）**：`--setup` 一次性进程 + 三屏向导（检测 → 准备运行环境 → 选 LLM）落地——硬件探测（`nvidia-smi`/内存/磁盘/Ollama）、档位推荐、缺失权重与下载量、运行时/模型下载进度、完成写 `first_run_done`。pytest 388 → **400**，cargo 33 → **36**；冻结 exe `--setup detect` 已验证。**缺口**：运行时档案仍未托管，向导的运行时下载会提示「未发布」；安装器与 CI 仍未做。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -425,6 +426,25 @@ lint-imports 2 contracts；cargo **33 passed**；`npm run build`；冻结 exe �
 **取舍记录**：TTS/ASR/嵌入保持本地（云端克隆会让阶段 0–2 的克隆归零，语音样本出网是另一个
 隐私故事）；torch 是本地 TTS 与 bge 的共同前置，所以不做「按组件分层下载」——省不掉，只添乱。
 
+### 3.25 首启向导：检测 → 准备 → 选 LLM（2026-10-26，ADR-016）
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| 探测 | ✅ | `setup.py`：CPU / 内存（GlobalMemoryStatusEx）/ `nvidia-smi` 名称+显存 / 磁盘 / Ollama / 已装档位 / 缺失权重 |
+| 推荐档位 | ✅ | NVIDIA 且显存 ≥ 6GB → `cuda126`，否则 `cpu`；开发形态（有 torch 的 `.venv`）自动“运行时已就绪” |
+| 下载量预估 | ✅ | 运行时档位 + 缺失权重（whisper 461 + bge 95 + cosyvoice 3800） |
+| 运行时下载 | ⚠️ 通但无档案 | 走 `runtime.download_bundle` + `install_bundle`；`bundles[].url` 为空时报「档案未发布」 |
+| 权重下载 | ✅ | `ModelManager.ensure` 逐项进度；已装的报 `already` 不重下 |
+| 进程协议 | ✅ | `--setup detect/install-runtime/install-models`，stdout 每行 JSON；不进聊天协议 |
+| 壳封装 | ✅ | `setup.rs`：复用 `resolve_launch`、抽干 stderr、`spawn_blocking`、`setup://event` |
+| 向导 UI | ✅ | `FirstRun.vue`：三屏（机器 → 下载 → LLM），离家出走可「稍后再说」；设置里可重跑 |
+| 完成标记 | ✅ | `first_run_done` 独立写入；`保存设置` 不会重置向导 |
+
+验证：pytest **400 passed**（新增 12）；cargo **36 passed**（含真 sidecar 的 detect 集成）；
+ruff / mypy 43 files / lint-imports；`npm run build`；`tauri build --no-bundle`；
+冻结 exe `--setup detect` 返回 `frozen=true / cuda126 / whisper 缺失`。
+**未做像素级验收**（向导 UI 只过构建与类型）。
+
 ## 4. 未完成
 
 ### 4.1 阶段 0 收尾（**一半已实测，一半卡在设备/决策**）
@@ -458,12 +478,11 @@ lint-imports 2 contracts；cargo **33 passed**；`npm run build`；冻结 exe �
 
 ### 4.4 阶段 3：打包与分发（3–4 周）
 
-- ✅ ADR-011 split-binary（§3.20）；✅ 模型管理器（§3.20）；✅ ONEDIR 构建 + 双形态 spawn + Tauri resource（§3.21）；✅ 运行时档位档案 + 启动注入 + 管理 CLI（§3.23）；✅ LLM 本地/云端可插拔 + 凭据管理器（§3.24，ADR-016）。
+- ✅ ADR-011 split-binary（§3.20）；✅ 模型管理器（§3.20）；✅ ONEDIR 构建 + 双形态 spawn + Tauri resource（§3.21）；✅ 运行时档位档案 + 启动注入 + 管理 CLI（§3.23）；✅ LLM 本地/云端可插拔 + 凭据管理器（§3.24，ADR-016）；✅ 首启向导三屏 + `--setup` 进程协议（§3.25）。
 - ⬜ 运行时档案托管（`bundles[].url`）与真 torch/cpu、torch/cu126 档位构建。
 - ⬜ Tauri 安装器（NSIS/MSI）与基础包体积检查。
-- ⬜ 首次启动向导：硬件检测 → 档位推荐 → 运行时/模型下载 → LLM 选择（Ollama 或云端 key）→ 写 `first_run_done`。
 - ⬜ 三平台 CI（CPU 面）。
-- 现状：注入链路、档案机制、LLM 双后端与密钥链路已通；档案未上传，首启与安装器未做。
+- 现状：向导、注入、LLM 双后端与密钥链路已通；档案未上传，安装器未做。
 
 ### 4.5 技术债（2026-10-23 审计发现，不阻塞但会在阶段 1 反噬）
 
