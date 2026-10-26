@@ -107,9 +107,14 @@ export interface PersonaView {
 }
 
 export interface SettingsView {
-  provider: "mock" | "ollama";
+  /** mock=无模型契约链；ollama=本地；openai=OpenAI 兼容端点（云端或本地，ADR-016） */
+  provider: "mock" | "ollama" | "openai";
   model: string;
   privacyMode: boolean;
+  /** OpenAI 兼容端点，填到 /v1 为止；仅 provider=openai 使用 */
+  baseUrl: string;
+  /** 只读：凭据管理器是否已存 key（写入时忽略） */
+  hasKey: boolean;
 }
 
 export function getPersona(): Promise<PersonaView> {
@@ -126,6 +131,15 @@ export function getSettings(): Promise<SettingsView> {
 
 export function saveSettings(settings: SettingsView): Promise<void> {
   return invoke("save_settings", { settings });
+}
+
+/** 保存云端 LLM 的 API key（Windows 凭据管理器；明文不回传、不入库）。 */
+export function saveLlmKey(key: string): Promise<void> {
+  return invoke("save_llm_key", { key });
+}
+
+export function clearLlmKey(): Promise<void> {
+  return invoke("clear_llm_key");
 }
 
 /** 音色槽位（ADR-008）：内置 + 克隆列表；selected 由服务端标记。 */

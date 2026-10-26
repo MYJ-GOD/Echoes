@@ -8,6 +8,7 @@
 mod audio;
 mod capture;
 mod profile;
+mod secrets;
 mod sidecar;
 mod voices;
 mod ws_audio;
@@ -126,12 +127,25 @@ fn save_persona(persona: profile::PersonaView) -> Result<(), String> {
 
 #[tauri::command]
 fn get_settings() -> Result<profile::SettingsView, String> {
-    profile::read_settings(&profile::db_path())
+    let mut settings = profile::read_settings(&profile::db_path())?;
+    settings.has_key = secrets::has_key();
+    Ok(settings)
 }
 
 #[tauri::command]
 fn save_settings(settings: profile::SettingsView) -> Result<(), String> {
     profile::write_settings(&profile::db_path(), &settings)
+}
+
+/// 保存云端 LLM 的 API key（ADR-016：Windows 凭据管理器，明文不入库、不回传）。
+#[tauri::command]
+fn save_llm_key(key: String) -> Result<(), String> {
+    secrets::save(&key)
+}
+
+#[tauri::command]
+fn clear_llm_key() -> Result<(), String> {
+    secrets::clear()
 }
 
 /// 音色槽位（ADR-008）：列表 + 切换；写 session.voice_id，sidecar 下一轮拉取。
@@ -330,6 +344,8 @@ pub fn run() {
       save_persona,
       get_settings,
       save_settings,
+      save_llm_key,
+      clear_llm_key,
       list_voices,
       select_voice,
       interrupt_turn,

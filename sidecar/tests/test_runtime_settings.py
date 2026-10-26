@@ -6,6 +6,7 @@ from pathlib import Path
 
 from echoes_sidecar.db.repo import Storage
 from echoes_sidecar.session.runtime import (
+    SETTING_BASE_URL,
     SETTING_MODEL,
     SETTING_PERSONA_NAME,
     SETTING_PERSONA_PROMPT,
@@ -46,6 +47,21 @@ def test_reads_valid_settings(tmp_path: Path) -> None:
         assert settings.privacy_mode is False
         assert settings.persona_name == "小林"
         assert settings.persona_system_prompt == "你是小林，说话简洁。"
+    finally:
+        storage.close()
+
+
+def test_openai_provider_and_base_url_are_read(tmp_path: Path) -> None:
+    """ADR-016：云端 LLM 走 openai provider + base_url，未知 provider 仍被忽略。"""
+    storage = _storage(tmp_path)
+    try:
+        storage.settings.set(SETTING_PROVIDER, "openai")
+        storage.settings.set(SETTING_BASE_URL, "https://api.deepseek.com/v1")
+        storage.settings.set(SETTING_PRIVACY, False)
+        settings = load_runtime_settings(storage)
+        assert settings.provider == "openai"
+        assert settings.base_url == "https://api.deepseek.com/v1"
+        assert settings.privacy_mode is False
     finally:
         storage.close()
 

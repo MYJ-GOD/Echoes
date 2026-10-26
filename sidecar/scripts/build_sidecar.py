@@ -97,6 +97,13 @@ def build() -> Path:
         "echoes_sidecar",
         "--collect-all",
         "sqlite_vec",
+        # 凭据后端是动态发现的：不显式收集，冻结版会在 import keyring 时缺 backend
+        "--collect-submodules",
+        "keyring.backends",
+        "--collect-submodules",
+        "win32ctypes",
+        "--hidden-import",
+        "keyring.backends.Windows",
         "--add-data",
         _data(ROOT / "echoes_sidecar" / "models" / "manifest.json", "echoes_sidecar/models"),
         "--add-data",

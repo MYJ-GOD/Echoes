@@ -4,19 +4,22 @@
 不能重启进程。路由持有当前 provider，`apply()` 在配置变化时构造新实例并关闭旧客户端。
 turn 是串行的（TurnRunner），切换只发生在 turn 开始前，没有在途 generate 被换掉。
 
-**边界**：mock 是测试/无模型链；ollama 是本地真路。未知 provider 忽略并保持当前，
-不静默换成 mock（3.4.1 报错不降级）。
+**边界**：mock 是测试/无模型链；ollama 是本地真路；openai 是 OpenAI 兼容端点
+（云端或本地 LM Studio/vLLM）。未知 provider 忽略并保持当前，不静默换成 mock
+（3.4.1 报错不降级）。
 """
 from __future__ import annotations
 
 import sys
 from collections.abc import AsyncIterator, Callable
 
+from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.engines.llm.base import LLMProvider
 
-ProviderFactory = Callable[[str, str], LLMProvider]
+# provider/model/base_url 三者任一变化都要重建（base_url 只对 openai 有意义）
+ProviderFactory = Callable[[str, str, "str | None"], LLMProvider]
 
-_VALID = frozenset({"mock", "ollama"})
+_VALID = frozenset({"mock", "ollama", "openai"})
 
 
 class ProviderRouter(LLMProvider):
@@ -29,11 +32,15 @@ class ProviderRouter(LLMProvider):
         *,
         provider: str,
         model: str,
+        base_url: str | None = None,
     ) -> None:
         self._provider = initial
         self._factory = factory
         self._provider_name = provider
         self._model = model
+        self._base_url = base_url
+        self._allow_cloud = True
+        self._blocked = False
 
     @property
     def name(self) -> str:
@@ -50,29 +57,58 @@ class ProviderRouter(LLMProvider):
         max_tokens: int = 1024,
         temperature: float = 0.7,
     ) -> AsyncIterator[str]:
+        if self._blocked:
+            raise EchoesError(
+                ErrorCode.LLM_PROVIDER_UNAVAILABLE,
+                "隐私模式已开启：云端 LLM 不允许出网（设置 → 引擎，或改用本地 Ollama）",
+            )
         async for piece in self._provider.generate(
             messages, stream=stream, max_tokens=max_tokens, temperature=temperature
         ):
             yield piece
 
-    async def apply(self, *, provider: str | None, model: str | None) -> None:
-        """配置变了才重建；未知 provider 保持当前并记 stderr。"""
+    async def apply(
+        self,
+        *,
+        provider: str | None,
+        model: str | None,
+        base_url: str | None = None,
+        allow_cloud: bool = True,
+    ) -> None:
+        """配置变了才重建；未知 provider 保持当前并记 stderr。
+
+        `allow_cloud=False`（隐私模式）时，云端 provider 不重建也不放行：`generate`
+        直接报错。这是「报错不降级」——偷偷退回本地会把用户的隐私选择变成假的。
+        """
         target_provider = provider or self._provider_name
         target_model = model or self._model
+        target_base = base_url if base_url is not None else self._base_url
         if target_provider not in _VALID:
             print(
                 f"[sidecar] 忽略未知 LLM provider {target_provider!r}（4.4 不降级）",
                 file=sys.stderr,
             )
             return
-        if (target_provider, target_model) == (self._provider_name, self._model):
+        self._allow_cloud = allow_cloud
+        self._blocked = target_provider == "openai" and not allow_cloud
+        if self._blocked:
+            print(
+                "[sidecar] 隐私模式开启：云端 LLM 已在设置页被选中，turn 将报错",
+                file=sys.stderr,
+            )
+        if (target_provider, target_model, target_base) == (
+            self._provider_name,
+            self._model,
+            self._base_url,
+        ):
             return
 
-        new_provider = self._factory(target_provider, target_model)
+        new_provider = self._factory(target_provider, target_model, target_base)
         old_provider = self._provider
         self._provider = new_provider
         self._provider_name = target_provider
         self._model = target_model
+        self._base_url = target_base
         await _close(old_provider)
         print(
             f"[sidecar] LLM provider 已切换：{target_provider} / {target_model}（3.4 拉取）",

@@ -11,9 +11,9 @@
 | ----------------- | ------------ | ------------- |
 | **阶段 0：垂直切片**     | **约 92–95%** | **约 0.5 周（延迟决策/上机）** |
 | **阶段 2：克隆 UX + 远程** | **代码面 100%** | fine-tune 评估可选 |
-| **阶段 3：打包分发** | **约 55%** | **约 1.5–2 周** |
+| **阶段 3：打包分发** | **约 62%** | **约 1–1.5 周** |
 | **MVP：阶段 0–1**    | **约 95–100%** | **约 0.5 周（阶段 0 收尾）** |
-| **全路线：阶段 -1 → 3** | **约 84–86%** | **约 1.5–2 周** |
+| **全路线：阶段 -1 → 3** | **约 85–87%** | **约 1–1.5 周** |
 
 口径说明：
 
@@ -32,6 +32,7 @@
 - **2026-10-25 第十轮（ONEDIR + 双形态）**：sidecar ONEDIR 构建（85.3MB）+ 冻结冒烟 hello/WS + `resolve_launch`（安装包 exe / dev `sidecar/.venv`）+ Tauri bundle resource（`1d63494`）；cargo **32**；`npx tauri build --no-bundle` 通过。阶段 3 剩余：安装器、torch/CUDA 运行时下载、首启引导、CI。
 - **2026-10-26 第十一轮（前端重设计）**：`App.vue` 按「安静书房 / 信纸」重做视觉与布局（信笺页眉 + 衬线正文 + 圆形按住说话 + 右侧抽屉设置），功能与 IPC 逻辑不变；补自动跟读（上翻不抢滚动）、流式光标、错误提示条、focus-visible、reduced-motion、800×600/窄屏适配。`npm run build` 通过；**未做像素级验收**（浏览器截图在当前环境不可用，仅用 DOM 度量核对 800×600 布局）。
 - **2026-10-26 第十二轮（运行时包）**：`runtime.py` + `runtime_manifest.json` + `scripts/runtime_manager.py` 落地——按档位（cpu / cuda126）预构建 zip，启动注入 `sys.path` 与 DLL 目录；冻结 exe 87.5MB、有档位打印 `[runtime] injected profile=…`、无档位安静跳过；单测 351 → **372**。顺带补上 vendored cosyvoice2 未进 ONEDIR 的缺件。**未完成**：档案托管地址与真 torch 档位构建（归首启引导 + CI）。
+- **2026-10-26 第十三轮（LLM 可插拔）**：ADR-016 定稿——LLM 支持「本地 Ollama / OpenAI 兼容云端」二选一，TTS/ASR/嵌入保持本地；API key 存 Windows 凭据管理器（Rust 写 / Python 读，已实测冻结 exe 取到 key 并打到真实 401）；隐私模式与云端互斥、Router 硬阻断不降级。新增 `LLM_KEY_MISSING`；设置页可填 base URL / key。pytest 372 → **388**，cargo 32 → **33**。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -404,6 +405,26 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 **顺带修复**：vendored `cosyvoice2`（2.1MB）此前没进 ONEDIR，而 `_ensure_vendor_boot()`
 按 `_MEIPASS/vendor/cosyvoice2` 解析——不补的话，装上 torch 也会在 `import cosyvoice` 处失败。
 
+### 3.24 LLM 可插拔：本地 / 云端二选一（2026-10-26，ADR-016）
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| OpenAI 兼容客户端 | ✅ | `engines/llm/openai_compat.py`：SSE 流式、非流式、401/429/5xx → 契约错误码 |
+| 本地兼容端点 | ✅ | 同一客户端，base_url 环回时实例名报 `openai`（非 `cloud:`），摘要/记忆不被误压 |
+| 云端 key | ✅ | Windows 凭据管理器：壳 `secrets.rs` 写，sidecar `secrets.py` 读；前端只见 `hasKey` |
+| 跨语言口径 | ✅ | `Entry::new_with_target(SERVICE, SERVICE, ACCOUNT)` ↔ `keyring.get_password`；实测双向 |
+| 冻结形态 | ✅ | 88.0MB；`--collect-submodules keyring.backends/win32ctypes`；冻结 exe 取 key 打到真实 401 |
+| 设置键 | ✅ | `llm_base_url` 新增；provider 扩 `openai`；读写校验（URL/隐私互斥） |
+| 隐私矩阵 | ✅ | 写入拒绝 + Router `generate` 阻断 + 前端自动取消勾选；不静默降级 |
+| 错误码 | ✅ | 追加 `LLM_KEY_MISSING`（3.4.1 只追加） |
+| 首启向导 / 安装器 | ⬜ | 见 §4.4 |
+
+验证：pytest **388 passed**（新增 14：客户端 9、密钥 4、设置 1）；ruff / mypy 43 files /
+lint-imports 2 contracts；cargo **33 passed**；`npm run build`；冻结 exe 端到端取 key。
+
+**取舍记录**：TTS/ASR/嵌入保持本地（云端克隆会让阶段 0–2 的克隆归零，语音样本出网是另一个
+隐私故事）；torch 是本地 TTS 与 bge 的共同前置，所以不做「按组件分层下载」——省不掉，只添乱。
+
 ## 4. 未完成
 
 ### 4.1 阶段 0 收尾（**一半已实测，一半卡在设备/决策**）
@@ -437,12 +458,12 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 
 ### 4.4 阶段 3：打包与分发（3–4 周）
 
-- ✅ ADR-011 split-binary（§3.20）；✅ 模型管理器（§3.20）；✅ ONEDIR 构建 + 双形态 spawn + Tauri resource（§3.21）；✅ 运行时档位档案 + 启动注入 + 管理 CLI（§3.23）。
+- ✅ ADR-011 split-binary（§3.20）；✅ 模型管理器（§3.20）；✅ ONEDIR 构建 + 双形态 spawn + Tauri resource（§3.21）；✅ 运行时档位档案 + 启动注入 + 管理 CLI（§3.23）；✅ LLM 本地/云端可插拔 + 凭据管理器（§3.24，ADR-016）。
 - ⬜ 运行时档案托管（`bundles[].url`）与真 torch/cpu、torch/cu126 档位构建。
 - ⬜ Tauri 安装器（NSIS/MSI）与基础包体积检查。
-- ⬜ 首次启动硬件检测 → 档位推荐 → 下载引导（消费 §3.23 的 `list`/`install`/`verify`）。
+- ⬜ 首次启动向导：硬件检测 → 档位推荐 → 运行时/模型下载 → LLM 选择（Ollama 或云端 key）→ 写 `first_run_done`。
 - ⬜ 三平台 CI（CPU 面）。
-- 现状：注入链路与档案机制已通；档案未上传，首启与安装器未做。
+- 现状：注入链路、档案机制、LLM 双后端与密钥链路已通；档案未上传，首启与安装器未做。
 
 ### 4.5 技术债（2026-10-23 审计发现，不阻塞但会在阶段 1 反噬）
 
@@ -473,7 +494,7 @@ ruff / mypy(33) / lint-imports(2) 全绿。
 - **记忆**：存储/抽取/检索/评测管线/滚动摘要与 13.3 真门禁已落地（3.13–3.15；P 0.917 / R 0.957 / 替代 1.000）；bge 权重为本地预取，干净机需按 7.3 bootstrap 复现。
 - **设置切换冷启动**：provider/model 切换后首轮重新加载模型（实测 qwen3:8b 切后首 token 32.9s）；隐私模式已持久化，但当前无云端 provider，实际不触发网络分支。
 - **LAN 安全边界**：token 在配对 URL/日志明文；局域网阶段不做 TLS/端到端加密（8.3）；单活动端点，断线期间事件不重放（turn 去重是终端侧 `turn_seq`）。
-- **打包**：ADR-011 已定 split-binary；ONEDIR（87.5MB）+ 双形态 spawn + 运行时注入已通；**档案托管 / 安装器 / 首启引导 / CI 未做**，干净机流程未验证。
+- **打包**：ADR-011 已定 split-binary；ONEDIR（88.0MB）+ 双形态 spawn + 运行时注入已通；**档案托管 / 安装器 / 首启引导 / CI 未做**，干净机流程未验证。
 - **平台**：当前 dev 形态绑定 Windows + 仓库内 `.venv`；跨平台打包未开始。
 
 ## 6. 下一步

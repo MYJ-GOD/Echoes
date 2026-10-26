@@ -46,7 +46,10 @@ class Factory:
     def __init__(self) -> None:
         self.created: list[tuple[str, str, NamedLLM]] = []
 
-    def __call__(self, provider: str, model: str) -> LLMProvider:
+    def __call__(
+        self, provider: str, model: str, base_url: str | None = None
+    ) -> LLMProvider:
+        _ = base_url
         instance = NamedLLM(provider)
         self.created.append((provider, model, instance))
         return instance

@@ -108,7 +108,12 @@ const settingsDraft = ref<ipc.SettingsView>({
   provider: "ollama",
   model: "qwen3:8b",
   privacyMode: true,
+  baseUrl: "",
+  hasKey: false,
 });
+// 云端 key 只提交、不回显：输入框永远从空开始（ADR-016）
+const llmKeyDraft = ref("");
+const keyStatus = ref("");
 const voices = ref<ipc.VoiceView[]>([]);
 const voicesStatus = ref("");
 const profileStatus = ref("");
@@ -169,6 +174,36 @@ async function saveSettings(): Promise<void> {
     profileStatus.value = "设置已保存（下一轮对话生效）";
   } catch (err) {
     profileStatus.value = `⚠ ${String(err)}`;
+  }
+}
+
+/** 切到云端时自动关隐私模式：16.1 下两者互斥，留着只会每轮报错。 */
+function onProviderChange(): void {
+  if (settingsDraft.value.provider === "openai") {
+    settingsDraft.value.privacyMode = false;
+  }
+}
+
+async function saveKey(): Promise<void> {
+  const key = llmKeyDraft.value.trim();
+  if (!key) return;
+  try {
+    await ipc.saveLlmKey(key);
+    llmKeyDraft.value = "";
+    settingsDraft.value.hasKey = true;
+    keyStatus.value = "已保存到 Windows 凭据管理器";
+  } catch (err) {
+    keyStatus.value = `⚠ ${String(err)}`;
+  }
+}
+
+async function clearKey(): Promise<void> {
+  try {
+    await ipc.clearLlmKey();
+    settingsDraft.value.hasKey = false;
+    keyStatus.value = "已清除";
+  } catch (err) {
+    keyStatus.value = `⚠ ${String(err)}`;
   }
 }
 
@@ -833,23 +868,83 @@ async function send(): Promise<void> {
 
         <section class="block">
           <h3>引擎</h3>
+          <label class="field">
+            <span>LLM 后端</span>
+            <select v-model="settingsDraft.provider" @change="onProviderChange">
+              <option value="ollama">本地 Ollama</option>
+              <option value="openai">云端 / 兼容端点（API key）</option>
+              <option value="mock">无模型（仅测试）</option>
+            </select>
+          </label>
           <div class="two">
             <label class="field">
-              <span>提供方</span>
-              <select v-model="settingsDraft.provider">
-                <option value="ollama">Ollama（本地）</option>
-                <option value="mock">Mock（无模型）</option>
-              </select>
-            </label>
-            <label class="field">
               <span>模型</span>
-              <input v-model="settingsDraft.model" type="text" maxlength="100" />
+              <input
+                v-model="settingsDraft.model"
+                type="text"
+                maxlength="100"
+                placeholder="qwen3:8b / deepseek-chat"
+              />
+            </label>
+            <label v-if="settingsDraft.provider === 'openai'" class="field">
+              <span>Base URL</span>
+              <input
+                v-model="settingsDraft.baseUrl"
+                type="text"
+                maxlength="300"
+                placeholder="https://api.deepseek.com/v1"
+              />
             </label>
           </div>
+
+          <template v-if="settingsDraft.provider === 'openai'">
+            <div class="field">
+              <span>API key</span>
+              <div class="key-row">
+                <input
+                  v-model="llmKeyDraft"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="
+                    settingsDraft.hasKey ? '已保存（留空则不修改）' : 'sk-…'
+                  "
+                />
+                <button
+                  type="button"
+                  class="ghost"
+                  :disabled="llmKeyDraft.trim() === ''"
+                  @click="saveKey"
+                >
+                  保存
+                </button>
+                <button
+                  type="button"
+                  class="quiet"
+                  :disabled="!settingsDraft.hasKey"
+                  @click="clearKey"
+                >
+                  清除
+                </button>
+              </div>
+            </div>
+            <p v-if="keyStatus" class="note">{{ keyStatus }}</p>
+            <p class="note">
+              key 存 Windows 凭据管理器，不进数据库、不回显；Base URL 填到
+              <code>/v1</code> 为止。
+            </p>
+          </template>
+
           <label class="check">
             <input v-model="settingsDraft.privacyMode" type="checkbox" />
-            <span>隐私模式：本机推理，不出网</span>
+            <span>隐私模式：禁止任何云端出网</span>
           </label>
+          <p
+            v-if="settingsDraft.provider === 'openai' && settingsDraft.privacyMode"
+            class="note"
+            data-tone="warn"
+          >
+            云端 LLM 与隐私模式互斥：保存前请关闭隐私模式。
+          </p>
           <p class="note">保存后下一轮生效；人设会覆盖默认人设。</p>
           <button type="button" class="primary" @click="saveSettings">
             保存设置
@@ -1588,6 +1683,31 @@ button {
   width: 14px;
   height: 14px;
   accent-color: var(--accent);
+}
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ghost:disabled,
+.quiet:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--paper-lo);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
 }
 
 .note {

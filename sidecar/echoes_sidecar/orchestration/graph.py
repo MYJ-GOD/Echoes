@@ -254,7 +254,12 @@ class TurnGraph:
         router = self._deps.llm
         if isinstance(router, ProviderRouter):
             try:
-                await router.apply(provider=settings.provider, model=settings.model)
+                await router.apply(
+                    provider=settings.provider,
+                    model=settings.model,
+                    base_url=settings.base_url,
+                    allow_cloud=not settings.privacy_mode,
+                )
             except Exception as exc:  # noqa: BLE001  provider 构造失败保持旧实例
                 print(
                     f"[sidecar] LLM provider 切换失败（沿用旧实例）: {exc}",

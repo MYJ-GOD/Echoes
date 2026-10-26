@@ -16,13 +16,14 @@ from echoes_sidecar.db import Storage
 
 SETTING_PROVIDER = "llm_provider"
 SETTING_MODEL = "llm_model"
+SETTING_BASE_URL = "llm_base_url"
 SETTING_PRIVACY = "privacy_mode"
 SETTING_PERSONA_NAME = "persona_name"
 SETTING_PERSONA_PROMPT = "persona_system_prompt"
 
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_MODEL = "qwen3:8b"
-PROVIDERS = frozenset({"mock", "ollama"})
+PROVIDERS = frozenset({"mock", "ollama", "openai"})
 
 
 @dataclass(frozen=True)
@@ -34,12 +35,14 @@ class RuntimeSettings:
     privacy_mode: bool
     persona_name: str | None
     persona_system_prompt: str | None
+    base_url: str | None = None
 
 
 def load_runtime_settings(storage: Storage) -> RuntimeSettings:
     """读 setting 表（缺失/类型不符按默认；坏 JSON 由 SettingRepo 报 STORAGE_ERROR）。"""
     provider = _text(storage.settings.get(SETTING_PROVIDER))
     model = _text(storage.settings.get(SETTING_MODEL))
+    base_url = _text(storage.settings.get(SETTING_BASE_URL))
     privacy = storage.settings.get(SETTING_PRIVACY)
     return RuntimeSettings(
         provider=provider if provider in PROVIDERS else None,
@@ -47,6 +50,7 @@ def load_runtime_settings(storage: Storage) -> RuntimeSettings:
         privacy_mode=privacy if isinstance(privacy, bool) else True,
         persona_name=_text(storage.settings.get(SETTING_PERSONA_NAME)),
         persona_system_prompt=_text(storage.settings.get(SETTING_PERSONA_PROMPT)),
+        base_url=base_url,
     )
 
 
@@ -62,6 +66,7 @@ __all__ = [
     "DEFAULT_PROVIDER",
     "PROVIDERS",
     "RuntimeSettings",
+    "SETTING_BASE_URL",
     "SETTING_MODEL",
     "SETTING_PERSONA_NAME",
     "SETTING_PERSONA_PROMPT",

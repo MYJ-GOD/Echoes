@@ -12,7 +12,7 @@ import pytest
 
 from echoes_sidecar import runtime
 
-CORE_DEPS = {"pydantic", "websockets", "httpx", "sqlite-vec"}
+CORE_DEPS = {"pydantic", "websockets", "httpx", "sqlite-vec", "keyring"}
 
 
 @pytest.fixture(autouse=True)

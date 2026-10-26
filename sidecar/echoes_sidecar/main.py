@@ -33,6 +33,7 @@ from echoes_sidecar.engines.asr.whisper import WhisperASREngine
 from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.llm.ollama import OllamaLLMProvider
+from echoes_sidecar.engines.llm.openai_compat import OpenAICompatibleLLM
 from echoes_sidecar.engines.llm.persona import PERSONA_SYSTEM_PROMPT
 from echoes_sidecar.engines.llm.router import ProviderRouter
 from echoes_sidecar.engines.tts.base import TTSEngine
@@ -56,6 +57,7 @@ from echoes_sidecar.memory.store import MemoryStore
 from echoes_sidecar.orchestration.clone import CloneService
 from echoes_sidecar.orchestration.graph import TriggerSource, TurnDeps, TurnGraph
 from echoes_sidecar.orchestration.turn import TurnFactory, TurnRunner
+from echoes_sidecar.secrets import llm_api_key
 from echoes_sidecar.session.manager import SessionManager
 from echoes_sidecar.session.runtime import load_runtime_settings
 from echoes_sidecar.session.session import Session
@@ -104,6 +106,8 @@ def _now_ms(t0: float) -> int:
 DEFAULT_PERSONA_ID = "default"
 DEFAULT_PERSONA_NAME = "默认人设"
 DEFAULT_SESSION_ID = "default"
+# OpenAI 兼容端点的兜底地址（设置页未填 base_url 时）
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 # 克隆样本等待上限（3.4）：壳侧录音上限 6s，留足余量；超时即报错而非挂死
 SAMPLE_WAIT_SECONDS = 15.0
 
@@ -325,46 +329,62 @@ async def _asr_loop(
 
 
 async def _assemble_llm(argv: Sequence[str] | None) -> tuple[LLMProvider, bool]:
-    """组合根 LLM 装配（3.2）：mock 默认（无模型依赖的契约链），ollama 真路（第二周）。
+    """组合根 LLM 装配（3.2）：mock 默认（无模型依赖的契约链）、ollama 本地、openai 兼容。
 
-    Ollama 不可达时 ready=False → hello 声明不就绪 → 3.5 必需引擎 gate 停 booting
+    openai 一档同时覆盖云端（OpenAI/DeepSeek/…）与本地兼容端点（Ollama `/v1`、
+    LM Studio、vLLM）——差异只在 base_url 与 API key（ADR-016）。
+    Ollama 不可达 / 缺 key 时 ready=False → hello 声明不就绪 → 3.5 gate 停 booting
     （报错而非降级：不静默换 mock）。
     """
     parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
-    parser.add_argument("--llm", choices=["mock", "ollama"], default="mock")
+    parser.add_argument("--llm", choices=["mock", "ollama", "openai"], default="mock")
     # ADR-001 二轮判定：T-8G 本地默认首候选 qwen3:8b(no-think, 0.80)
     parser.add_argument("--model", default="qwen3:8b")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI 兼容端点（填到 /v1 为止；设置页可覆盖）",
+    )
+    parser.add_argument(
+        "--ollama-url", default="http://127.0.0.1:11434", help="本地 Ollama 地址"
+    )
     parser.add_argument(
         "--no-think", action="store_true", help="qwen3 系关 thinking（ADR-001 硬前提）"
     )
     # 组合根可独立组装：各装配器只认领自己的 flag（parse_known_args // 阶段 0 简易拼装）
     args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
 
-    if args.llm == "mock":
-        initial: LLMProvider = MockLLMProvider()
-        ready = True
-    else:
-        initial = OllamaLLMProvider(
-            model=args.model,
-            think=False if args.no_think else None,
-        )
-        ready = await initial.health()
-        if not ready:
-            print(
-                f"[sidecar] Ollama 不可达（model={args.model}）：llm ready=False（3.5 gate）",
-                file=sys.stderr,
-            )
-
     think = False if args.no_think else None
+    base_url: str | None = args.base_url
 
-    def _factory(provider: str, model: str) -> LLMProvider:
+    def _build(provider: str, model: str, url: str | None) -> LLMProvider:
         if provider == "mock":
             return MockLLMProvider()
-        return OllamaLLMProvider(model=model, think=think)
+        if provider == "ollama":
+            return OllamaLLMProvider(model=model, think=think, base_url=args.ollama_url)
+        # 云端与本地兼容端点共用一套客户端；key 在请求时从凭据管理器读
+        return OpenAICompatibleLLM(
+            model=model,
+            base_url=url or DEFAULT_OPENAI_BASE_URL,
+            key_provider=llm_api_key,
+        )
+
+    initial = _build(args.llm, args.model, base_url)
+    ready = await initial.health()
+    if not ready:
+        print(
+            f"[sidecar] LLM 不可用（provider={args.llm}, model={args.model}）："
+            "llm ready=False（3.5 gate）",
+            file=sys.stderr,
+        )
 
     # 3.4 拉取语义：设置表可在 turn 边界切 provider，无需重启 sidecar。
     router = ProviderRouter(
-        initial, _factory, provider=args.llm, model=args.model
+        initial,
+        _build,
+        provider=args.llm,
+        model=args.model,
+        base_url=base_url,
     )
     return router, ready
 
@@ -503,9 +523,10 @@ def _assemble_memory(
         )
     embedder = TransformersEmbedder(model_dir=weights)
     store = MemoryStore(storage.memories, embedder)
-    # 默认隐私模式（ADR-001「绝不出网」）：provider 是 ollama/mock 时不受影响；
-    # 将来接云端 provider 时，抽取器会直接跳过（4.4/5.2）。
-    extractor = MemoryExtractor(llm, store, privacy_mode=True)
+    # 隐私边界在上游落地（ADR-016）：设置层拒绝「云端 + 隐私模式」，Router 直接
+    # 阻断云端 generate。这里若传静态 True，云端用户会永久静默失去记忆/摘要——
+    # 那个开关是 ADR-001「只许本地」时代的产物，已不再成立。
+    extractor = MemoryExtractor(llm, store, privacy_mode=False)
     print(f"[sidecar] 记忆功能启用（bge={weights}）", file=sys.stderr)
     return store, extractor
 
@@ -665,7 +686,7 @@ async def _serve_with_storage(
     # 摘要与记忆共用同一个功能门：memory off / mock / bge 权重缺失时一起关闭。
     # mock LLM 下即使强制 --memory on 也不做摘要（否则会把 mock 台词写成摘要）。
     summarizer = (
-        SessionSummarizer(llm_provider, storage.sessions, privacy_mode=True)
+        SessionSummarizer(llm_provider, storage.sessions, privacy_mode=False)
         if memory_extractor is not None and llm_provider.name != "mock"
         else None
     )

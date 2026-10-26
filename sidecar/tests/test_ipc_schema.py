@@ -65,8 +65,8 @@ def test_unknown_fields_ignored() -> None:
     assert msg.text == "在吗？"
 
 
-def test_error_codes_total_14() -> None:
-    """3.4.1 权威错误码共 14 条；只追加、不重命名、不复用。"""
+def test_error_codes_total_15() -> None:
+    """3.4.1 权威错误码共 15 条；只追加、不重命名、不复用（ADR-016 追加 LLM_KEY_MISSING）。"""
     assert {code.value for code in ErrorCode} == {
         "SAMPLE_TOO_SHORT",
         "SAMPLE_TOO_NOISY",
@@ -77,6 +77,7 @@ def test_error_codes_total_14() -> None:
         "VOICE_NOT_AVAILABLE",
         "MIC_NOT_AVAILABLE",
         "LLM_PROVIDER_UNAVAILABLE",
+        "LLM_KEY_MISSING",
         "ASR_ENGINE_ERROR",
         "TTS_ENGINE_ERROR",
         "STORAGE_ERROR",

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import pytest
+
+from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.router import ProviderRouter
 from echoes_sidecar.memory.extractor import MemoryExtractor
@@ -40,11 +43,13 @@ class FakeLLM(LLMProvider):
 
 class Factory:
     def __init__(self) -> None:
-        self.created: list[tuple[str, str, FakeLLM]] = []
+        self.created: list[tuple[str, str, str | None, FakeLLM]] = []
 
-    def __call__(self, provider: str, model: str) -> LLMProvider:
+    def __call__(
+        self, provider: str, model: str, base_url: str | None = None
+    ) -> LLMProvider:
         instance = FakeLLM(provider)
-        self.created.append((provider, model, instance))
+        self.created.append((provider, model, base_url, instance))
         return instance
 
 
@@ -56,8 +61,40 @@ async def test_apply_switches_provider_and_closes_old() -> None:
     await router.apply(provider="ollama", model="qwen3:8b")
 
     assert router.name == "ollama"
-    assert [(p, m) for p, m, _ in factory.created] == [("ollama", "qwen3:8b")]
+    assert [(p, m) for p, m, _, _ in factory.created] == [("ollama", "qwen3:8b")]
     assert initial.closed is True
+
+
+async def test_apply_switches_on_base_url_change() -> None:
+    initial = FakeLLM("openai")
+    factory = Factory()
+    router = ProviderRouter(initial, factory, provider="openai", model="m")
+
+    await router.apply(
+        provider="openai", model="m", base_url="https://example.test/v1"
+    )
+
+    assert [(p, u) for p, _, u, _ in factory.created] == [
+        ("openai", "https://example.test/v1")
+    ]
+
+
+async def test_privacy_mode_blocks_cloud_without_silent_fallback() -> None:
+    """隐私模式下云端 provider 不放行：generate 报错，而不是偷偷用本地（16.1）。"""
+    initial = FakeLLM("mock")
+    router = ProviderRouter(
+        initial, Factory(), provider="openai", model="gpt-x", base_url="https://x/v1"
+    )
+    await router.apply(
+        provider="openai", model="gpt-x", base_url="https://x/v1", allow_cloud=False
+    )
+
+    with pytest.raises(EchoesError) as excinfo:
+        async for _ in router.generate([{"role": "user", "content": "hi"}]):
+            pass
+
+    assert excinfo.value.code is ErrorCode.LLM_PROVIDER_UNAVAILABLE
+    assert initial.calls == []
 
 
 async def test_apply_same_config_does_not_rebuild() -> None:

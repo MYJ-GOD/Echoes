@@ -1,4 +1,4 @@
-"""L1 错误码映射（13.1）：3.4.1 的 14 条 + CloneError 语义（4.5）。"""
+"""L1 错误码映射（13.1）：3.4.1 的 14 条 + ADR-016 的 LLM_KEY_MISSING + CloneError（4.5）。"""
 from __future__ import annotations
 
 from echoes_sidecar.core.errors import CloneError, EchoesError, ErrorCode
@@ -6,7 +6,7 @@ from echoes_sidecar.core.errors import CloneError, EchoesError, ErrorCode
 
 def test_error_code_values_are_frozen_list() -> None:
     """code 值域经 test_ipc_schema 单测锁定；此处锁定枚举数量不增不减。"""
-    assert len(ErrorCode) == 14
+    assert len(ErrorCode) == 15
 
 
 def test_clone_error_carries_code_and_cancellation() -> None:

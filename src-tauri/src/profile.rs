@@ -9,8 +9,9 @@
 //! 因此覆盖存 `persona_name` / `persona_system_prompt`，编排层每轮应用；persona 表
 //! 继续作为代码默认值。
 //!
-//! **API key**：当前 provider 仅 mock/ollama（本地），不需要 key；接入云端时按
-//! 16.1 走系统凭据存储，绝不写进本表。
+//! **API key**：provider 可为 mock/ollama/openai（ADR-016）。云端 key 按 16.1 走
+//! Windows 凭据管理器（`secrets.rs`），本表只存 provider/base_url/model，
+//! 前端拿到的永远是 `hasKey` 布尔值——明文既不落库也不回传。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,6 +23,7 @@ use serde_json::Value;
 const PERSONA_ID: &str = "default";
 const KEY_PROVIDER: &str = "llm_provider";
 const KEY_MODEL: &str = "llm_model";
+const KEY_BASE_URL: &str = "llm_base_url";
 const KEY_PRIVACY: &str = "privacy_mode";
 const KEY_PERSONA_NAME: &str = "persona_name";
 const KEY_PERSONA_PROMPT: &str = "persona_system_prompt";
@@ -31,6 +33,7 @@ const DEFAULT_MODEL: &str = "qwen3:8b";
 const MAX_NAME_CHARS: usize = 50;
 const MAX_PROMPT_CHARS: usize = 4000;
 const MAX_MODEL_CHARS: usize = 100;
+const MAX_URL_CHARS: usize = 300;
 
 /// 数据目录（与 sidecar `db/paths.py` 同口径：env 覆盖 → LOCALAPPDATA\Echoes）。
 pub fn db_path() -> PathBuf {
@@ -64,13 +67,19 @@ pub struct PersonaView {
     pub system_prompt: String,
 }
 
-/// 引擎设置视图（前端 `privacyMode`）。
+/// 引擎设置视图（前端 `privacyMode` / `baseUrl` / `hasKey`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsView {
     pub provider: String,
     pub model: String,
     pub privacy_mode: bool,
+    /// OpenAI 兼容端点（填到 `/v1` 为止）。仅 provider=openai 时使用。
+    #[serde(default)]
+    pub base_url: String,
+    /// 只读：凭据管理器里是否已有 key（写入时忽略）。
+    #[serde(default)]
+    pub has_key: bool,
 }
 
 impl Default for SettingsView {
@@ -79,6 +88,8 @@ impl Default for SettingsView {
             provider: DEFAULT_PROVIDER.to_string(),
             model: DEFAULT_MODEL.to_string(),
             privacy_mode: true,
+            base_url: String::new(),
+            has_key: false,
         }
     }
 }
@@ -133,13 +144,15 @@ pub fn write_persona(path: &Path, persona: &PersonaView) -> Result<(), String> {
         .map_err(|err| format!("写入人设失败（{}）：{err}", path.display()))
 }
 
-/// 读设置：缺省/类型不符回落默认；provider 只接受 mock/ollama。
+const PROVIDERS: [&str; 3] = ["mock", "ollama", "openai"];
+
+/// 读设置：缺省/类型不符回落默认；provider 只接受 mock/ollama/openai。
 pub fn read_settings(path: &Path) -> Result<SettingsView, String> {
     let conn = open(path)?;
     let mut settings = SettingsView::default();
 
     if let Some(provider) = read_string(&conn, KEY_PROVIDER)? {
-        if provider == "mock" || provider == "ollama" {
+        if PROVIDERS.contains(&provider.as_str()) {
             settings.provider = provider;
         }
     }
@@ -147,6 +160,9 @@ pub fn read_settings(path: &Path) -> Result<SettingsView, String> {
         if !model.trim().is_empty() {
             settings.model = model;
         }
+    }
+    if let Some(base_url) = read_string(&conn, KEY_BASE_URL)? {
+        settings.base_url = base_url;
     }
     if let Some(privacy) = read_json(&conn, KEY_PRIVACY)? {
         if let Some(value) = privacy.as_bool() {
@@ -156,17 +172,32 @@ pub fn read_settings(path: &Path) -> Result<SettingsView, String> {
     Ok(settings)
 }
 
-/// 写设置（校验后一次事务写入三个键）。
+/// 写设置（校验后一次事务写入四个键）。
 pub fn write_settings(path: &Path, settings: &SettingsView) -> Result<(), String> {
-    if settings.provider != "mock" && settings.provider != "ollama" {
+    if !PROVIDERS.contains(&settings.provider.as_str()) {
         return Err(format!(
-            "未知 provider {:?}（仅 mock / ollama）",
+            "未知 provider {:?}（仅 mock / ollama / openai）",
             settings.provider
         ));
     }
     let model = settings.model.trim();
     if model.is_empty() || model.chars().count() > MAX_MODEL_CHARS {
         return Err(format!("模型名需为 1–{MAX_MODEL_CHARS} 字"));
+    }
+    let base_url = settings.base_url.trim();
+    if base_url.chars().count() > MAX_URL_CHARS {
+        return Err(format!("base URL 过长（> {MAX_URL_CHARS} 字）"));
+    }
+    if base_url.is_empty() && settings.provider == "openai" {
+        return Err("云端 provider 需要填写 base URL（例：https://api.deepseek.com/v1）".into());
+    }
+    if !base_url.is_empty() && !(base_url.starts_with("http://") || base_url.starts_with("https://"))
+    {
+        return Err("base URL 需以 http:// 或 https:// 开头".into());
+    }
+    // 16.1：隐私模式禁止出网；云端 provider 与它互相矛盾，存进去只会每轮报错。
+    if settings.provider == "openai" && settings.privacy_mode {
+        return Err("云端 LLM 需要关闭隐私模式（或改用本地 Ollama）".into());
     }
 
     let mut conn = open(path)?;
@@ -175,6 +206,7 @@ pub fn write_settings(path: &Path, settings: &SettingsView) -> Result<(), String
         .map_err(|err| format!("写入设置失败（{}）：{err}", path.display()))?;
     write_json(&tx, KEY_PROVIDER, &Value::String(settings.provider.clone()))?;
     write_json(&tx, KEY_MODEL, &Value::String(model.to_string()))?;
+    write_json(&tx, KEY_BASE_URL, &Value::String(base_url.to_string()))?;
     write_json(&tx, KEY_PRIVACY, &Value::Bool(settings.privacy_mode))?;
     tx.commit()
         .map_err(|err| format!("写入设置失败（{}）：{err}", path.display()))
@@ -266,9 +298,46 @@ mod tests {
             provider: "mock".to_string(),
             model: "qwen3:4b".to_string(),
             privacy_mode: false,
+            ..SettingsView::default()
         };
         write_settings(&path, &settings).expect("write");
         assert_eq!(read_settings(&path).expect("read"), settings);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn openai_settings_require_base_url_and_local_privacy() {
+        let path = temp_db();
+        seed(&path);
+
+        let cloud_with_privacy = SettingsView {
+            provider: "openai".to_string(),
+            model: "deepseek-chat".to_string(),
+            privacy_mode: true,
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            has_key: false,
+        };
+        let err = write_settings(&path, &cloud_with_privacy).expect_err("隐私模式应拒绝云端");
+        assert!(err.contains("隐私模式"), "{err}");
+
+        let no_url = SettingsView {
+            privacy_mode: false,
+            base_url: String::new(),
+            ..cloud_with_privacy.clone()
+        };
+        let err = write_settings(&path, &no_url).expect_err("缺 base URL 应拒绝");
+        assert!(err.contains("base URL"), "{err}");
+
+        let ok = SettingsView {
+            privacy_mode: false,
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            ..cloud_with_privacy
+        };
+        write_settings(&path, &ok).expect("write cloud");
+        let read = read_settings(&path).expect("read");
+        assert_eq!(read.provider, "openai");
+        assert_eq!(read.base_url, "https://api.deepseek.com/v1");
+        assert!(!read.privacy_mode);
         let _ = std::fs::remove_file(&path);
     }
 
