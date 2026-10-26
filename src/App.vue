@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import * as ipc from "./lib/ipc";
@@ -10,6 +10,8 @@ interface ChatMessage {
   text: string;
   /** 被打断的 assistant 气泡（3.4 三跳：turn_complete(status=CANCELLED)） */
   interrupted?: boolean;
+  /** 协议/引擎错误：渲染成提示条，不伪装成她的一句话 */
+  kind?: "error";
 }
 
 // 侧车帧类型来自 `lib/ipc_types.ts`（由 sidecar 的 pydantic 模型生成，13.2-1）：
@@ -27,6 +29,57 @@ const asrReady = ref(false);
 // 收尾由 turn_complete（或 error）复位 —— v1.4.1 语义。
 const streaming = ref(false);
 let unlisten: UnlistenFn | null = null;
+
+// ---- 展示层状态（不改协议；sidecar 仍是唯一状态源） ----
+const historyEl = ref<HTMLElement | null>(null);
+// 用户往上翻看旧消息时不要抢滚动；回到底部附近才继续跟。
+const pinned = ref(true);
+
+function onThreadScroll(): void {
+  const el = historyEl.value;
+  if (!el) return;
+  pinned.value = el.scrollHeight - el.scrollTop - el.clientHeight < 64;
+}
+
+const stateLabel = computed(() => {
+  switch (engineState.value) {
+    case "ready":
+      return "就绪";
+    case "booting":
+      return "引擎启动中";
+    case "generating":
+      return "正在想";
+    case "speaking":
+      return "正在说";
+    case "error":
+      return "连接异常";
+    case "connecting":
+      return "连接中";
+    default:
+      return engineState.value;
+  }
+});
+const stateTone = computed(() => {
+  if (engineState.value === "error") return "error";
+  if (engineState.value === "ready") return "ready";
+  if (engineState.value === "generating" || engineState.value === "speaking") {
+    return "active";
+  }
+  return "waiting";
+});
+const pttHint = computed(() => {
+  if (!asrReady.value) return "语音引擎就绪后可用";
+  if (engineState.value === "generating" || engineState.value === "speaking") {
+    return "按下会打断当前回复";
+  }
+  if (engineState.value !== "ready") return "等待引擎就绪";
+  return "按住说话 · 松开发送";
+});
+const pttTitle = computed(() => {
+  if (!asrReady.value) return "语音引擎就绪后可用";
+  if (busy.value) return "按住说话（会打断当前回复）";
+  return "按住说话（松开结束）";
+});
 
 // ---- 克隆音色（§12 步骤 5）：progress 驱动 UI，失败只报错不回退（2.5） ----
 const clonePhase = ref<null | "recording" | "training" | "checking">(null);
@@ -61,6 +114,22 @@ const voicesStatus = ref("");
 const profileStatus = ref("");
 let profileRetry: number | null = null;
 let profileAttempts = 0;
+
+const companionName = computed(() => personaDraft.value.name.trim() || "Echoes");
+const selectedVoiceName = computed(
+  () => voices.value.find((voice) => voice.selected)?.displayName ?? "内置音色",
+);
+
+// 新消息与流式增量都跟到底：写信的人不该手动追页。
+watch(
+  () => [messages.value.length, messages.value[messages.value.length - 1]?.text],
+  async () => {
+    if (!pinned.value) return;
+    await nextTick();
+    const el = historyEl.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  },
+);
 
 async function loadProfile(): Promise<void> {
   try {
@@ -141,7 +210,11 @@ function voiceLabel(voice: ipc.VoiceView): string {
 
 function protocolDown(code: string, message: string): void {
   engineState.value = "error";
-  messages.value.push({ role: "assistant", text: `⚠ ${code}：${message}` });
+  messages.value.push({
+    role: "assistant",
+    kind: "error",
+    text: `${code}：${message}`,
+  });
 }
 
 onMounted(async () => {
@@ -181,6 +254,7 @@ function handleFrame(frame: SidecarMessage): void {
     case "asr_final":
       // 语音面输入：sidecar 随后立即进入 turn（asr_final 与 user_text 等价）。
       messages.value.push({ role: "user", text: frame.text });
+      pinned.value = true; // 自己说的话一定跟到底
       busy.value = true;
       micStatus.value = "麦克风就绪";
       break;
@@ -222,7 +296,8 @@ function handleFrame(frame: SidecarMessage): void {
     case "error":
       messages.value.push({
         role: "assistant",
-        text: `⚠ ${frame.code}：${frame.message}`,
+        kind: "error",
+        text: `${frame.code}：${frame.message}`,
       });
       streaming.value = false;
       busy.value = false;
@@ -241,6 +316,10 @@ function handleFrame(frame: SidecarMessage): void {
 // 壳侧麦克风自检（文档 12.3 首周 · 风险 10 最小验证面）：
 // 拿轨道即声明权限/设备可见；真正采集在下方 PTT（48k → Rust 重采样 16k → WS）。
 const micStatus = ref("");
+
+// 既有文案带 ✅/⚠/🎙 前缀；界面用色块表达语气，这里只取正文。
+const micNotice = computed(() => micStatus.value.replace(/^[✅⚠🎙]\s*/u, "").trim());
+const micTone = computed(() => (micStatus.value.startsWith("⚠") ? "warn" : ""));
 
 async function micProbe(): Promise<void> {
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -288,6 +367,10 @@ const cloneEnabled = computed(
 type CaptureMode = "ptt" | "clone";
 // 必须是 ref：模板要按模式区分按钮文案/样式
 const captureMode = ref<CaptureMode>("ptt");
+
+// 按住期间不能把按钮置灰：disabled 元素收不到 mouseup，会一直录到上限。
+const pttHoldDisabled = computed(() => !captureHeld.value && !pttEnabled.value);
+const cloneHoldDisabled = computed(() => !captureHeld.value && !cloneEnabled.value);
 
 let micStream: MediaStream | null = null;
 let micCtx: AudioContext | null = null;
@@ -491,12 +574,20 @@ function onWindowBlur(): void {
   void stopCapture();
 }
 
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && showSettings.value) {
+    showSettings.value = false;
+  }
+}
+
 onMounted(() => {
   window.addEventListener("blur", onWindowBlur);
+  window.addEventListener("keydown", onKeydown);
 });
 
 onUnmounted(() => {
   window.removeEventListener("blur", onWindowBlur);
+  window.removeEventListener("keydown", onKeydown);
   captureHeld.value = false;
   stopCloneTimer();
   cleanupMic();
@@ -518,11 +609,16 @@ async function send(): Promise<void> {
   }
   messages.value.push({ role: "user", text });
   input.value = "";
+  pinned.value = true;
   busy.value = true;
   try {
     await ipc.sendUserText(text);
   } catch (err) {
-    messages.value.push({ role: "assistant", text: `⚠ 发送失败：${String(err)}` });
+    messages.value.push({
+      role: "assistant",
+      kind: "error",
+      text: `发送失败：${String(err)}`,
+    });
     streaming.value = false;
     busy.value = false;
   }
@@ -530,414 +626,1216 @@ async function send(): Promise<void> {
 </script>
 
 <template>
-  <main class="chat">
-    <header>
-      <h1>Echoes</h1>
-      <span class="status">sidecar 状态：{{ engineState }}</span>
-      <button class="settings-open" @click="showSettings = true">设置</button>
+  <div class="app">
+    <header class="letterhead">
+      <div class="lh-id">
+        <p class="wordmark">Echoes</p>
+        <p class="lh-name">
+          <span class="name">{{ companionName }}</span>
+          <span class="state" :data-tone="stateTone">
+            <span class="dot" aria-hidden="true"></span>{{ stateLabel }}
+          </span>
+        </p>
+      </div>
+      <div class="lh-actions">
+        <button
+          type="button"
+          class="chip"
+          :title="`当前音色：${selectedVoiceName}`"
+          @click="showSettings = true"
+        >
+          {{ selectedVoiceName }}
+        </button>
+        <button v-if="busy" type="button" class="quiet" @click="stopTurn">
+          停止
+        </button>
+        <button
+          type="button"
+          class="icon"
+          aria-label="设置"
+          title="设置（Esc 关闭）"
+          @click="showSettings = true"
+        >
+          <svg
+            width="17"
+            height="17"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M4 7h9M18 7h2M4 17h3M12 17h8" />
+            <circle cx="15.5" cy="7" r="2.2" />
+            <circle cx="9.5" cy="17" r="2.2" />
+          </svg>
+        </button>
+      </div>
     </header>
 
-    <ul class="history">
-      <li v-for="(m, i) in messages" :key="i" :class="m.role">
-        <span v-if="m.text !== ''" class="bubble">{{ m.text }}</span>
-        <span v-if="m.interrupted" class="cut">已打断</span>
+    <ol ref="historyEl" class="thread" @scroll.passive="onThreadScroll">
+      <li v-if="messages.length === 0" class="empty">
+        <p class="empty-title">还没有开始。</p>
+        <p class="empty-sub">按住下面的圆钮说第一句话，或者直接写字。</p>
       </li>
-      <li v-if="messages.length === 0" class="empty">和 Echoes 说点什么…</li>
-    </ul>
 
-    <section v-if="clonePhase !== null || cloneError" class="clone-panel">
-      <div v-if="clonePhase" class="clone-line">
-        <span class="clone-label">{{ clonePhaseLabel }}</span>
-        <progress :value="clonePct" max="100"></progress>
-        <span class="pct">{{ clonePct }}%</span>
-        <button class="link" @click="cancelClone">取消</button>
+      <li
+        v-for="(m, i) in messages"
+        :key="i"
+        class="msg"
+        :class="m.kind === 'error' ? 'notice-row' : m.role"
+      >
+        <template v-if="m.kind === 'error'">
+          <p class="notice">{{ m.text }}</p>
+        </template>
+
+        <template v-else-if="m.role === 'assistant'">
+          <p class="said">
+            {{ m.text }}<span
+              v-if="streaming && i === messages.length - 1"
+              class="caret"
+              aria-hidden="true"
+            ></span>
+          </p>
+          <p v-if="m.interrupted" class="cut">已打断</p>
+        </template>
+
+        <template v-else>
+          <p class="mine">{{ m.text }}</p>
+        </template>
+      </li>
+    </ol>
+
+    <div v-if="clonePhase !== null || cloneError" class="clone-strip" role="status">
+      <template v-if="clonePhase">
+        <span class="strip-label">{{ clonePhaseLabel }}</span>
+        <div class="meter">
+          <span class="meter-fill" :style="{ width: `${clonePct}%` }"></span>
+        </div>
+        <span class="strip-pct">{{ Math.round(clonePct) }}%</span>
+        <button type="button" class="quiet" @click="cancelClone">取消</button>
+      </template>
+      <p v-if="cloneError" class="strip-error">{{ cloneError }}</p>
+    </div>
+
+    <footer class="composer">
+      <form class="write" @submit.prevent="send">
+        <input
+          v-model="input"
+          type="text"
+          placeholder="写点什么…"
+          aria-label="文字消息"
+          autocomplete="off"
+        />
+        <button type="submit" class="send" :disabled="input.trim() === ''">
+          发送
+        </button>
+      </form>
+
+      <div class="speak">
+        <span
+          class="ring"
+          :class="{ live: listening, busy: busy && !listening }"
+          aria-hidden="true"
+        ></span>
+        <button
+          type="button"
+          class="ptt"
+          :class="{ live: listening, busy: busy && !listening }"
+          :disabled="pttHoldDisabled"
+          :title="pttTitle"
+          @mousedown.prevent="pttStart"
+          @mouseup="pttStop"
+          @mouseleave="pttStop"
+          @touchstart.prevent="pttStart"
+          @touchend.prevent="pttStop"
+          @touchcancel="pttStop"
+          @keydown.space.prevent="pttStart"
+          @keyup.space.prevent="pttStop"
+          @blur="pttStop"
+        >
+          <span>{{ listening ? "松开" : busy ? "打断" : "按住" }}</span>
+          <span>{{ listening ? "结束" : "说话" }}</span>
+        </button>
       </div>
-      <p v-if="cloneError" class="clone-error">⚠ {{ cloneError }}</p>
-    </section>
 
-    <footer>
-      <input v-model="input" type="text" placeholder="输入消息…" @keyup.enter="send" />
-      <button @click="send">发送</button>
-      <button v-if="busy" class="stop" title="停止本次回复" @click="stopTurn">停止</button>
-      <button
-        class="ptt"
-        :class="{ recording: listening }"
-        :disabled="!pttEnabled"
-        :title="
-          !asrReady
-            ? 'ASR 就绪后可用'
-            : busy
-              ? '按住说话（会打断当前回复）'
-              : '按住说话（松开结束）'
-        "
-        @mousedown.prevent="pttStart"
-        @mouseup="pttStop"
-        @mouseleave="pttStop"
-        @touchstart.prevent="pttStart"
-        @touchend.prevent="pttStop"
-        @touchcancel="pttStop"
-      >
-        {{ listening ? "松开结束" : busy ? "打断并说话" : "按住说话" }}
-      </button>
-      <button
-        class="clone"
-        :class="{ recording: listening && captureMode === 'clone' }"
-        :disabled="!cloneEnabled"
-        :title="
-          hasClonedVoice
-            ? '重新克隆音色（按住 3–6 秒）'
-            : '按住 3–6 秒说话，克隆你的声音'
-        "
-        @mousedown.prevent="cloneStart"
-        @mouseup="cloneStop"
-        @mouseleave="cloneStop"
-        @touchstart.prevent="cloneStart"
-        @touchend.prevent="cloneStop"
-        @touchcancel="cloneStop"
-      >
-        {{
-          listening && captureMode === "clone"
-            ? `录音中 ${cloneSeconds}s`
-            : hasClonedVoice
-              ? "重克隆"
-              : "克隆音色"
-        }}
-      </button>
-      <button class="mic" @click="micProbe">{{ micStatus || "麦克风自检" }}</button>
+      <p class="hint">{{ listening ? "正在听 · 松开发送" : pttHint }}</p>
+      <p v-if="micTone === 'warn'" class="mic-note" data-tone="warn">
+        {{ micNotice }}
+      </p>
     </footer>
 
-    <div
-      v-if="showSettings"
-      class="settings-overlay"
-      @click.self="showSettings = false"
-    >
-      <section class="settings-panel">
-        <div class="settings-head">
-          <h2>人设与设置</h2>
-          <button class="link" @click="showSettings = false">关闭</button>
-        </div>
-        <p v-if="profileStatus" class="settings-status">{{ profileStatus }}</p>
+    <transition name="fade">
+      <div v-if="showSettings" class="scrim" @click="showSettings = false"></div>
+    </transition>
 
-        <label>
-          人设名字
-          <input v-model="personaDraft.name" type="text" maxlength="50" />
-        </label>
-        <label>
-          人设提示词
-          <textarea
-            v-model="personaDraft.systemPrompt"
-            rows="6"
-            maxlength="4000"
-          ></textarea>
-        </label>
-        <button @click="savePersona">保存人设</button>
+    <transition name="slide">
+      <aside
+        v-if="showSettings"
+        class="sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="声音与人格设置"
+      >
+        <header class="sheet-head">
+          <div>
+            <p class="eyebrow">设置</p>
+            <h2>声音与人格</h2>
+          </div>
+          <button
+            type="button"
+            class="icon"
+            aria-label="关闭设置"
+            @click="showSettings = false"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M6 6l12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </header>
 
-        <hr />
+        <p v-if="profileStatus" class="sheet-status">{{ profileStatus }}</p>
 
-        <label>
-          Provider
-          <select v-model="settingsDraft.provider">
-            <option value="ollama">Ollama（本地）</option>
-            <option value="mock">Mock（无模型）</option>
-          </select>
-        </label>
-        <label>
-          模型
-          <input v-model="settingsDraft.model" type="text" maxlength="100" />
-        </label>
-        <label class="check">
-          <input v-model="settingsDraft.privacyMode" type="checkbox" />
-          隐私模式（本地 provider 始终不出网）
-        </label>
-        <p class="hint">
-          当前仅本地 provider，无需 API key。保存后在下一轮对话生效；人设覆盖默认人设。
-        </p>
-        <button @click="saveSettings">保存设置</button>
+        <section class="block">
+          <h3>人设</h3>
+          <label class="field">
+            <span>名字</span>
+            <input
+              v-model="personaDraft.name"
+              type="text"
+              maxlength="50"
+              placeholder="Echoes"
+            />
+          </label>
+          <label class="field">
+            <span>系统提示词</span>
+            <textarea
+              v-model="personaDraft.systemPrompt"
+              rows="5"
+              maxlength="4000"
+              placeholder="她是谁、怎么说话、记得什么…"
+            ></textarea>
+          </label>
+          <button type="button" class="primary" @click="savePersona">
+            保存人设
+          </button>
+        </section>
 
-        <hr />
-        <div class="voice-head">
-          <h3>音色</h3>
-          <button class="link" @click="loadVoices">刷新</button>
-        </div>
-        <p v-if="voicesStatus" class="settings-status">{{ voicesStatus }}</p>
-        <label
-          v-for="voice in voices"
-          :key="voice.id"
-          class="voice-option"
-        >
-          <input
-            type="radio"
-            name="voice"
-            :checked="voice.selected"
-            :disabled="voice.status !== 'ready' || busy || clonePhase !== null"
-            @change="chooseVoice(voice.id)"
-          />
-          <span>{{ voice.displayName }}</span>
-          <span class="voice-meta">{{ voiceLabel(voice) }}</span>
-        </label>
-        <p class="hint">切换后下一轮生效；旧回复不受影响。</p>
-      </section>
-    </div>
-  </main>
+        <section class="block">
+          <h3>引擎</h3>
+          <div class="two">
+            <label class="field">
+              <span>提供方</span>
+              <select v-model="settingsDraft.provider">
+                <option value="ollama">Ollama（本地）</option>
+                <option value="mock">Mock（无模型）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>模型</span>
+              <input v-model="settingsDraft.model" type="text" maxlength="100" />
+            </label>
+          </div>
+          <label class="check">
+            <input v-model="settingsDraft.privacyMode" type="checkbox" />
+            <span>隐私模式：本机推理，不出网</span>
+          </label>
+          <p class="note">保存后下一轮生效；人设会覆盖默认人设。</p>
+          <button type="button" class="primary" @click="saveSettings">
+            保存设置
+          </button>
+        </section>
+
+        <section class="block">
+          <div class="block-head">
+            <h3>音色</h3>
+            <button type="button" class="quiet" @click="loadVoices">刷新</button>
+          </div>
+          <p v-if="voicesStatus" class="sheet-status">{{ voicesStatus }}</p>
+          <ul class="voices">
+            <li v-for="voice in voices" :key="voice.id">
+              <label class="voice" :class="{ on: voice.selected }">
+                <input
+                  type="radio"
+                  name="voice"
+                  :checked="voice.selected"
+                  :disabled="voice.status !== 'ready' || busy || clonePhase !== null"
+                  @change="chooseVoice(voice.id)"
+                />
+                <span class="voice-name">{{ voice.displayName }}</span>
+                <span class="voice-meta">{{ voiceLabel(voice) }}</span>
+              </label>
+            </li>
+            <li v-if="voices.length === 0" class="note">还没有可用音色。</li>
+          </ul>
+          <button
+            type="button"
+            class="record"
+            :class="{ live: listening && captureMode === 'clone' }"
+            :disabled="cloneHoldDisabled"
+            @mousedown.prevent="cloneStart"
+            @mouseup="cloneStop"
+            @mouseleave="cloneStop"
+            @touchstart.prevent="cloneStart"
+            @touchend.prevent="cloneStop"
+            @touchcancel="cloneStop"
+            @keydown.space.prevent="cloneStart"
+            @keyup.space.prevent="cloneStop"
+            @blur="cloneStop"
+          >
+            {{
+              listening && captureMode === "clone"
+                ? `录音中 ${cloneSeconds}s · 松开发送`
+                : hasClonedVoice
+                  ? "重新克隆我的音色（按住 3–6 秒）"
+                  : "克隆我的音色（按住 3–6 秒）"
+            }}
+          </button>
+          <p v-if="cloneError" class="strip-error">{{ cloneError }}</p>
+          <p class="note">
+            用本机麦克风录 3–6 秒；样本与音色只留在本机，低于相似度阈值会被拒绝。
+          </p>
+        </section>
+
+        <section class="block">
+          <h3>设备</h3>
+          <button type="button" class="ghost" @click="micProbe">麦克风自检</button>
+          <p v-if="micNotice" class="note" :data-tone="micTone">{{ micNotice }}</p>
+        </section>
+      </aside>
+    </transition>
+  </div>
 </template>
 
 <style>
-* {
+*,
+*::before,
+*::after {
   margin: 0;
+  padding: 0;
   box-sizing: border-box;
 }
+
+:root {
+  color-scheme: light;
+  --paper: #f6f1e8;
+  --paper-hi: #fbf8f1;
+  --paper-lo: #efe7da;
+  --ink: #23201b;
+  --ink-2: #5c554a;
+  --ink-3: #746c60;
+  --rule: #e3d9c8;
+  --rule-strong: #cfc1a9;
+  --accent: #95512f;
+  --accent-soft: rgba(149, 81, 47, 0.1);
+  --danger: #9e3b2e;
+  --ok: #5a6e52;
+  --font-ui:
+    "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  --font-voice:
+    "Iowan Old Style", "Palatino Linotype", "Source Han Serif SC",
+    "Noto Serif CJK SC", "Songti SC", "SimSun", Georgia, serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, "SF Mono", monospace;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
 body {
-  font-family: system-ui, "Microsoft YaHei", sans-serif;
-  background: #141218;
-  color: #e6e1e5;
-  height: 100vh;
-}
-.chat {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  max-width: 640px;
-  margin: 0 auto;
-  padding: 16px;
-}
-header {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #2b2831;
-}
-h1 {
-  font-size: 20px;
-}
-.status {
-  font-size: 12px;
-  color: #8a8494;
-}
-.history {
-  flex: 1;
-  overflow-y: auto;
-  list-style: none;
-  padding: 16px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.history .user {
-  align-self: flex-end;
-}
-.bubble {
-  display: inline-block;
-  max-width: 80%;
-  padding: 8px 12px;
-  border-radius: 12px;
-  background: #26232a;
+  font-family: var(--font-ui);
+  font-size: 14px;
   line-height: 1.5;
-  white-space: pre-wrap;
+  color: var(--ink);
+  background: var(--paper);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
-.user .bubble {
-  background: #4a4458;
-}
-.cut {
-  margin-left: 6px;
-  font-size: 11px;
-  color: #8a8494;
-}
-.empty {
-  color: #6f6a7a;
-  font-size: 13px;
-}
-footer {
-  display: flex;
-  gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid #2b2831;
-}
-footer input {
-  flex: 1;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid #343038;
-  background: #1c1921;
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
   color: inherit;
 }
-footer button {
-  padding: 10px 16px;
-  border-radius: 10px;
+
+button {
+  background: none;
   border: none;
-  background: #6750a4;
-  color: white;
   cursor: pointer;
 }
-footer button:disabled {
-  opacity: 0.4;
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
 }
-footer .ptt,
-footer .clone,
-footer .mic,
-footer .stop {
-  background: #36343b;
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  max-width: 680px;
+  margin: 0 auto;
+  border-left: 1px solid var(--rule);
+  border-right: 1px solid var(--rule);
+  background: radial-gradient(
+    120% 80% at 50% 0%,
+    var(--paper-hi) 0%,
+    var(--paper) 62%
+  );
 }
-footer .clone.recording {
-  background: #b3261e;
+
+/* ---- 信笺页眉 ---- */
+.letterhead {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 26px 14px;
+  border-bottom: 1px solid var(--rule);
 }
-.clone-panel {
-  padding: 8px 0;
-  border-top: 1px solid #2b2831;
+
+.wordmark {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--ink-3);
 }
-.clone-line {
+
+.lh-name {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.name {
+  font-family: var(--font-voice);
+  font-size: 23px;
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+}
+
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.state[data-tone="ready"] {
+  color: var(--ok);
+}
+
+.state[data-tone="active"] {
+  color: var(--accent);
+}
+
+.state[data-tone="error"] {
+  color: var(--danger);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.state[data-tone="active"] .dot {
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+.lh-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.chip {
+  max-width: 168px;
+  padding: 5px 11px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    border-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.chip:hover {
+  border-color: var(--rule-strong);
+  color: var(--ink);
+}
+
+.icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--ink-2);
+  transition:
+    background 0.18s ease,
+    color 0.18s ease;
+}
+
+.icon:hover {
+  background: var(--paper-lo);
+  color: var(--ink);
+}
+
+.quiet {
+  padding: 4px 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--ink-3);
+  transition:
+    color 0.18s ease,
+    background 0.18s ease;
+}
+
+.quiet:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ---- 信纸正文 ---- */
+.thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 26px 26px 10px;
+}
+
+.thread::-webkit-scrollbar {
+  width: 8px;
+}
+
+.thread::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 4px;
+}
+
+.thread::-webkit-scrollbar-thumb:hover {
+  background: var(--rule-strong);
+}
+
+.empty {
+  margin: auto 0;
+}
+
+.empty-title {
+  font-family: var(--font-voice);
+  font-size: 19px;
+  color: var(--ink-2);
+}
+
+.empty-sub {
+  margin-top: 6px;
+  max-width: 26em;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ink-3);
+}
+
+.msg {
+  display: flex;
+  flex-direction: column;
+}
+
+.said {
+  padding-left: 14px;
+  border-left: 1px solid var(--rule-strong);
+  font-family: var(--font-voice);
+  font-size: 16.5px;
+  line-height: 1.85;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.msg.user {
+  align-self: flex-end;
+  max-width: 78%;
+}
+
+.mine {
+  padding: 8px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 12px 12px 3px 12px;
+  background: var(--paper-lo);
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cut {
+  margin-top: 6px;
+  padding-left: 14px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+}
+
+.caret {
+  display: inline-block;
+  width: 1px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--accent);
+  animation: blink 1s steps(2, start) infinite;
+}
+
+.notice-row {
+  padding: 8px 12px;
+  border-left: 2px solid var(--danger);
+  border-radius: 0 8px 8px 0;
+  background: rgba(158, 59, 46, 0.05);
+}
+
+.notice {
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+/* ---- 克隆进度（跨抽屉常驻） ---- */
+.clone-strip {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 26px;
+  border-top: 1px solid var(--rule);
   font-size: 12px;
-  color: #b9b2c4;
-}
-.clone-line progress {
-  flex: 1;
-  height: 6px;
-  accent-color: #6750a4;
-}
-.clone-label {
-  min-width: 44px;
-}
-.clone-line .link {
-  border: none;
-  background: transparent;
-  color: #a79ab8;
-  cursor: pointer;
-  font-size: 12px;
-  text-decoration: underline;
-  padding: 0;
-}
-.clone-error {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #f2b8b5;
-  line-height: 1.4;
-}
-footer .ptt.recording {
-  background: #b3261e;
-}
-footer .mic {
-  font-size: 12px;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--ink-2);
 }
 
-/* 人设卡 / Settings（3.4 拉取语义：保存后下一轮生效） */
-.settings-open {
-  margin-left: auto;
-  padding: 6px 12px;
-  border: none;
-  border-radius: 8px;
-  background: #36343b;
-  color: inherit;
-  font-size: 12px;
-  cursor: pointer;
+.strip-label {
+  color: var(--accent);
 }
-.settings-overlay {
+
+.meter {
+  flex: 1;
+  min-width: 80px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--paper-lo);
+  overflow: hidden;
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.strip-pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.strip-error {
+  flex-basis: 100%;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+/* ---- 落款与说话钮 ---- */
+.composer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 26px 18px;
+  border-top: 1px solid var(--rule);
+  background: linear-gradient(var(--paper-hi), var(--paper));
+}
+
+.write {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--rule-strong);
+  transition: border-color 0.18s ease;
+}
+
+.write:focus-within {
+  border-bottom-color: var(--accent);
+}
+
+.write input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  border: none;
+  background: none;
+  font-size: 14px;
+}
+
+.write input:focus {
+  outline: none;
+}
+
+.write input::placeholder {
+  color: var(--ink-3);
+}
+
+.send {
+  flex: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--accent);
+  transition:
+    background 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.send:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.send:disabled {
+  color: var(--ink-3);
+  opacity: 0.55;
+  cursor: default;
+}
+
+.speak {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 108px;
+  height: 108px;
+  margin-top: 2px;
+}
+
+.ring {
+  position: absolute;
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  border: 1px solid var(--rule);
+  pointer-events: none;
+}
+
+.ring.live {
+  border-color: transparent;
+  border-top-color: var(--accent);
+  border-right-color: rgba(149, 81, 47, 0.3);
+  box-shadow: 0 0 0 8px rgba(149, 81, 47, 0.05);
+  animation: sweep 2.4s linear infinite;
+}
+
+.ring.busy {
+  animation: breathe 3.2s ease-in-out infinite;
+}
+
+.ptt {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-content: center;
+  gap: 1px;
+  width: 84px;
+  height: 84px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 50%;
+  background: var(--paper-hi);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 6px 16px rgba(35, 32, 27, 0.06);
+  font-family: var(--font-voice);
+  font-size: 15px;
+  line-height: 1.25;
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  transition:
+    transform 0.15s ease,
+    background 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.2s ease;
+}
+
+.ptt:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.ptt:active:not(:disabled) {
+  transform: scale(0.975);
+}
+
+.ptt.busy {
+  font-size: 14px;
+}
+
+.ptt.live {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--paper-hi);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 8px 22px rgba(149, 81, 47, 0.28);
+}
+
+.ptt:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.hint {
+  min-height: 16px;
+  font-size: 12px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+.mic-note {
+  max-width: 100%;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.mic-note[data-tone="warn"] {
+  color: var(--danger);
+}
+
+/* ---- 右侧抽屉 ---- */
+.scrim {
   position: fixed;
   inset: 0;
   z-index: 20;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(35, 32, 27, 0.18);
 }
-.settings-panel {
-  width: min(520px, 92vw);
-  max-height: 86vh;
+
+.sheet {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: min(400px, 92vw);
+  padding: 18px 20px 28px;
   overflow-y: auto;
+  background: var(--paper-hi);
+  border-left: 1px solid var(--rule-strong);
+  box-shadow: -12px 0 32px rgba(35, 32, 27, 0.08);
+}
+
+.sheet::-webkit-scrollbar {
+  width: 8px;
+}
+
+.sheet::-webkit-scrollbar-thumb {
+  background: var(--rule);
+  border-radius: 4px;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.sheet h2 {
+  margin-top: 2px;
+  font-family: var(--font-voice);
+  font-size: 21px;
+  font-weight: 400;
+}
+
+.block {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 18px;
-  border: 1px solid #343038;
-  border-radius: 14px;
-  background: #1e1b23;
+  padding-top: 16px;
+  border-top: 1px solid var(--rule);
 }
-.settings-head {
+
+.block h3 {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.block-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
 }
-.settings-head h2 {
-  font-size: 16px;
-}
-.settings-panel label {
+
+.field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
   font-size: 12px;
-  color: #b9b2c4;
+  color: var(--ink-2);
 }
-.settings-panel label.check {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-}
-.settings-panel input[type="text"],
-.settings-panel textarea,
-.settings-panel select {
+
+.field input,
+.field textarea,
+.field select {
   padding: 8px 10px;
-  border: 1px solid #343038;
+  border: 1px solid var(--rule);
   border-radius: 8px;
-  background: #141218;
-  color: inherit;
-  font: inherit;
+  background: #fffdf9;
+  font-size: 13.5px;
+  color: var(--ink);
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease;
 }
-.settings-panel textarea {
+
+.field input:focus,
+.field textarea:focus,
+.field select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.field textarea {
+  min-height: 84px;
+  line-height: 1.6;
   resize: vertical;
-  line-height: 1.5;
 }
-.settings-panel button {
-  align-self: flex-start;
-  padding: 8px 14px;
-  border: none;
-  border-radius: 8px;
-  background: #6750a4;
-  color: white;
-  cursor: pointer;
+
+.two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
 }
-.settings-panel button.link {
-  padding: 0;
-  background: transparent;
-  color: #a79ab8;
-  text-decoration: underline;
-}
-.settings-panel hr {
-  width: 100%;
-  border: none;
-  border-top: 1px solid #2b2831;
-}
-.settings-status,
-.settings-panel .hint {
-  font-size: 12px;
-  color: #8a8494;
-  line-height: 1.5;
-}
-.settings-panel h3 {
-  font-size: 13px;
-  color: #d6d0df;
-}
-.voice-head {
+
+.check {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-}
-.settings-panel label.voice-option {
-  flex-direction: row;
-  align-items: center;
   gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  cursor: pointer;
 }
-.settings-panel label.voice-option input {
-  accent-color: #6750a4;
+
+.check input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
 }
+
+.note {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--ink-3);
+}
+
+.note[data-tone="warn"] {
+  color: var(--danger);
+}
+
+.sheet-status {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--accent);
+}
+
+.primary {
+  align-self: flex-start;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--paper-hi);
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+  transition:
+    background 0.18s ease,
+    transform 0.15s ease;
+}
+
+.primary:hover {
+  background: var(--accent);
+}
+
+.primary:active {
+  transform: translateY(1px);
+}
+
+.ghost {
+  align-self: flex-start;
+  padding: 7px 12px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  transition:
+    border-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.voices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+}
+
+.voice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+
+.voice:hover {
+  border-color: var(--rule-strong);
+  background: #fffdf9;
+}
+
+.voice.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.voice input {
+  accent-color: var(--accent);
+}
+
+.voice-name {
+  color: var(--ink);
+}
+
 .voice-meta {
   margin-left: auto;
   font-size: 11px;
-  color: #8a8494;
+  color: var(--ink-3);
+}
+
+.record {
+  padding: 9px 12px;
+  border: 1px dashed var(--rule-strong);
+  border-radius: 9px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  text-align: center;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    color 0.16s ease;
+}
+
+.record:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.record.live {
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.record:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---- 过渡与动效 ---- */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.slide-enter-active,
+.slide-leave-active {
+  transition: transform 0.24s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.slide-enter-from,
+.slide-leave-to {
+  transform: translateX(100%);
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes sweep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(149, 81, 47, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgba(149, 81, 47, 0);
+  }
+}
+
+/* ---- 窄窗与矮窗 ---- */
+@media (max-width: 700px) {
+  .app {
+    border: none;
+  }
+
+  .letterhead,
+  .thread,
+  .composer {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .clone-strip {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .name {
+    font-size: 20px;
+  }
+
+  .chip {
+    max-width: 96px;
+  }
+}
+
+@media (max-height: 620px) {
+  .letterhead {
+    padding-top: 12px;
+    padding-bottom: 10px;
+  }
+
+  .thread {
+    padding-top: 16px;
+    gap: 16px;
+  }
+
+  .speak {
+    width: 92px;
+    height: 92px;
+  }
+
+  .ring {
+    width: 86px;
+    height: 86px;
+  }
+
+  .ptt {
+    width: 72px;
+    height: 72px;
+    font-size: 13.5px;
+  }
+
+  .composer {
+    gap: 6px;
+    padding-top: 10px;
+    padding-bottom: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 </style>
