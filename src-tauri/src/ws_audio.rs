@@ -131,10 +131,8 @@ pub fn pcm16_le(samples: &[i16]) -> Vec<u8> {
 
 /// 小端字节流 → PCM16 采样（丢弃不足 2B 的尾巴）。
 pub fn pcm16_from_le(payload: &[u8]) -> Vec<i16> {
-    payload
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]))
-        .collect()
+    let (samples, _tail) = payload.as_chunks::<2>();
+    samples.iter().map(|b| i16::from_le_bytes(*b)).collect()
 }
 
 struct InputChunk {

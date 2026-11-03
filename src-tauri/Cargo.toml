@@ -21,11 +21,25 @@ tauri-build = { version = "2.7.4", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.12.5", features = [] }
+tauri = { version = "2.12.5", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 rodio = { version = "0.21", default-features = false, features = ["playback"] }
+# R1e 1e.3：rodio 0.21 只开 playback，没有枚举 API；cpal 与 rodio 同源（0.16）
+cpal = "0.16"
 tokio = { version = "1.54.1", features = ["rt", "macros", "sync", "net", "time"] }
 tokio-tungstenite = "0.30.0"
 futures-util = { version = "0.3.34", features = ["sink"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 keyring = { version = "3", features = ["windows-native"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
+
+# R1d 1d.6：HUD 不抢焦点需要 Win32 扩展窗口样式（WS_EX_NOACTIVATE）。
+# 版本与 tauri 2.12.5 的 windows 依赖一致，HWND 类型才能直接互用。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

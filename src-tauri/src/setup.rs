@@ -110,8 +110,9 @@ mod tests {
 
         assert_eq!(lines, 1);
         let report = result.get("report").expect("report");
-        assert!(report.get("recommended_profile").is_some());
-        assert!(report.get("missing_models").is_some());
+        // 前端契约是 camelCase（sidecar/setup.as_dict 负责转）
+        assert!(report.get("recommendedProfile").is_some());
+        assert!(report.get("missingModels").is_some());
     }
 
     #[test]

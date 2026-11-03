@@ -1,11 +1,24 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
+  "description": "默认权限 + 自绘标题栏（decorations:false）所需的窗口控制权限：拖动、最小化、最大化、关闭、几何读写。core:default 只含窗口读取类权限，写操作必须显式声明。HUD 是运行时创建的第二个 webview，未列进来就收不到 core:event 的 listen（sidecar 事件会静默丢失）。",
   "windows": [
-    "main"
+    "main",
+    "hud",
+    "settings"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-maximize",
+    "core:window:allow-close",
+    "core:window:allow-is-maximized",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-available-monitors"
   ]
 }

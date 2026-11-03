@@ -69,10 +69,20 @@ pub enum SidecarEvent {
 }
 
 /// 前端可见的壳侧事件（含壳自身产生的协议错误）。
-#[derive(Debug, Serialize, Clone)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+///
+/// **线上形状（与 `src/lib/ipc.ts::ShellEventPayload` 逐字对应）**：
+///
+/// ```text
+/// {"kind":"sidecar","event":{"type":"state",…}}   // Sidecar
+/// {"kind":"protocol","code":…,"message":…,"fatal":…}
+/// ```
+///
+/// 手写 `Serialize` 而不是 `#[serde(tag = "kind")]`：内部标签的 newtype 变体
+/// 会把内层字段**摊平**成 `{"kind":"sidecar","type":"state",…}`，前端取
+/// `payload.event` 只会得到 undefined —— 表现为界面永远「连接中」。
+#[derive(Debug, Clone)]
 pub enum ShellEvent {
-    /// sidecar 消息原样转发（3.4 事件子集）。
+    /// sidecar 消息原样转发（3.4 事件子集）；**嵌套在 `event` 下**。
     Sidecar(SidecarEvent),
     /// 壳侧协议失败：大版本不匹配（PROTOCOL_MISMATCH）等。
     Protocol {
@@ -80,6 +90,33 @@ pub enum ShellEvent {
         message: String,
         fatal: bool,
     },
+}
+
+impl Serialize for ShellEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        match self {
+            ShellEvent::Sidecar(event) => {
+                let mut out = serializer.serialize_struct("ShellEvent", 2)?;
+                out.serialize_field("kind", "sidecar")?;
+                out.serialize_field("event", event)?;
+                out.end()
+            }
+            ShellEvent::Protocol {
+                code,
+                message,
+                fatal,
+            } => {
+                let mut out = serializer.serialize_struct("ShellEvent", 4)?;
+                out.serialize_field("kind", "protocol")?;
+                out.serialize_field("code", code)?;
+                out.serialize_field("message", message)?;
+                out.serialize_field("fatal", fatal)?;
+                out.end()
+            }
+        }
+    }
 }
 
 /// stdout 逐行解析：JSON 行 → `SidecarEvent` → sink；解析失败按 3.4 忽略。
@@ -102,17 +139,16 @@ fn forward_events<R: BufRead>(mut reader: R, sink: &mut dyn FnMut(ShellEvent)) {
                 if let SidecarEvent::Hello {
                     protocol_version, ..
                 } = &event
+                    && protocol_version.split('.').next() != Some(PROTOCOL_MAJOR)
                 {
-                    if protocol_version.split('.').next() != Some(PROTOCOL_MAJOR) {
-                        sink(ShellEvent::Protocol {
-                            code: "PROTOCOL_MISMATCH".into(),
-                            message: format!(
-                                "sidecar protocol `{protocol_version}` != shell `{PROTOCOL_MAJOR}.x`"
-                            ),
-                            fatal: true,
-                        });
-                        break;
-                    }
+                    sink(ShellEvent::Protocol {
+                        code: "PROTOCOL_MISMATCH".into(),
+                        message: format!(
+                            "sidecar protocol `{protocol_version}` != shell `{PROTOCOL_MAJOR}.x`"
+                        ),
+                        fatal: true,
+                    });
+                    break;
                 }
                 sink(ShellEvent::Sidecar(event));
             }
@@ -269,10 +305,36 @@ impl Sidecar {
         })
     }
 
+    /// R1d：监督线程用它判断 sidecar 是否已退出；不消费 wait 状态。
+    pub fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>, String> {
+        self.child.try_wait().map_err(|err| err.to_string())
+    }
+
+    /// R5 彻底删除：先杀进程再等它真正退出，之后删库才不会撞文件锁。
+    pub fn kill_and_wait(&mut self) -> Result<(), String> {
+        let _ = self.child.kill();
+        self.child
+            .wait()
+            .map(|_| ())
+            .map_err(|err| format!("等待 sidecar 退出失败：{err}"))
+    }
+
     /// 壳→sidecar：文本输入（3.4 控制消息，与 asr_final 等价触发 turn）。
     pub fn send_user_text(&self, session_id: &str, text: &str) -> Result<(), String> {
         self.send_line(&serde_json::json!({
             "type": "user_text",
+            "session_id": session_id,
+            "text": text,
+        }))
+    }
+
+    /// 壳→sidecar：重说 / 编辑上一条（R4 4.4/4.5）。
+    ///
+    /// `text=None` = 重说（sidecar 读取上一轮原文）；给了 text = 编辑上一条。
+    /// 新 turn 由 sidecar 创建，旧 turn 由编排层写 `superseded_by`。
+    pub fn send_retry(&self, session_id: &str, text: Option<&str>) -> Result<(), String> {
+        self.send_line(&serde_json::json!({
+            "type": "retry",
             "session_id": session_id,
             "text": text,
         }))
@@ -332,6 +394,32 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    /// 线上形状必须与 `src/lib/ipc.ts::ShellEventPayload` 一致：
+    /// `{kind:"sidecar", event:{type:"state",…}}`。前端按 `payload.event` 取消息，
+    /// 少了这层嵌套就只能拿到 undefined（表现：界面永远「连接中」）。
+    #[test]
+    fn shell_event_wire_shape_keeps_event_nested() {
+        let event = ShellEvent::Sidecar(SidecarEvent::State {
+            session_id: Some("default".into()),
+            state: "ready".into(),
+            t: 1,
+        });
+        let json = serde_json::to_value(&event).expect("ShellEvent 必须可序列化");
+        assert_eq!(json["kind"], "sidecar");
+        assert_eq!(json["event"]["type"], "state");
+        assert_eq!(json["event"]["state"], "ready");
+
+        let protocol = ShellEvent::Protocol {
+            code: "PROTOCOL_MISMATCH".into(),
+            message: "x".into(),
+            fatal: true,
+        };
+        let json = serde_json::to_value(&protocol).expect("protocol 必须可序列化");
+        assert_eq!(json["kind"], "protocol");
+        assert_eq!(json["code"], "PROTOCOL_MISMATCH");
+        assert!(json.get("event").is_none());
+    }
 
     /// 每个端到端用例独立数据目录（5.3）：绝不让测试写进用户 %LOCALAPPDATA%，
     /// 也避免并行用例抢同一个 SQLite 文件。
