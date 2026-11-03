@@ -22,7 +22,7 @@ CREATE TABLE voice (
     created_at    REAL NOT NULL
 );
 
--- 会话（轮次明细不落库，落库的是摘要与事实）
+-- 会话（轮次原文见 migrations/0003_turn.sql；摘要与事实也落库）
 CREATE TABLE session (
     id            TEXT PRIMARY KEY,
     profile_id    TEXT NOT NULL DEFAULT 'default',

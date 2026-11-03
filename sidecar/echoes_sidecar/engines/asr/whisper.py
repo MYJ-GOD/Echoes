@@ -38,6 +38,11 @@ class WhisperASREngine(ASREngine):
         self._language = language
         self._model: Any | None = None
 
+    @property
+    def current(self) -> tuple[str, str]:
+        """(provider, model)：hello 里回报 active_*（R2a 2.5）。"""
+        return "whisper", self._model_size
+
     async def warmup(self) -> None:
         """组合根装配期预热（重模型加载在线程里，不阻塞 booting 其余装配）。"""
         if self._model is None:

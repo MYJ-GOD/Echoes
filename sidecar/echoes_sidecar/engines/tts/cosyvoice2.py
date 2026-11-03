@@ -205,6 +205,8 @@ class CosyVoice2TtsEngine(TTSEngine):
         self._engine: Any | None = None  # vendored CosyVoice2（无 stub，Any 口）
         # 已注册进 vendored spk2info 的音色（= 其特征提取已缓存，合成时无需再算）
         self._spk_ids: set[str] = set()
+        # R2b 2b.6：本轮风格/情感指令（由编排层每轮设置，合成结束复位）
+        self._instruction: str | None = None
         # 分级就绪的闸门：warmup 装完（成功或失败）都置位，_warmup_error 区分结果。
         self._loaded = asyncio.Event()
         self._warmup_started = False
@@ -386,6 +388,15 @@ class CosyVoice2TtsEngine(TTSEngine):
 
     # ------------------------------ 合成 ------------------------------
 
+    @property
+    def supports_instruction(self) -> bool:
+        """R2b 2b.6：CosyVoice2 支持 instruct2（情感/风格）合成。"""
+        return True
+
+    def set_instruction(self, text: str | None) -> None:
+        """编排层每轮设置情绪指令；None = 复位默认语气。"""
+        self._instruction = (text or "").strip() or None
+
     async def synthesize(self, text: str, voice_id: str) -> AsyncIterator[AudioChunk]:
         """流式合成（4.5）：分句 → 逐句推理 → vendored 同步生成器经线程/队列桥接。
 
@@ -408,11 +419,27 @@ class CosyVoice2TtsEngine(TTSEngine):
             return
 
         chunks_q: queue.Queue[Any] = queue.Queue()
+        instruction = self._instruction
+        instruct_fn = getattr(engine, "inference_instruct2", None)
+        if instruction and not callable(instruct_fn):
+            print(
+                "[sidecar] 当前 CosyVoice2 vendored 版本不支持 instruct2，本轮忽略风格指令",
+                file=sys.stderr,
+            )
 
         def _produce() -> None:
             try:
                 for segment in segments:
-                    if voice.cross_lingual:
+                    if instruction and callable(instruct_fn):
+                        # R2b 2b.6：instruct2 用 prompt wav + 自然语言指令控制语气
+                        stream = instruct_fn(
+                            segment,
+                            instruction,
+                            str(voice.prompt_wav),
+                            voice.spk_id,
+                            stream=True,
+                        )
+                    elif voice.cross_lingual:
                         stream = engine.inference_cross_lingual(
                             segment, str(voice.prompt_wav), voice.spk_id, stream=True
                         )
@@ -484,12 +511,17 @@ class CosyVoice2TtsEngine(TTSEngine):
             ) from exc
         return voice_id
 
+    @property
+    def supports_similarity_check(self) -> bool:
+        """4.5 v1.4.4 可选能力：CosyVoice2 有 campplus，能做说话人相似度质检。"""
+        return True
+
     async def speaker_similarity(self, sample_pcm: bytes, synth_pcm: bytes) -> float:
         """阶段 2 质检：原样本 vs 克隆音色合成音频的 campplus 余弦（0–1）。
 
         TTS 输出是 24k，campplus 要 16k；2/3 重采样后写临时 WAV 再提嵌入。
-        本方法不在 4.5 TTS ABC 里（质检是引擎可选能力，mock 没有）——编排层
-        用 getattr 探测，不把质量面塞进冻结契约。
+        能力位见 `supports_similarity_check`（4.5 v1.4.4：质检是显式可选能力，
+        编排层按能力位调用，不再用 getattr 探测）。
         """
         engine = await self._ensure_engine("speaker_similarity")
         frontend = getattr(engine, "frontend", None)

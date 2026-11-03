@@ -25,6 +25,28 @@ class MemoryStore:
         self._repo = repo
         self._embedder = embedder
 
+    @property
+    def embedder(self) -> Embedder:
+        """组合根给原文索引器复用同一个嵌入器（避免加载两份 bge）。"""
+        return self._embedder
+
+    async def embed(self, text: str) -> list[float]:
+        """query → 向量（原文 chunk 召回用）。"""
+        [vector] = await self._embedder.embed([text])
+        return vector
+
+    async def search(
+        self, profile_id: str, query: str, *, k: int = 5
+    ) -> list[MemoryFact]:
+        """向量检索原始行（含 id / 来源，供编排层做来源回溯；不直接进 prompt）。"""
+        text = query.strip()
+        if not text:
+            return []
+        [vector] = await self._embedder.embed([text])
+        return await asyncio.to_thread(
+            self._repo.search, vector, k=k, profile_id=profile_id
+        )
+
     async def retrieve(
         self, profile_id: str, query: str, *, k: int = 5
     ) -> list[dict[str, str]]:
@@ -33,11 +55,7 @@ class MemoryStore:
         返回 `[{"fact": ..., "category": ...}]`：**只暴露这两列**——id / 来源会话
         是内部账，不该泄进 prompt（5.2 隐私面最小化）。
         """
-        text = query.strip()
-        if not text:
-            return []  # 空 query 不查库：向量化空串没有意义，还会白跑一次前向
-        [vector] = await self._embedder.embed([text])
-        facts = await asyncio.to_thread(self._repo.search, vector, k=k, profile_id=profile_id)
+        facts = await self.search(profile_id, query, k=k)
         return [{"fact": fact.fact, "category": fact.category} for fact in facts]
 
     async def remember(

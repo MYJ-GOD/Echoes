@@ -16,19 +16,28 @@ import os
 import secrets
 import sys
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
+from uuid import uuid4
 
 from echoes_sidecar import __version__, runtime
 from echoes_sidecar.audio.stream import AudioInputStream
 from echoes_sidecar.core.cancel import CancelToken
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.state_machine import AppState, StateMachine, required_engines_ready
-from echoes_sidecar.core.types import AudioChunk
-from echoes_sidecar.db import DataPaths, Storage, ensure_writable, path_risk_note, resolve
-from echoes_sidecar.engines.asr.base import ASREngine
+from echoes_sidecar.core.types import AudioChunk, Persona
+from echoes_sidecar.db import (
+    DataPaths,
+    SessionRow,
+    Storage,
+    ensure_writable,
+    path_risk_note,
+    resolve,
+)
+from echoes_sidecar.engines.asr.base import ASREngine, AsrRuntimeConfigurable
 from echoes_sidecar.engines.asr.mock import MockASREngine
+from echoes_sidecar.engines.asr.router import AsrRouter
 from echoes_sidecar.engines.asr.whisper import WhisperASREngine
 from echoes_sidecar.engines.llm.base import LLMProvider
 from echoes_sidecar.engines.llm.mock import MockLLMProvider
@@ -39,6 +48,7 @@ from echoes_sidecar.engines.llm.router import ProviderRouter
 from echoes_sidecar.engines.tts.base import TTSEngine
 from echoes_sidecar.engines.tts.cosyvoice2 import CosyVoice2TtsEngine
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
+from echoes_sidecar.engines.tts.router import TtsRouter
 from echoes_sidecar.ipc import (
     AsrFinalMsg,
     CloneCancelMsg,
@@ -47,13 +57,20 @@ from echoes_sidecar.ipc import (
     EngineState,
     ErrorMsg,
     HelloMsg,
+    RetryMsg,
     StateMsg,
     UserTextMsg,
     parse_obj,
 )
 from echoes_sidecar.memory.embedding import DEFAULT_MODEL_DIR, TransformersEmbedder
 from echoes_sidecar.memory.extractor import MemoryExtractor
+from echoes_sidecar.memory.grounding import LLMGroundingJudge
+from echoes_sidecar.memory.index import TurnIndexer
+from echoes_sidecar.memory.recall import MemoryRecall
+from echoes_sidecar.memory.rerank import DEFAULT_MODEL_DIR_NAME, make_reranker
+from echoes_sidecar.memory.rewrite import QueryRewriter
 from echoes_sidecar.memory.store import MemoryStore
+from echoes_sidecar.models.manager import default_root as models_root
 from echoes_sidecar.orchestration.clone import CloneService
 from echoes_sidecar.orchestration.graph import TriggerSource, TurnDeps, TurnGraph
 from echoes_sidecar.orchestration.turn import TurnFactory, TurnRunner
@@ -138,11 +155,7 @@ def _open_storage() -> tuple[DataPaths, Storage]:
 
 
 def _open_session(storage: Storage, *, now: float) -> Session:
-    """会话装配（4.6 + 14.1 v1.4）：沿用 DB 最近 session，无记录则建默认会话。
-
-    persona 的 prompt 单一来源仍是 engines.llm.persona（v2）；DB 侧随代码同步，
-    避免旧库里的陈旧 prompt 反过来覆盖代码（3.2 单一来源）。
-    """
+    """会话装配（4.6 + 14.1 v1.4）：沿用 DB 最近 session，无记录则建默认会话。"""
     default_persona = storage.personas.sync(
         persona_id=DEFAULT_PERSONA_ID,
         name=DEFAULT_PERSONA_NAME,
@@ -151,11 +164,37 @@ def _open_session(storage: Storage, *, now: float) -> Session:
     )
     row = storage.sessions.latest()
     if row is None:
+        new_id = DEFAULT_SESSION_ID
+        if storage.sessions.get(new_id) is not None:
+            # 默认会话已被归档：不能复用 id，另建一个活跃会话
+            new_id = f"s-{uuid4().hex[:12]}"
         row = storage.sessions.create(
-            session_id=DEFAULT_SESSION_ID,
+            session_id=new_id,
             persona_id=default_persona.id,
             now=now,
         )
+    return _session_from_row(storage, row, default_persona)
+
+
+def _load_session(storage: Storage, session_id: str, *, now: float) -> Session:
+    """按 id 打开会话（R1c 切换用）；不存在时报 STORAGE_ERROR，不静默新建。"""
+    row = storage.sessions.get(session_id)
+    if row is None:
+        raise EchoesError(ErrorCode.STORAGE_ERROR, f"会话不存在：{session_id}")
+    default_persona = storage.personas.get(DEFAULT_PERSONA_ID)
+    if default_persona is None:
+        default_persona = storage.personas.sync(
+            persona_id=DEFAULT_PERSONA_ID,
+            name=DEFAULT_PERSONA_NAME,
+            system_prompt=PERSONA_SYSTEM_PROMPT,
+            now=now,
+        )
+    return _session_from_row(storage, row, default_persona)
+
+
+def _session_from_row(
+    storage: Storage, row: SessionRow, default_persona: Persona
+) -> Session:
     persona = default_persona
     if row.persona_id != default_persona.id:
         persona = storage.personas.get(row.persona_id) or default_persona
@@ -174,7 +213,13 @@ def _state_payload(machine: StateMachine, session_id: str | None, t: int) -> dic
     )
 
 
-def _turn_factory(graph: TurnGraph, session: Session, text: str) -> TurnFactory:
+def _turn_factory(
+    graph: TurnGraph,
+    session: Session,
+    text: str,
+    *,
+    supersede: str | None = None,
+) -> TurnFactory:
     """把「本轮输入文本」绑成一个 turn 工厂（3.5 单在途 / 3.4 三跳）。
 
     绑定必须发生在构造期：`runner.start()` 只是建任务，任务要到下一次 `await`
@@ -184,7 +229,11 @@ def _turn_factory(graph: TurnGraph, session: Session, text: str) -> TurnFactory:
 
     async def _bound(token: CancelToken) -> None:
         await graph.run_turn(
-            session, TriggerSource.USER_INPUT, {"text": text}, token=token
+            session,
+            TriggerSource.USER_INPUT,
+            {"text": text},
+            token=token,
+            supersede=supersede,
         )
 
     return _bound
@@ -297,12 +346,13 @@ async def _asr_loop(
     ws_transport: LocalWebSocketTransport,
     transport: Transport,
     graph: TurnGraph,
-    session: Session,
+    session_getter: Callable[[], Session],
     asr: ASREngine,
     t0: float,
     runner: TurnRunner,
     *,
     is_cloning: Callable[[], bool] | None = None,
+    apply_settings: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """PTT 语音入口（3.4/§12 步骤 4）：WS 整段音频 → ASR → turn。
 
@@ -323,8 +373,11 @@ async def _asr_loop(
             # 克隆期间不开新 turn（同上：TTS 引擎被占用，且样本音不该进 ASR 轮次）
             print("[sidecar] 克隆进行中，忽略本段 PTT 音频", file=sys.stderr)
             continue
+        # R2a 2.5：PTT 边界拉取设置（ASR 不经过 TurnGraph）
+        if apply_settings is not None:
+            await apply_settings()
         await _asr_turn_from_pcm(
-            pcm, transport, graph, session, asr, t0, runner=runner
+            pcm, transport, graph, session_getter(), asr, t0, runner=runner
         )
 
 
@@ -389,42 +442,78 @@ async def _assemble_llm(argv: Sequence[str] | None) -> tuple[LLMProvider, bool]:
     return router, ready
 
 
-def _assemble_asr(argv: Sequence[str] | None) -> tuple[ASREngine, bool]:
+def _whisper_model_path(size: str) -> str | None:
+    """按档位定位本地 faster-whisper 权重（manifest target = faster-whisper-<size>）。"""
+    from echoes_sidecar.models.manager import default_root
+
+    local = default_root() / f"faster-whisper-{size}"
+    return str(local) if (local / "model.bin").is_file() else None
+
+
+def _assemble_asr(
+    argv: Sequence[str] | None,
+    *,
+    initial_provider: str | None = None,
+    initial_model: str | None = None,
+    initial_base_url: str | None = None,
+) -> tuple[ASREngine, bool]:
     """组合根 ASR 装配（3.2）：mock 默认；whisper 真路（CPU int8，第二周-4）。
 
     whisper ready 语义（分级就绪，3.4 v1.4）：首发 ready=False，warmup 完成的
     后台任务置 True 并重发 hello——重模型加载不阻塞 booting 其余装配；
     权重缺失时开始下载（7.3 运行时下载边界；镜像 fallback 见 engines.asr.whisper）。
+
+    R2a 2.5：一律返回 `AsrRouter`（热切换要稳定门面）；启动口径来自 setting 表。
     """
     parser = argparse.ArgumentParser(prog="echoes_sidecar.main")
     parser.add_argument("--asr", choices=["mock", "whisper"], default="mock")
     parser.add_argument("--asr-model", default="small")
     args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
 
+    local: ASREngine
     if args.asr == "mock":
-        return MockASREngine(), True
+        local = MockASREngine()
+        local_provider = "mock"
+    else:
+        model_path = _whisper_model_path(args.asr_model)
+        if model_path is not None:
+            print(f"[sidecar] Whisper 使用本地权重: {model_path}", file=sys.stderr)
+        local = WhisperASREngine(
+            model_size=args.asr_model,
+            model_path=model_path,
+            device="cpu",
+            compute_type="int8",
+        )
+        local_provider = "whisper"
 
-    from echoes_sidecar.models.manager import default_root
-
-    local_model = default_root() / "faster-whisper-small"
-    model_path = str(local_model) if (local_model / "model.bin").is_file() else None
-    if model_path is not None:
-        print(f"[sidecar] Whisper 使用本地权重: {model_path}", file=sys.stderr)
-    engine: WhisperASREngine = WhisperASREngine(
-        model_size=args.asr_model,
-        model_path=model_path,
-        device="cpu",
-        compute_type="int8",
+    router = AsrRouter(
+        local,
+        local_provider=local_provider,
+        provider=initial_provider or local_provider,
+        model=initial_model or "",
+        base_url=initial_base_url,
     )
+    if router.warms_up:
+        print(
+            f"[sidecar] WhisperASREngine(model={args.asr_model}, CPU int8): 后台 warmup 中",
+            file=sys.stderr,
+        )
+        return router, False
+    provider, model = router.current
     print(
-        f"[sidecar] WhisperASREngine(model={args.asr_model}, CPU int8): 后台 warmup 中",
+        f"[sidecar] AsrRouter(provider={provider}, model={model}): 无需权重预热",
         file=sys.stderr,
     )
-    return engine, False
+    return router, True
 
 
 def _assemble_tts(
-    argv: Sequence[str] | None, *, assets_dir: Path | None = None
+    argv: Sequence[str] | None,
+    *,
+    assets_dir: Path | None = None,
+    initial_provider: str | None = None,
+    initial_model: str | None = None,
+    initial_base_url: str | None = None,
 ) -> tuple[TTSEngine, bool]:
     """组合根 TTS 装配（3.2）：mock 默认（契约链）；cosyvoice2 真路（第二周尾部）。
 
@@ -437,14 +526,34 @@ def _assemble_tts(
     parser.add_argument("--tts", choices=["mock", "cosyvoice2"], default="mock")
     args, _ = parser.parse_known_args(list(argv) if argv is not None else None)
 
+    local: TTSEngine
     if args.tts == "mock":
-        return MockTTSEngine(), True
+        local = MockTTSEngine()
+        local_provider = "mock"
+    else:
+        voices_dir = (assets_dir / "voices") if assets_dir is not None else None
+        # fp16 默认（tier_matrix 定档）；voices_dir 缺省时引擎退到 ~/.cache/echoes/assets
+        local = CosyVoice2TtsEngine(voices_dir=voices_dir)
+        local_provider = "cosyvoice2"
 
-    voices_dir = (assets_dir / "voices") if assets_dir is not None else None
-    # fp16 默认（tier_matrix 定档）；voices_dir 缺省时引擎退到 ~/.cache/echoes/assets
-    engine: CosyVoice2TtsEngine = CosyVoice2TtsEngine(voices_dir=voices_dir)
-    print("[sidecar] CosyVoice2TtsEngine(fp16): 后台 warmup 中", file=sys.stderr)
-    return engine, False
+    # R2a 2.5：组合根一律返回路由（热切换要稳定的门面实例）；启动口径来自 setting
+    # 表，缺省沿用 CLI 装配。云端 provider 不需要权重预热，boot 直接 ready。
+    router = TtsRouter(
+        local,
+        local_provider=local_provider,
+        provider=initial_provider or local_provider,
+        model=initial_model or "",
+        base_url=initial_base_url,
+    )
+    if router.warms_up:
+        print("[sidecar] CosyVoice2TtsEngine(fp16): 后台 warmup 中", file=sys.stderr)
+        return router, False
+    provider, model = router.current
+    print(
+        f"[sidecar] TtsRouter(provider={provider}, model={model}): 无需权重预热",
+        file=sys.stderr,
+    )
+    return router, True
 
 
 async def _assemble_transports(
@@ -559,12 +668,15 @@ def _preload_runtime(tts_engine: TTSEngine, asr_engine: ASREngine) -> None:
     发生在 gate 任务创建之前（见 serve），使 warmup 的 worker 只做权重物化。
     mock 引擎无此面，零成本。
     """
-    if isinstance(tts_engine, CosyVoice2TtsEngine):
-        print("[sidecar] 主线程预热 CosyVoice2 依赖链（R20）", file=sys.stderr)
-        _try_preload("tts", tts_engine.preload)
-    if isinstance(asr_engine, WhisperASREngine):
+    # 路由只在「当前 provider 是本地」时才真正加载权重/导入 torch（云端档不白占）
+    tts_preload = getattr(tts_engine, "preload", None)
+    if tts_preload is not None:
+        print("[sidecar] 主线程预热 TTS 依赖链（R20）", file=sys.stderr)
+        _try_preload("tts", tts_preload)
+    asr_preload = getattr(asr_engine, "preload", None)
+    if asr_preload is not None:
         print("[sidecar] 主线程预热 whisper 依赖链（R20）", file=sys.stderr)
-        _try_preload("asr", asr_engine.preload)
+        _try_preload("asr", asr_preload)
 
 
 
@@ -580,6 +692,12 @@ async def _gate_engine_ready(
 
     必需引擎（asr/llm，3.5 v1.4）gate 决定 booting→ready；tts 属分级就绪，
     就绪与否对状态机透明（就绪变化由 hello 重发承载）。
+
+    **只在 booting 时迁 ready**：warmup 可能在一轮对话进行中才完成（TTS 真路
+    20–90s），此时 generating/speaking 里把状态拉回 ready 会让壳以为「可以再说话」
+    并覆盖在途 turn 的渲染；3.5 的 ready 只能由 turn_complete 收尾产生（合法迁移表
+    允许 speaking→ready，但那是 turn 自己的收尾，不是 gate 的）。就绪事实仍由
+    hello 帧承载，状态机不动。
     """
     try:
         await engine.warmup()
@@ -589,11 +707,15 @@ async def _gate_engine_ready(
     for state in engine_states:
         if state.name == engine_name:
             state.ready = True
-    if (
-        required_engines_ready((s.name, s.ready) for s in engine_states)
-        and machine.state is not AppState.READY
-    ):
-        machine.transition(AppState.READY)
+    if required_engines_ready((s.name, s.ready) for s in engine_states):
+        if machine.state is AppState.BOOTING:
+            machine.transition(AppState.READY)
+        elif machine.state is not AppState.READY:
+            print(
+                f"[sidecar] 必需引擎齐了但状态为 {machine.state.value}："
+                "等 turn 收尾自行回 ready（gate 不改在途状态）",
+                file=sys.stderr,
+            )
     await transport.send(_hello_payload(engine_states, _now_ms(t0)))
     await transport.send(_state_payload(machine, None, _now_ms(t0)))
 
@@ -674,13 +796,41 @@ async def _serve_with_storage(
     argv: Sequence[str] | None, storage: Storage, paths: DataPaths
 ) -> None:
     t0 = time.perf_counter()
+    # 启动清洗必须先于任何新 turn：崩溃残留的 pending 不能进入历史/检索。
+    try:
+        cleaned = storage.turns.cleanup_pending(now=time.time())
+        # R3a 3.7：壳侧只软删记忆，向量在这里清（16.2 删除即不可检索）
+        purged = storage.memories.purge_deleted_vectors()
+        # R3b 3.3b：turn 删除后遗留的 chunk 向量
+        orphans = storage.chunks.purge_orphans()
+    except EchoesError as exc:
+        print(f"[sidecar] 启动清洗失败（不阻断启动）: {exc}", file=sys.stderr)
+    else:
+        if cleaned:
+            print(f"[sidecar] 启动清洗：{cleaned} 条 pending turn 置为 failed", file=sys.stderr)
+        if purged:
+            print(f"[sidecar] 启动清洗：{purged} 条已删记忆的向量已清除", file=sys.stderr)
+        if orphans:
+            print(f"[sidecar] 启动清洗：{orphans} 条孤立原文向量已清除", file=sys.stderr)
     session = _open_session(storage, now=time.time())  # 5.1 + 14.1 重启重建
 
     # 组合根装配清单（3.2）：whisper/cosyvoice2 均走真路分级就绪（warmup 后台任务
     # 完成后重发 hello，3.4 v1.4）；mock 保留为无模型契约链。
+    boot_settings = load_runtime_settings(storage)
     llm_provider, llm_ready = await _assemble_llm(argv)
-    asr_engine, asr_ready = _assemble_asr(argv)
-    tts_engine, tts_ready = _assemble_tts(argv, assets_dir=paths.assets_dir)
+    asr_engine, asr_ready = _assemble_asr(
+        argv,
+        initial_provider=boot_settings.asr_provider,
+        initial_model=boot_settings.asr_model,
+        initial_base_url=boot_settings.asr_base_url,
+    )
+    tts_engine, tts_ready = _assemble_tts(
+        argv,
+        assets_dir=paths.assets_dir,
+        initial_provider=boot_settings.tts_provider,
+        initial_model=boot_settings.tts_model,
+        initial_base_url=boot_settings.tts_base_url,
+    )
     transport, ws_transport = await _assemble_transports(argv)
     memory_store, memory_extractor = _assemble_memory(argv, storage, llm_provider)
     # 摘要与记忆共用同一个功能门：memory off / mock / bge 权重缺失时一起关闭。
@@ -690,17 +840,85 @@ async def _serve_with_storage(
         if memory_extractor is not None and llm_provider.name != "mock"
         else None
     )
+
+    def _refresh_active() -> None:
+        """把三条链的「实际生效」写回 hello 条目（2.5 active_* / 2.12 双显）。"""
+        for name, engine in (
+            ("asr", asr_engine),
+            ("tts", tts_engine),
+            ("llm", llm_provider),
+        ):
+            current = getattr(engine, "current", None)
+            if current is None:
+                continue
+            provider, model = current
+            for state in engine_states:
+                if state.name == name:
+                    state.provider = provider or None
+                    state.model = model or None
+
+    async def _send_hello() -> None:
+        _refresh_active()
+        await transport.send(_hello_payload(engine_states, _now_ms(t0)))
+
+    async def _apply_asr_settings() -> None:
+        """PTT 边界应用 ASR 链设置（R2a 2.5）；切换成功后重发 hello。"""
+        settings = load_runtime_settings(storage)
+        before = getattr(asr_engine, "current", None)
+        if not isinstance(asr_engine, AsrRuntimeConfigurable):
+            return
+        try:
+            await asr_engine.apply(
+                provider=settings.asr_provider,
+                model=settings.asr_model,
+                base_url=settings.asr_base_url,
+                allow_cloud=not settings.privacy_mode,
+            )
+        except Exception as exc:  # noqa: BLE001  切换失败保持旧引擎
+            print(f"[sidecar] ASR 引擎切换失败（沿用旧引擎）: {exc}", file=sys.stderr)
+            return
+        if getattr(asr_engine, "current", None) != before:
+            try:
+                await _send_hello()
+            except Exception as exc:  # noqa: BLE001  回报失败不影响本轮转写
+                print(f"[sidecar] ASR 状态回报失败: {exc}", file=sys.stderr)
+
     # hello.engines 的清单顺序即装配顺序（3.4：壳以最后一份 hello 为准）
     engine_states: list[EngineState] = [
         EngineState(name="asr", ready=asr_ready),
         EngineState(name="tts", ready=tts_ready),
         EngineState(name="llm", ready=llm_ready),
     ]
+    _refresh_active()
 
     machine = StateMachine()
     # 4.6：会话登记与串行化守卫（编排层的 turn 从这里进出）
     manager = SessionManager()
     manager.create(session)
+    # R3a 3.3：三路检索（事实/原文/摘要）；memory off 时事实路自动跳过
+    # R3b 3.4–3.6：装了 bge-reranker-base 才精排/过阈值；没装保持 RRF 顺序
+    reranker = make_reranker(models_root() / DEFAULT_MODEL_DIR_NAME)
+    print(
+        f"[sidecar] reranker: {'启用' if reranker.available else '未安装（跳过精排）'}",
+        file=sys.stderr,
+    )
+    recall = MemoryRecall(
+        memory_store,
+        storage.turns,
+        storage.sessions,
+        chunks=storage.chunks,
+        reranker=reranker,
+    )
+    # R3a 3.2：条件式查询改写（指代/追问才调 LLM；失败用原句）
+    rewriter = QueryRewriter(llm_provider)
+    # R4 4.3：Grounding 异步质检（与聊天共用 provider；mock 时 available=False）
+    grounding = LLMGroundingJudge(llm_provider)
+    # R3b 3.3b：原文 chunk 索引（与事实检索共用同一个 bge 嵌入器）
+    indexer = (
+        TurnIndexer(storage.chunks, memory_store.embedder)
+        if memory_store is not None
+        else None
+    )
     # 4.3/10 编排层：turn 三节点的唯一实现，组合根只喂依赖（3.2）
     graph = TurnGraph(
         TurnDeps(
@@ -714,6 +932,11 @@ async def _serve_with_storage(
             extractor=memory_extractor,
             summarizer=summarizer,
             settings_loader=lambda: load_runtime_settings(storage),
+            recall=recall,
+            rewriter=rewriter,
+            indexer=indexer,
+            grounding=grounding,
+            hello_sender=_send_hello,
         ),
         machine,
         manager=manager,
@@ -730,6 +953,33 @@ async def _serve_with_storage(
     )
     clone_task: asyncio.Task[bool] | None = None
 
+    async def _activate_session(session_id: str) -> bool:
+        """R1c：切换活跃会话；先收束在途 turn，再替换 Session/CloneService。"""
+        nonlocal session
+        if session_id == session.session_id:
+            return True
+        if clone_task is not None and not clone_task.done():
+            await _send_error(
+                transport,
+                session,
+                EchoesError(ErrorCode.STORAGE_ERROR, "克隆进行中，不能切换会话"),
+                t0,
+            )
+            return False
+        await runner.interrupt()
+        try:
+            opened = _load_session(storage, session_id, now=time.time())
+        except EchoesError as exc:
+            await _send_error(transport, session, exc, t0)
+            return False
+        manager.destroy(session.session_id)
+        session = opened
+        manager.destroy(session.session_id)  # 允许切回已登记过的会话
+        manager.create(session)
+        clone_service.set_session(session)
+        await transport.send(_state_payload(machine, session.session_id, _now_ms(t0)))
+        return True
+
     # 3.4 握手：第一行 hello；就绪_changes 时重发 hello（分级就绪载体，3.4 v1.4）
     await transport.send(_hello_payload(engine_states, _now_ms(t0)))
     await transport.send(_state_payload(machine, None, _now_ms(t0)))  # booting
@@ -741,16 +991,17 @@ async def _serve_with_storage(
     # 3.2 执行约束细则（R20）：主线程预热重型 C 依赖——首发 hello/booting/ready
     # 已写出（UI 有反馈），且必须早于 gate 任务（worker 线程不得触发首 import）。
     _preload_runtime(tts_engine, asr_engine)
-    if isinstance(asr_engine, WhisperASREngine):
+    # ready=False 才需要 gate（whisper / 本地 CosyVoice2）；mock/云端 boot 即就绪
+    if not asr_ready:
         asyncio.create_task(
             _gate_engine_ready(
-                transport, machine, "asr", asr_engine, engine_states, t0
+                transport, machine, "asr", cast(_Warmable, asr_engine), engine_states, t0
             )
         )
-    if isinstance(tts_engine, CosyVoice2TtsEngine):
+    if not tts_ready:
         asyncio.create_task(
             _gate_engine_ready(
-                transport, machine, "tts", tts_engine, engine_states, t0
+                transport, machine, "tts", cast(_Warmable, tts_engine), engine_states, t0
             )
         )
 
@@ -762,11 +1013,12 @@ async def _serve_with_storage(
                 ws_transport,
                 transport,
                 graph,
-                session,
+                lambda: session,
                 asr_engine,
                 t0,
                 runner,
                 is_cloning=lambda: clone_task is not None and not clone_task.done(),
+                apply_settings=_apply_asr_settings,
             )
         )
 
@@ -779,6 +1031,10 @@ async def _serve_with_storage(
                 continue
 
             if isinstance(msg, UserTextMsg):
+                if msg.session_id != session.session_id and not await _activate_session(
+                    msg.session_id
+                ):
+                    continue
                 if machine.state is AppState.BOOTING or machine.state is AppState.ERROR:
                     # 3.5：booting/生成期用户请求不可触发 turn（语音面同规则）
                     print(
@@ -793,8 +1049,42 @@ async def _serve_with_storage(
                 # 不 await：stdio 主循环必须继续读 control——那是打断的唯一入口；
                 # start() 内部会先打断在途 turn（3.5「文本输入=打断并发起新 turn」）
                 await runner.start(_turn_factory(graph, session, msg.text))
+            elif isinstance(msg, RetryMsg):
+                # R4 4.4/4.5：重说/编辑上一条（append-only）。定位以 DB 为准：
+                # 前端只负责去掉旧气泡，不能决定「上一轮」是哪条。
+                if msg.session_id != session.session_id and not await _activate_session(
+                    msg.session_id
+                ):
+                    continue
+                if machine.state is AppState.BOOTING or machine.state is AppState.ERROR:
+                    print(
+                        f"[sidecar] 状态 {machine.state.value} 收到 retry，忽略（3.5）",
+                        file=sys.stderr,
+                    )
+                    continue
+                if clone_task is not None and not clone_task.done():
+                    print("[sidecar] 克隆进行中，忽略 retry", file=sys.stderr)
+                    continue
+                last = await asyncio.to_thread(
+                    storage.turns.last_finished, session.session_id
+                )
+                if last is None:
+                    await _send_error(
+                        transport,
+                        session,
+                        EchoesError(ErrorCode.STORAGE_ERROR, "没有可以重说的上一轮"),
+                        t0,
+                    )
+                    continue
+                text = (msg.text or "").strip() or last.user_text
+                await runner.start(
+                    _turn_factory(graph, session, text, supersede=last.turn_id)
+                )
             elif isinstance(msg, ControlMsg):
                 action = msg.action
+                if action == "open_session":
+                    await _activate_session(msg.session_id)
+                    continue
                 # interrupt 与 cancel_turn 在 sidecar 侧同义（都收束为 CANCELLED）；
                 # 差异在壳：interrupt 随后立即开采集，cancel_turn 不采集（3.4 控制动词定案）
                 interrupted = await runner.interrupt()

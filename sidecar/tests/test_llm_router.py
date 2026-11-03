@@ -97,6 +97,56 @@ async def test_privacy_mode_blocks_cloud_without_silent_fallback() -> None:
     assert initial.calls == []
 
 
+async def test_privacy_mode_allows_loopback_endpoint() -> None:
+    """ADR-016 §3 矩阵：`openai` + 环回地址在隐私模式下允许（不出网）。
+
+    本机 LM Studio / vLLM / Ollama `/v1` 是 4.4 明确覆盖的用法，把它也拦掉
+    等于让隐私模式用户失去本地兼容端点。
+    """
+    initial = FakeLLM("mock")
+    router = ProviderRouter(initial, Factory(), provider="mock", model="m")
+
+    await router.apply(
+        provider="openai",
+        model="local-model",
+        base_url="http://127.0.0.1:1234/v1",
+        allow_cloud=False,
+    )
+
+    pieces = [
+        piece
+        async for piece in router.generate([{"role": "user", "content": "hi"}])
+    ]
+    assert pieces == ["openai回复"]
+
+
+async def test_privacy_block_is_recomputed_on_each_apply() -> None:
+    """阻断位随每轮设置重算：环回放行后再切公网，必须重新拦住。"""
+    initial = FakeLLM("mock")
+    factory = Factory()
+    router = ProviderRouter(initial, factory, provider="mock", model="m")
+    await router.apply(
+        provider="openai",
+        model="local",
+        base_url="http://localhost:8080/v1",
+        allow_cloud=False,
+    )
+    assert [p async for p in router.generate([{"role": "user", "content": "hi"}])] == [
+        "openai回复"
+    ]
+
+    await router.apply(
+        provider="openai",
+        model="gpt-x",
+        base_url="https://api.openai.com/v1",
+        allow_cloud=False,
+    )
+    with pytest.raises(EchoesError) as excinfo:
+        async for _ in router.generate([{"role": "user", "content": "hi"}]):
+            pass
+    assert excinfo.value.code is ErrorCode.LLM_PROVIDER_UNAVAILABLE
+
+
 async def test_apply_same_config_does_not_rebuild() -> None:
     initial = FakeLLM("ollama")
     factory = Factory()

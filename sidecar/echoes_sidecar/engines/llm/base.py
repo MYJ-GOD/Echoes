@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from typing import Protocol, runtime_checkable
 
 
 class LLMProvider(ABC):
@@ -34,3 +35,23 @@ class LLMProvider(ABC):
     @abstractmethod
     def name(self) -> str:
         """'ollama' / 'cloud:deepseek' 等（4.4；llama_cpp 条款见 engines/llm/__init__）。"""
+
+
+@runtime_checkable
+class RuntimeConfigurable(Protocol):
+    """可选能力（4.4 v1.4.4 追加）：按设置在多 provider 间切换。
+
+    **为什么定义在这里**：3.4 的拉取语义要求「一个 turn 边界换 provider」，实现是
+    `ProviderRouter`；但 15.2 只许编排层依赖 ABC/Protocol（3.2「组装归组合根」）。
+    编排层若 `import engines.llm.router`，换掉路由实现就得改编排——这条 Protocol
+    把「能应用设置」变成一个能力位，编排 `isinstance` 探测即可，具体实现留在组合根。
+    """
+
+    async def apply(
+        self,
+        *,
+        provider: str | None,
+        model: str | None,
+        base_url: str | None = None,
+        allow_cloud: bool = True,
+    ) -> None: ...

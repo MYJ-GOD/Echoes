@@ -43,7 +43,9 @@ EXCLUDES = [
     "tokenizers",
     "onnxruntime",
     "librosa",
-    "soundfile",
+    # soundfile 不再排除：R2a 2.14 的云端 TTS mp3/ogg 解码要它（libsndfile DLL
+    # 随 --collect-all soundfile 一起打进去，约 2MB；scipy 仍归运行时包，
+    # 重采样退回线性插值）。
     "matplotlib",
     "pandas",
     "pyarrow",
@@ -115,6 +117,12 @@ def build() -> Path:
         "echoes_sidecar",
         "--collect-all",
         "sqlite_vec",
+        # R2a 2.14：libsndfile 二进制在 soundfile/_soundfile_data，必须收全
+        "--collect-all",
+        "soundfile",
+        # jieba 的词典是数据文件；不收集则冻结版 tokens 为空
+        "--collect-data",
+        "jieba",
         # 凭据后端是动态发现的：不显式收集，冻结版会在 import keyring 时缺 backend
         "--collect-submodules",
         "keyring.backends",

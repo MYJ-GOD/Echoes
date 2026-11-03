@@ -9,6 +9,7 @@ Python 侧；壳只负责“跑一次 setup、把进度转给前端”，避免�
 """
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import importlib.util
 import json
@@ -17,16 +18,23 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
 from echoes_sidecar import runtime
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
+from echoes_sidecar.db import Storage
+from echoes_sidecar.db.memory_repo import CATEGORIES
+from echoes_sidecar.db.paths import resolve as resolve_paths
+from echoes_sidecar.memory.embedding import TransformersEmbedder
 from echoes_sidecar.models.manager import ModelManager
+from echoes_sidecar.secrets import llm_api_key
 
 # 本地引擎跑起来所需的最小权重集（与 models/manifest.json 的 id 对齐）
 REQUIRED_MODELS: tuple[str, ...] = (
@@ -146,8 +154,31 @@ def detect(
     )
 
 
+def _camel(key: str) -> str:
+    head, *rest = key.split("_")
+    return head + "".join(part.capitalize() for part in rest)
+
+
+def _camelize(value: Any) -> Any:
+    """snake_case → camelCase（逐层）。壳侧视图一律 camelCase（见 `ipc.ts`）。"""
+    if isinstance(value, dict):
+        return {_camel(key): _camelize(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_camelize(item) for item in value]
+    return value
+
+
 def as_dict(report: SetupReport) -> dict[str, Any]:
-    return asdict(report)
+    """向导 JSON 行里的 report：**camelCase**（`ipc.ts::SetupReport` 的契约）。
+
+    `asdict` 给的是 snake_case（`missing_models` / `recommended_profile` …），
+    前端读 `missingModels` 会拿到 undefined —— 首启向导会在渲染时崩掉（白屏）。
+    `models` 的键是模型 id（含连字符），不是字段名，原样保留。
+    """
+    raw = asdict(report)
+    mapped: dict[str, Any] = _camelize(raw)
+    mapped["models"] = dict(raw["models"])
+    return mapped
 
 
 def _recommend(gpu: GpuInfo | None, platform_name: str) -> str:
@@ -237,6 +268,86 @@ def _ollama_probe() -> OllamaInfo:
         if isinstance(item, dict) and item.get("name")
     )
     return OllamaInfo(url=url, reachable=True, models=names)
+
+
+# ------------------------------ 模型目录（R2a 2.6） ------------------------------
+
+
+@dataclass(frozen=True)
+class ModelOption:
+    """下拉候选：id + 归属；`context_window` 预留（云端 `/v1/models` 不返回）。
+
+    Ollama 的上下文长度要逐模型 `/api/show`（N 次请求），v1 先在「生效路径」
+    里显示模型名，不阻塞设置页；需要时再做懒加载。
+    """
+
+    id: str
+    owner: str | None = None
+    context_window: int | None = None
+
+
+def list_models(provider: str, *, base_url: str | None = None) -> list[ModelOption]:
+    """拉取可用的 LLM 模型目录（3.2）。
+
+    - `ollama`：本机 `/api/tags`，不需要 key；不可达 → `LLM_PROVIDER_UNAVAILABLE`
+    - `openai`：`GET {base}/models`，key 从凭据管理器读（与 sidecar 请求同口径）
+    - 其它 provider（mock）没有目录概念，调用方不该发起
+    """
+    if provider == "ollama":
+        url = os.environ.get(OLLAMA_ENV, DEFAULT_OLLAMA_URL).rstrip("/")
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                resp = client.get(f"{url}/api/tags")
+                resp.raise_for_status()
+                data = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise EchoesError(
+                ErrorCode.LLM_PROVIDER_UNAVAILABLE,
+                f"Ollama 不可达（{url}）：{exc}",
+            ) from exc
+        return [
+            ModelOption(id=str(item["name"]), owner="ollama")
+            for item in data.get("models", [])
+            if isinstance(item, dict) and item.get("name")
+        ]
+
+    if provider == "openai":
+        base = (base_url or "https://api.openai.com/v1").strip().rstrip("/")
+        if not base:
+            raise EchoesError(ErrorCode.LLM_PROVIDER_UNAVAILABLE, "云端目录缺 base URL")
+        key = llm_api_key()
+        if not key:
+            raise EchoesError(
+                ErrorCode.LLM_KEY_MISSING,
+                "尚未配置云端 LLM 的 API key（设置 → 引擎）",
+            )
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(
+                    f"{base}/models", headers={"Authorization": f"Bearer {key}"}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise EchoesError(
+                ErrorCode.LLM_PROVIDER_UNAVAILABLE,
+                f"云端模型目录不可用（{base}）：{exc}",
+            ) from exc
+        items = data.get("data", []) if isinstance(data, dict) else []
+        options: list[ModelOption] = []
+        for item in items:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            owner = item.get("owned_by")
+            options.append(
+                ModelOption(
+                    id=str(item["id"]),
+                    owner=str(owner) if isinstance(owner, str) else None,
+                )
+            )
+        return options
+
+    raise EchoesError(ErrorCode.INTERNAL_ERROR, f"provider {provider!r} 没有模型目录")
 
 
 def _disk_free_gb() -> float:
@@ -346,9 +457,244 @@ def json_line(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+# ------------------------------ 模型占用 / 删除（R5 7.9） ------------------------------
+
+
+def models_info(*, models_root: Path | None = None) -> list[dict[str, Any]]:
+    """清单里每个模型的安装状态与磁盘占用（camelCase，前端直接渲染）。
+
+    `size_mb` 是清单里的预估下载体积；`bytes` 是当前目录的实际占用（未安装为 0）。
+    Ollama 模型不在本模块的目录里，占用显示 0、删除也不归我们管。
+    """
+    manager = ModelManager.load(root=models_root)
+    result: list[dict[str, Any]] = []
+    for status in manager.list_status():
+        entry = status.entry
+        actual = 0
+        if entry.kind != "ollama" and status.path.exists():
+            actual = _dir_size(status.path)
+        result.append(
+            {
+                "id": entry.id,
+                "displayName": entry.display_name,
+                "kind": entry.kind,
+                "installed": status.installed,
+                "detail": status.detail,
+                "path": str(status.path),
+                "expectedMb": entry.size_mb,
+                "bytes": actual,
+            }
+        )
+    return result
+
+
+def remove_models(
+    model_ids: Sequence[str], *, models_root: Path | None = None
+) -> dict[str, Any]:
+    """删除本地权重目录（只删清单 target 下的内容，Ollama 模型拒绝）。
+
+    **不做确认弹窗**：确认归壳/前端；这里只保证「只删模型目录、绝不越界」。
+    """
+    ids = [item.strip() for item in model_ids if item and item.strip()]
+    if not ids:
+        raise EchoesError(ErrorCode.INTERNAL_ERROR, "没有指定要删除的模型")
+    manager = ModelManager.load(root=models_root)
+    removed: list[str] = []
+    freed = 0
+    for model_id in ids:
+        try:
+            status = manager.status(model_id)
+        except KeyError as exc:
+            raise EchoesError(
+                ErrorCode.INTERNAL_ERROR, f"未知模型 {model_id!r}"
+            ) from exc
+        entry = status.entry
+        if entry.kind == "ollama":
+            raise EchoesError(
+                ErrorCode.INTERNAL_ERROR,
+                f"{model_id} 由 Ollama 管理，请用 `ollama rm {entry.target}` 删除",
+            )
+        path = manager.path_for(entry)
+        if path.exists():
+            size = _dir_size(path)
+            shutil.rmtree(path)
+            freed += size
+            removed.append(model_id)
+    return {"removed": removed, "freedBytes": freed}
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for item in path.rglob("*"):
+        if item.is_file():
+            try:
+                total += item.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+# ------------------------------ 记忆写接口（R3b） ------------------------------
+MEMORY_FACT_MAX_CHARS = 500
+MEMORY_OPS = frozenset({"add", "update", "merge", "bulk"})
+# 批量导入单次上限：一次嵌入 200 条已经是秒级，再多应该走多次操作
+MEMORY_BULK_MAX = 200
+
+
+def import_memories(
+    raw: str,
+    *,
+    default_category: str = "other",
+    data_root: Path | None = None,
+    model_dir: Path | None = None,
+    embedder: Any | None = None,
+) -> dict[str, Any]:
+    """R5 记忆批量导入：每行一条，支持 `事实|类别`。
+
+    **去重口径**：与现有生效事实（未删/未被取代）原文完全相同就跳过；同一批里的
+    重复也只保留第一条。不做语义去重——那是「合并」按钮的活，自动合并会悄悄改
+    用户写下的原文。
+    """
+    if default_category not in CATEGORIES:
+        raise EchoesError(
+            ErrorCode.STORAGE_ERROR,
+            f"未知记忆类别 {default_category!r}（{'/'.join(sorted(CATEGORIES))}）",
+        )
+
+    parsed: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    duplicates = 0
+    for line in raw.splitlines():
+        text = line.strip().lstrip("-*•").strip()
+        if not text:
+            continue
+        fact, category = text, default_category
+        head, sep, tail = text.rpartition("|")
+        if sep and head.strip() and tail.strip() in CATEGORIES:
+            fact, category = head.strip(), tail.strip()
+        if len(fact) > MEMORY_FACT_MAX_CHARS:
+            raise EchoesError(
+                ErrorCode.STORAGE_ERROR,
+                f"记忆内容过长（> {MEMORY_FACT_MAX_CHARS} 字）：{fact[:30]}…",
+            )
+        if fact in seen:
+            duplicates += 1
+            continue
+        seen.add(fact)
+        parsed.append((fact, category))
+    if not parsed:
+        raise EchoesError(ErrorCode.STORAGE_ERROR, "没有可导入的记忆（每行一条）")
+    if len(parsed) > MEMORY_BULK_MAX:
+        raise EchoesError(
+            ErrorCode.STORAGE_ERROR,
+            f"一次最多导入 {MEMORY_BULK_MAX} 条（本次 {len(parsed)} 条）",
+        )
+
+    paths = resolve_paths(data_root)
+    storage = Storage.open(paths.db_file)
+    try:
+        existing = storage.memories.active_texts()
+        fresh = [(fact, category) for fact, category in parsed if fact not in existing]
+        skipped = duplicates + (len(parsed) - len(fresh))
+        if not fresh:
+            return {"op": "bulk", "added": 0, "skipped": skipped, "ids": []}
+
+        vectors = asyncio.run(
+            (embedder or TransformersEmbedder(model_dir=model_dir)).embed(
+                [fact for fact, _ in fresh]
+            )
+        )
+        now = time.time()
+        ids: list[str] = []
+        for (fact, category), vector in zip(fresh, vectors, strict=True):
+            created = storage.memories.insert(
+                fact_id=uuid4().hex,
+                fact=fact,
+                category=category,
+                embedding=vector,
+                now=now,
+            )
+            ids.append(created.id)
+        return {"op": "bulk", "added": len(ids), "skipped": skipped, "ids": ids}
+    finally:
+        storage.close()
+
+
+def write_memory(
+    op: str,
+    *,
+    fact: str | None = None,
+    fact_id: str | None = None,
+    ids: Sequence[str] = (),
+    category: str = "other",
+    data_root: Path | None = None,
+    model_dir: Path | None = None,
+    embedder: Any | None = None,
+) -> dict[str, Any]:
+    """R3b 记忆写接口（一次性进程）：add / update / merge。
+
+    **为什么走 `--setup` 而不是聊天协议**：写记忆必须重新生成 bge 向量，
+    聊天面是冻结的 hello/state 契约；一次性进程复用同一套 Storage/嵌入器，
+    不把「编辑记忆」塞进 turn 状态机。代价是每次操作加载一次嵌入权重
+    （bge-small 秒级），对管理页的点击频率可以接受。
+
+    - `add`：新事实（来源置空）
+    - `update`：旧事实标记 `superseded_by = 新 id`（历史保留；等价「编辑」）
+    - `merge`：多条旧事实合并成一条（全部指向新 id）
+    """
+    if op not in MEMORY_OPS:
+        raise EchoesError(ErrorCode.INTERNAL_ERROR, f"未知记忆操作 {op!r}")
+    text = (fact or "").strip()
+    if not text:
+        raise EchoesError(ErrorCode.STORAGE_ERROR, "记忆内容不能为空")
+    if len(text) > MEMORY_FACT_MAX_CHARS:
+        raise EchoesError(
+            ErrorCode.STORAGE_ERROR, f"记忆内容过长（> {MEMORY_FACT_MAX_CHARS} 字）"
+        )
+    if category not in CATEGORIES:
+        raise EchoesError(
+            ErrorCode.STORAGE_ERROR,
+            f"未知记忆类别 {category!r}（{'/'.join(sorted(CATEGORIES))}）",
+        )
+    old_ids = [item.strip() for item in ids if item and item.strip()]
+    if op == "update" and not (fact_id or "").strip():
+        raise EchoesError(ErrorCode.STORAGE_ERROR, "编辑记忆需要 fact_id")
+    if op == "merge" and len(old_ids) < 2:
+        raise EchoesError(ErrorCode.STORAGE_ERROR, "合并至少需要两条记忆")
+
+    paths = resolve_paths(data_root)
+    storage = Storage.open(paths.db_file)
+    try:
+        vectors = asyncio.run(
+            (embedder or TransformersEmbedder(model_dir=model_dir)).embed([text])
+        )
+        vector = vectors[0]
+        new_id = uuid4().hex
+        now = time.time()
+        common = {
+            "fact_id": new_id,
+            "fact": text,
+            "category": category,
+            "embedding": vector,
+            "now": now,
+        }
+        if op == "add":
+            created = storage.memories.insert(**common)
+        elif op == "update":
+            created = storage.memories.supersede((fact_id or "").strip(), **common)
+        else:
+            created = storage.memories.merge(old_ids, **common)
+        return {"op": op, "factId": created.id}
+    finally:
+        storage.close()
+
+
 __all__ = [
     "DEFAULT_OLLAMA_URL",
     "GpuInfo",
+    "MEMORY_FACT_MAX_CHARS",
+    "MEMORY_OPS",
+    "ModelOption",
     "OllamaInfo",
     "REQUIRED_MODELS",
     "SetupReport",
@@ -357,4 +703,9 @@ __all__ = [
     "install_models",
     "install_runtime",
     "json_line",
+    "list_models",
+    "import_memories",
+    "models_info",
+    "remove_models",
+    "write_memory",
 ]

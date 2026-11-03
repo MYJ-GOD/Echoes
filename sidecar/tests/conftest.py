@@ -22,6 +22,10 @@ from echoes_sidecar.engines.llm.mock import MockLLMProvider
 from echoes_sidecar.engines.tts.base import TTSEngine
 from echoes_sidecar.engines.tts.mock import MockTTSEngine
 from echoes_sidecar.memory.extractor import MemoryExtractor
+from echoes_sidecar.memory.grounding import GroundingJudge
+from echoes_sidecar.memory.index import TurnIndexer
+from echoes_sidecar.memory.recall import MemoryRecall
+from echoes_sidecar.memory.rewrite import QueryRewriter
 from echoes_sidecar.memory.store import MemoryStore
 from echoes_sidecar.orchestration.graph import TurnDeps, TurnGraph
 from echoes_sidecar.session.runtime import RuntimeSettings
@@ -205,6 +209,10 @@ def make_graph(
     summarizer: SessionSummarizer | None = None,
     settings_loader: Callable[[], RuntimeSettings] | None = None,
     storage: Storage | None = None,
+    recall: MemoryRecall | None = None,
+    rewriter: QueryRewriter | None = None,
+    indexer: TurnIndexer | None = None,
+    grounding: GroundingJudge | None = None,
 ) -> TurnGraph:
     """turn 编排的标准装配（默认 mock 引擎 + 记录型 transport）。"""
     return TurnGraph(
@@ -219,6 +227,10 @@ def make_graph(
             summarizer=summarizer,
             settings_loader=settings_loader,
             storage=storage,
+            recall=recall,
+            rewriter=rewriter,
+            indexer=indexer,
+            grounding=grounding,
         ),
         machine if machine is not None else ready_machine(),
     )

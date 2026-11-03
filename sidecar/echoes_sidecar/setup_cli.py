@@ -20,9 +20,10 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from echoes_sidecar import setup
-from echoes_sidecar.core.errors import EchoesError
+from echoes_sidecar import data_transfer, setup
+from echoes_sidecar.core.errors import EchoesError, ErrorCode
 
 
 def _emit(payload: dict[str, object]) -> None:
@@ -50,6 +51,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     models_cmd = sub.add_parser("install-models", help="下载缺失的模型权重")
     models_cmd.add_argument("--ids", default=None, help="逗号分隔；默认全部必需模型")
 
+    catalog_cmd = sub.add_parser("list-models", help="拉取 LLM 模型目录（R2a 2.6）")
+    catalog_cmd.add_argument("--provider", choices=["ollama", "openai"], required=True)
+    catalog_cmd.add_argument("--base-url", default=None)
+
+    memory_cmd = sub.add_parser(
+        "memory-write", help="记忆写接口（R3b：add/update/merge；R5：bulk）"
+    )
+    memory_cmd.add_argument(
+        "--op", choices=["add", "update", "merge", "bulk"], required=True
+    )
+    memory_cmd.add_argument("--fact", default=None)
+    memory_cmd.add_argument("--fact-id", default=None)
+    memory_cmd.add_argument("--ids", default=None, help="合并用，逗号分隔")
+    memory_cmd.add_argument("--category", default="other")
+    memory_cmd.add_argument("--file", default=None, help="bulk：UTF-8 文本，每行一条")
+
+    export_cmd = sub.add_parser("data-export", help="导出业务数据为 JSON（R5）")
+    export_cmd.add_argument("--path", required=True)
+
+    import_cmd = sub.add_parser("data-import", help="合并导入 JSON 导出包（R5）")
+    import_cmd.add_argument("--path", required=True)
+
+    sub.add_parser("models-info", help="模型安装状态与磁盘占用（R5）")
+    remove_cmd = sub.add_parser("models-remove", help="删除本地模型权重（R5）")
+    remove_cmd.add_argument("--ids", required=True, help="逗号分隔")
+
     parsed, unknown = parser.parse_known_args(args)
     if unknown:
         print(f"[setup] 忽略未知参数：{unknown}", file=sys.stderr)
@@ -71,6 +98,78 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "report": setup.as_dict(report),
                 }
             )
+            return 0
+
+        if parsed.action == "list-models":
+            options = setup.list_models(
+                parsed.provider, base_url=parsed.base_url
+            )
+            _emit(
+                {
+                    "type": "models",
+                    "provider": parsed.provider,
+                    "models": [
+                        {
+                            "id": item.id,
+                            "owner": item.owner,
+                            "contextWindow": item.context_window,
+                        }
+                        for item in options
+                    ],
+                }
+            )
+            return 0
+
+        if parsed.action == "memory-write":
+            if parsed.op == "bulk":
+                source = Path(parsed.file) if parsed.file else None
+                if source is None or not source.is_file():
+                    raise EchoesError(
+                        ErrorCode.STORAGE_ERROR, "批量导入需要 --file 指向一个 UTF-8 文本"
+                    )
+                result = setup.import_memories(
+                    source.read_text(encoding="utf-8"),
+                    default_category=parsed.category,
+                )
+            else:
+                ids = [
+                    item.strip() for item in (parsed.ids or "").split(",") if item.strip()
+                ]
+                result = setup.write_memory(
+                    parsed.op,
+                    fact=parsed.fact,
+                    fact_id=parsed.fact_id,
+                    ids=ids,
+                    category=parsed.category,
+                )
+            _emit({"type": "result", "step": "memory", "ok": True, **result})
+            return 0
+
+        if parsed.action in {"data-export", "data-import"}:
+            transfer = (
+                data_transfer.export_bundle
+                if parsed.action == "data-export"
+                else data_transfer.import_bundle
+            )
+            result = transfer(Path(parsed.path))
+            _emit({"type": "result", "step": "data", "ok": True, **result})
+            return 0
+
+        if parsed.action == "models-info":
+            _emit(
+                {
+                    "type": "result",
+                    "step": "models",
+                    "ok": True,
+                    "models": setup.models_info(),
+                }
+            )
+            return 0
+
+        if parsed.action == "models-remove":
+            ids = [item.strip() for item in parsed.ids.split(",") if item.strip()]
+            result = setup.remove_models(ids)
+            _emit({"type": "result", "step": "models", "ok": True, **result})
             return 0
 
         ids = (

@@ -1,0 +1,12 @@
+{"id": "turn-01", "query": "上次说的那本吉他书叫什么", "turns": ["小王子"]}
+{"id": "turn-02", "query": "我之前说想学什么乐器", "turns": ["吉他"]}
+{"id": "turn-03", "query": "上次聊到的那家咖啡店", "turns": ["街角咖啡"]}
+{"id": "turn-04", "query": "我提过的那个面试时间", "turns": ["周四下午"]}
+{"id": "summary-01", "query": "我们上周在聊什么", "summaries": ["读书"]}
+{"id": "summary-02", "query": "前几天聊的那个旅行计划", "summaries": ["旅行"]}
+{"id": "summary-03", "query": "之前那个项目进展到哪了", "summaries": ["项目复盘"]}
+{"id": "fact-01", "query": "我喜欢什么动物", "facts": ["猫"]}
+{"id": "fact-02", "query": "我住在哪座城市", "facts": ["杭州"]}
+{"id": "fact-03", "query": "我的生日是哪天", "facts": ["生日"]}
+{"id": "neg-01", "query": "今天天气怎么样", "expectEmpty": true}
+{"id": "neg-02", "query": "帮我算一下 12 乘 8 等于多少", "expectEmpty": true}

@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,12 @@ import pytest
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.types import VoiceStatus
 from echoes_sidecar.db import paths as db_paths
-from echoes_sidecar.db.connection import apply_migrations, connect, load_migrations
+from echoes_sidecar.db.connection import (
+    apply_migrations,
+    connect,
+    default_migrations_dir,
+    load_migrations,
+)
 from echoes_sidecar.db.repo import Storage
 
 
@@ -92,6 +99,117 @@ def test_migration_files_must_be_continuous(tmp_path: Path) -> None:
     with pytest.raises(EchoesError) as excinfo:
         load_migrations(migrations)
     assert "不连续" in excinfo.value.message
+
+
+def test_failed_migration_rolls_back_entire_script(tmp_path: Path) -> None:
+    """迁移半途失败不能留下半张表；user_version 也不能前进。"""
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "0001_bad.sql").write_text(
+        "CREATE TABLE partial (id TEXT);\n"
+        "INSERT INTO no_such_table (id) VALUES ('boom');\n",
+        encoding="utf-8",
+    )
+    db_file = tmp_path / "bad.db"
+
+    with pytest.raises(EchoesError):
+        connect(db_file, migrations_dir=migrations)
+
+    conn = sqlite3.connect(db_file)
+    try:
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert "partial" not in tables
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 0
+    finally:
+        conn.close()
+
+
+def test_pending_migration_creates_backup(tmp_path: Path) -> None:
+    """升级前必须有 VACUUM INTO 备份；新装库（无待执行迁移）不备份。"""
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    (migrations / "0001_base.sql").write_text(
+        "CREATE TABLE base (id TEXT);\n", encoding="utf-8"
+    )
+    db_file = tmp_path / "db" / "echoes.db"
+    conn = connect(db_file, migrations_dir=migrations)
+    conn.close()
+
+    (migrations / "0002_extra.sql").write_text(
+        "CREATE TABLE extra (id TEXT);\n", encoding="utf-8"
+    )
+    conn = connect(db_file, migrations_dir=migrations)
+    conn.close()
+
+    backups = list((tmp_path / "backup").glob("v*.db"))
+    assert len(backups) == 1
+    backup = sqlite3.connect(backups[0])
+    try:
+        assert int(backup.execute("PRAGMA user_version").fetchone()[0]) == 1
+    finally:
+        backup.close()
+
+
+def test_existing_data_survives_0003_0004(tmp_path: Path) -> None:
+    """旧库（0001/0002）升级：voice/session/summary/fact 数据不能丢。"""
+    old_migrations = tmp_path / "old-migrations"
+    old_migrations.mkdir()
+    source = default_migrations_dir()
+    for name in ("0001_init.sql", "0002_memory_vec.sql"):
+        shutil.copy(source / name, old_migrations / name)
+
+    db_file = tmp_path / "db" / "echoes.db"
+    conn = connect(db_file, migrations_dir=old_migrations)
+    conn.execute(
+        "INSERT INTO persona (id, name, system_prompt, created_at, updated_at)"
+        " VALUES ('default', '旧人设', '旧 prompt', 1, 1)"
+    )
+    conn.execute(
+        "INSERT INTO voice"
+        " (id, display_name, sample_path, model_path, status, quality_score, created_at)"
+        " VALUES ('v1', '旧音色', 'voices/v1.wav', 'voices/v1.pt', 'ready', 0.9, 2)"
+    )
+    conn.execute(
+        "INSERT INTO session"
+        " (id, profile_id, persona_id, voice_id, started_at, last_active_at)"
+        " VALUES ('s1', 'default', 'default', 'v1', 3, 4)"
+    )
+    conn.execute(
+        "INSERT INTO session_summary (session_id, summary, up_to_turn, updated_at)"
+        " VALUES ('s1', '旧摘要', 37, 5)"
+    )
+    conn.execute(
+        "INSERT INTO memory_fact"
+        " (id, profile_id, fact, category, source_session_id, source_turn,"
+        "  created_at, last_seen_at, superseded_by, deleted)"
+        " VALUES ('f1', 'default', '用户喜欢猫', 'preference', 's1', 37, 6, 6, NULL, 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    upgraded = connect(db_file)
+    try:
+        voice = upgraded.execute(
+            "SELECT sample_path, engine FROM voice WHERE id = 'v1'"
+        ).fetchone()
+        assert tuple(voice) == ("voices/v1.wav", "cosyvoice2")
+
+        summary = upgraded.execute(
+            "SELECT summary, up_to_turn FROM session_summary WHERE session_id = 's1'"
+        ).fetchone()
+        assert tuple(summary) == ("旧摘要", 0)
+
+        fact = upgraded.execute(
+            "SELECT source_turn, source_turn_id FROM memory_fact WHERE id = 'f1'"
+        ).fetchone()
+        assert tuple(fact) == (37, None)
+    finally:
+        upgraded.close()
 
 
 def test_apply_migrations_returns_current_version(tmp_path: Path) -> None:

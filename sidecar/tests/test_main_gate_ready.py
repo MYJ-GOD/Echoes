@@ -92,6 +92,27 @@ async def test_gate_enters_ready_when_last_required_engine_arrives() -> None:
     assert transport.sent[-1]["state"] == "ready"
 
 
+async def test_gate_does_not_yank_in_flight_state_back_to_ready() -> None:
+    """warmup 在对话进行中才完成：只报 hello，不把 speaking 拉回 ready。
+
+    TTS 真路就绪要 20–90s，这段时间用户完全可能已经在说话；gate 若在此刻
+    `transition(ready)`，壳会以为轮次结束（`state` 是唯一状态源），在途 turn 的
+    渲染与打断入口都会被误导。3.5 的 ready 只能由 turn_complete 收尾产生。
+    """
+    transport = _Transport()
+    machine = StateMachine()
+    machine.transition(AppState.READY)
+    machine.transition(AppState.GENERATING)
+    machine.transition(AppState.SPEAKING)
+    states = _states(("asr", True), ("tts", True), ("llm", True))
+
+    await _gate_engine_ready(transport, machine, "tts", _Engine(), states, time.perf_counter())
+
+    assert machine.state is AppState.SPEAKING  # 不被 gate 改写
+    assert [m["type"] for m in transport.sent] == ["hello", "state"]
+    assert transport.sent[-1]["state"] == "speaking"  # 报的是真实状态，不撒谎
+
+
 async def test_warmup_failure_keeps_booting_and_does_not_lie(
     capsys: Any,
 ) -> None:

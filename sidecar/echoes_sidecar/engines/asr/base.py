@@ -8,9 +8,29 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from echoes_sidecar.audio.stream import AudioInputStream
+
+
+@runtime_checkable
+class AsrRuntimeConfigurable(Protocol):
+    """可选能力（R2a 2.5）：PTT 转写前按设置切换 ASR provider。
+
+    与 LLM/TTS 的运行时协议同构：编排层只认 Protocol，不认识 `AsrRouter`。
+    """
+
+    async def apply(
+        self,
+        *,
+        provider: str | None,
+        model: str | None,
+        base_url: str | None = None,
+        allow_cloud: bool = True,
+    ) -> None: ...
+
+    @property
+    def current(self) -> tuple[str, str]: ...
 
 
 class ASREngine(ABC):

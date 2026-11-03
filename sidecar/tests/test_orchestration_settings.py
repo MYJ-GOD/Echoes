@@ -114,6 +114,40 @@ async def test_provider_switch_between_turns() -> None:
     assert len(factory.created[0][2].messages) == 1
 
 
+class SettableLLM(NamedLLM):
+    """只实现 `RuntimeConfigurable` 的 provider（**不是** ProviderRouter）。
+
+    用来证明 4.4 v1.4.4 的能力位是真的能力位：编排认 Protocol，不认识具体路由类，
+    所以换一种实现（甚至以后整条路由被替掉）不需要改编排层。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("settable")
+        self.applied: list[tuple[str | None, str | None, str | None, bool]] = []
+
+    async def apply(
+        self,
+        *,
+        provider: str | None,
+        model: str | None,
+        base_url: str | None = None,
+        allow_cloud: bool = True,
+    ) -> None:
+        self.applied.append((provider, model, base_url, allow_cloud))
+
+
+async def test_runtime_configurable_protocol_is_enough() -> None:
+    """非 ProviderRouter 的实现也能吃到每轮设置（能力位而非具体类）。"""
+    llm = SettableLLM()
+    box = SettingsBox(_settings(provider="openai", model="local", privacy_mode=False))
+    graph = make_graph(llm=llm, settings_loader=box)
+    session = make_session()
+
+    await graph.run_turn(session, TriggerSource.USER_INPUT, {"text": "你好"})
+
+    assert llm.applied == [("openai", "local", None, True)]
+
+
 async def test_settings_loader_failure_does_not_break_turn() -> None:
     transport = RecordingTransport()
     graph = make_graph(transport, settings_loader=BoomLoader())

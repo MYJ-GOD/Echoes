@@ -151,6 +151,10 @@ class CloneService:
         self._min_similarity = min_similarity
         self._cancel = asyncio.Event()
 
+    def set_session(self, session: Session) -> None:
+        """R1c 切换活跃会话：后续克隆/绑定写到新会话。"""
+        self._session = session
+
     # ------------------------------ 对外接口 ------------------------------
 
     def cancel(self) -> None:
@@ -189,13 +193,13 @@ class CloneService:
             current_id = engine_voice_id
             self._raise_if_cancelled("质检前取消")
 
-            # 阶段 2 质检：引擎若有说话人相似度能力（CosyVoice2 campplus），
-            # 用克隆音色合成一句参考文本，与原样本算余弦；mock 引擎无此能力则跳过。
-            scorer = getattr(self._tts, "speaker_similarity", None)
-            if scorer is not None:
+            # 阶段 2 质检：引擎声明支持相似度质检时（CosyVoice2 campplus），
+            # 用克隆音色合成一句参考文本，与原样本算余弦；mock 引擎能力位为假则跳过。
+            # 能力位来自 4.5 的 TTS 契约（v1.4.4 追加），不再是 getattr 鸭子探测。
+            if self._tts.supports_similarity_check:
                 await self._emit_progress("checking", 10)
                 reference = await self._collect_reference(engine_voice_id)
-                raw_score = await scorer(pcm, reference)
+                raw_score = await self._tts.speaker_similarity(pcm, reference)
                 score = float(raw_score)
                 if not math.isfinite(score):
                     raise CloneError(
@@ -316,8 +320,21 @@ class CloneService:
         return None
 
     def _next_display_name(self) -> str:
-        """5.1：自动生成「音色 N」，不引入对象元数据（2.4）。"""
-        return f"音色 {len(self._storage.voices.list_all()) + 1}"
+        """5.1：自动生成「音色 N」——取已用编号的最大值 +1，不引入对象元数据（2.4）。
+
+        不能用「行数 +1」：删过/失败过的行会让编号回落，出现两个「音色 3」，
+        用户在列表里就分不清哪个是哪个（名字是唯一的辨识手段）。
+        """
+        highest = 0
+        for row in self._storage.voices.list_all():
+            suffix = row.display_name.removeprefix("音色 ")
+            if suffix == row.display_name:  # 不是自动生成的样式，跳过
+                continue
+            try:
+                highest = max(highest, int(suffix))
+            except ValueError:  # 「音色 A」这类手写名不影响编号
+                continue
+        return f"音色 {highest + 1}"
 
     async def _fail(self, voice_id: str, exc: CloneError, sample_file: Path | None) -> None:
         """失败收束（4.5）：音色置 failed + error 事件 + 清理样本（14.1）。"""

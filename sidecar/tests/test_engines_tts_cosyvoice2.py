@@ -108,6 +108,28 @@ class _FakeVendored:
         )
         yield from ({"tts_speech": o} for o in self._outs)
 
+    def inference_instruct2(
+        self,
+        tts_text: str,
+        instruct_text: str,
+        prompt_wav: str,
+        zero_shot_spk_id: str = "",
+        stream: bool = False,
+        speed: float = 1.0,
+        text_frontend: bool = True,
+    ) -> Iterator[dict[str, Any]]:
+        self.calls.append(
+            {
+                "mode": "instruct2",
+                "tts_text": tts_text,
+                "instruct_text": instruct_text,
+                "prompt_wav": prompt_wav,
+                "zero_shot_spk_id": zero_shot_spk_id,
+                "stream": stream,
+            }
+        )
+        yield from ({"tts_speech": o} for o in self._outs)
+
 
 def _stub_engine(
     outs: list[Any],
@@ -254,6 +276,22 @@ async def test_synthesize_empty_output_yields_eof_frame() -> None:
     engine = _stub_engine([])
     chunks = await _collect(engine, "x", BUILTIN_DEFAULT_VOICE)
     assert chunks == [AudioChunk(data=b"", seq=0, is_final=True)]
+
+
+async def test_instruction_uses_instruct2_and_resets() -> None:
+    """R2b 2b.6：设置情绪指令后走 inference_instruct2；复位后回到默认 zero_shot。"""
+    engine = _stub_engine([np.full((1, 2), 0.5, dtype=np.float32)])
+
+    engine.set_instruction("用温柔、放慢一点的语气。")
+    await _collect(engine, "你好", BUILTIN_DEFAULT_VOICE)
+    vendored = engine._engine
+    assert isinstance(vendored, _FakeVendored)
+    assert vendored.calls[0]["mode"] == "instruct2"
+    assert vendored.calls[0]["instruct_text"] == "用温柔、放慢一点的语气。"
+
+    engine.set_instruction(None)
+    await _collect(engine, "再见", BUILTIN_DEFAULT_VOICE)
+    assert vendored.calls[1]["mode"] == "zero_shot"
 
 
 async def test_synthesize_unknown_voice_raises() -> None:

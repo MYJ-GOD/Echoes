@@ -178,6 +178,64 @@ class MemoryRepo:
             last_seen_at=now,
         )
 
+    def merge(
+        self,
+        old_ids: Sequence[str],
+        *,
+        fact_id: str,
+        fact: str,
+        category: str,
+        embedding: Sequence[float],
+        now: float,
+        profile_id: str = "default",
+    ) -> MemoryFact:
+        """把多条活跃事实合并成一条（R3b 记忆写接口）。
+
+        全部旧行标 `superseded_by = 新 id`（历史保留、检索只走新行）；
+        任一旧 id 不存在/已删除/已被取代 → 整笔回滚，不做部分合并。
+        """
+        ids = [old_id for old_id in old_ids if old_id]
+        if len(ids) < 2:
+            raise EchoesError(ErrorCode.STORAGE_ERROR, "合并至少需要两条旧事实")
+        if category not in CATEGORIES:
+            raise EchoesError(
+                ErrorCode.STORAGE_ERROR,
+                f"未知记忆类别 {category!r}（5.1：{'/'.join(sorted(CATEGORIES))}）",
+            )
+        payload = serialize_vector(embedding)
+        placeholders = ", ".join("?" for _ in ids)
+        with _guard(self._conn, "合并记忆"):
+            cursor = self._conn.execute(
+                f"UPDATE memory_fact SET superseded_by = ? WHERE id IN ({placeholders})"
+                " AND superseded_by IS NULL AND deleted = 0",
+                (fact_id, *ids),
+            )
+            if cursor.rowcount != len(ids):
+                raise EchoesError(
+                    ErrorCode.STORAGE_ERROR,
+                    "合并失败：有条目不存在、已删除或已被取代（整笔回滚）",
+                )
+            self._conn.execute(
+                "INSERT INTO memory_fact"
+                f" ({self._COLUMNS}) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, NULL, 0)",
+                (fact_id, profile_id, fact, category, now, now),
+            )
+            self._conn.execute(
+                "INSERT INTO memory_vec (fact_id, embedding) VALUES (?, ?)",
+                (fact_id, payload),
+            )
+            self._conn.commit()
+        return MemoryFact(
+            id=fact_id,
+            profile_id=profile_id,
+            fact=fact,
+            category=category,
+            source_session_id=None,
+            source_turn=None,
+            created_at=now,
+            last_seen_at=now,
+        )
+
     def touch(self, fact_id: str, *, now: float) -> None:
         """再次提到同一事实：刷新 last_seen_at（不新增行）。"""
         with _guard(self._conn, "刷新记忆时间"):
@@ -199,6 +257,35 @@ class MemoryRepo:
         if cursor.rowcount == 0:
             raise EchoesError(ErrorCode.STORAGE_ERROR, f"记忆不存在：{fact_id}")
 
+    def purge_deleted_vectors(self) -> int:
+        """清掉已软删事实遗留的向量（16.2：删除即不可检索）。
+
+        壳侧删除只做 `deleted = 1`（Rust 连接没有 sqlite-vec 扩展），向量由这里
+        在启动清洗时统一删；检索的 JOIN 已过滤 deleted=1，所以删除立刻不可召回，
+        这里只负责不把语义指纹留在盘上。
+
+        返回真正清掉向量的行数（vec0 的 DELETE rowcount 不可靠，用点查询先数）。
+        """
+        with _guard(self._conn, "清理已删记忆向量"):
+            ids = [
+                str(row[0])
+                for row in self._conn.execute(
+                    "SELECT id FROM memory_fact WHERE deleted = 1"
+                ).fetchall()
+            ]
+            removed = 0
+            for fact_id in ids:
+                present = self._conn.execute(
+                    "SELECT count(*) FROM memory_vec WHERE fact_id = ?", (fact_id,)
+                ).fetchone()
+                if present is not None and int(present[0]) > 0:
+                    self._conn.execute(
+                        "DELETE FROM memory_vec WHERE fact_id = ?", (fact_id,)
+                    )
+                    removed += 1
+            self._conn.commit()
+        return removed
+
     # ------------------------------ 读 ------------------------------
 
     def get(self, fact_id: str) -> MemoryFact | None:
@@ -216,6 +303,13 @@ class MemoryRepo:
             (profile_id, limit),
         ).fetchall()
         return [_fact_from_row(row) for row in rows]
+
+    def active_texts(self) -> set[str]:
+        """全部生效事实的原文（批量导入去重用；不分页）。"""
+        rows = self._conn.execute(
+            "SELECT fact FROM memory_fact WHERE deleted = 0 AND superseded_by IS NULL"
+        ).fetchall()
+        return {str(row[0]).strip() for row in rows}
 
     def search(
         self, embedding: Sequence[float], *, k: int = 5, profile_id: str = "default"
@@ -242,12 +336,19 @@ class MemoryRepo:
 
 @contextmanager
 def _guard(conn: sqlite3.Connection, action: str) -> Iterator[None]:
-    """sqlite3 错误 → STORAGE_ERROR（含回滚），上层不见裸异常（同 repo.py 口径）。"""
+    """sqlite3 错误 → STORAGE_ERROR（含回滚），上层不见裸异常（同 repo.py 口径）。
+
+    业务错误（EchoesError）也回滚：merge 这类「先改多行、再校验」的写法必须在
+    失败时整笔撤销，不能把半截更新留在事务里。
+    """
     try:
         yield
     except sqlite3.Error as exc:
         conn.rollback()
         raise EchoesError(ErrorCode.STORAGE_ERROR, f"{action}失败：{exc}") from exc
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def _fact_from_row(row: sqlite3.Row) -> MemoryFact:

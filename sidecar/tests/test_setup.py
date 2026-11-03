@@ -128,6 +128,19 @@ def test_unknown_model_id_is_reported_not_raised(tmp_path: Path) -> None:
     assert result == {"nope": "未知模型"}
 
 
+def test_as_dict_speaks_camel_case_to_the_shell(tmp_path: Path) -> None:
+    """前端 `ipc.ts::SetupReport` 读 camelCase：snake_case 会让向导渲染时崩掉。"""
+    payload = setup.as_dict(_report(tmp_path))
+    assert "missingModels" in payload and "recommendedProfile" in payload
+    assert "diskFreeGb" in payload and "needsRuntime" in payload
+    assert not [key for key in payload if "_" in key]
+    # 嵌套层（gpu / ollama）同样转；models 的键是模型 id，不能被改
+    assert payload["gpu"] is None or "vramGb" in payload["gpu"]
+    assert "reachable" in payload["ollama"]
+    assert set(payload["models"]) <= set(setup.REQUIRED_MODELS)
+
+
+
 def test_json_line_keeps_chinese_readable() -> None:
     line = setup.json_line({"type": "progress", "item": "音色"})
     assert "音色" in line

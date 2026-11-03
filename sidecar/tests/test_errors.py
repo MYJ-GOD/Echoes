@@ -6,7 +6,12 @@ from echoes_sidecar.core.errors import CloneError, EchoesError, ErrorCode
 
 def test_error_code_values_are_frozen_list() -> None:
     """code 值域经 test_ipc_schema 单测锁定；此处锁定枚举数量不增不减。"""
-    assert len(ErrorCode) == 15
+    assert len(ErrorCode) == 16
+
+
+def test_history_write_failure_has_dedicated_code() -> None:
+    """原文写入失败不能伪装成普通 STORAGE_ERROR；UI 要能单独提示「未保存」。"""
+    assert ErrorCode.HISTORY_WRITE_FAILED.value == "HISTORY_WRITE_FAILED"
 
 
 def test_clone_error_carries_code_and_cancellation() -> None:

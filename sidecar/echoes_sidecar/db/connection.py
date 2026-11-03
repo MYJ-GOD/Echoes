@@ -12,8 +12,11 @@
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import json
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -157,19 +160,56 @@ def apply_migrations(conn: sqlite3.Connection, directory: Path | None = None) ->
             "请升级应用，或备份后重建数据目录（14.2 不符引导，不做静默降级）",
         )
 
-    for migration in migrations:
-        if migration.version <= current:
-            continue
-        if migration.requires is not None and not _module_available(migration.requires):
+    pending = [migration for migration in migrations if migration.version > current]
+    if not pending:
+        return current
+
+    # 0004 需要 DROP TABLE voice，而 session.voice_id 引用它；外键必须在事务外关闭。
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+    except sqlite3.Error as exc:
+        raise EchoesError(ErrorCode.STORAGE_ERROR, f"关闭外键检查失败：{exc}") from exc
+
+    try:
+        for migration in pending:
+            if migration.requires is not None and not _module_available(migration.requires):
+                raise EchoesError(
+                    ErrorCode.STORAGE_ERROR,
+                    f"迁移 {migration.version:04d}_{migration.name} 需要扩展 "
+                    f"{migration.requires}，当前环境未安装（阶段依赖未就位）",
+                )
+            _run_migration(conn, migration)
+            current = migration.version
+
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            first = violations[0]
             raise EchoesError(
                 ErrorCode.STORAGE_ERROR,
-                f"迁移 {migration.version:04d}_{migration.name} 需要扩展 "
-                f"{migration.requires}，当前环境未安装（阶段依赖未就位）",
+                f"迁移后外键校验失败：{tuple(first)}",
             )
-        _run_migration(conn, migration)
-        current = migration.version
-
-    return current
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'turn_fts'"
+        ).fetchone():
+            try:
+                conn.execute("INSERT INTO turn_fts(turn_fts) VALUES('integrity-check')")
+            except sqlite3.Error as exc:
+                raise EchoesError(
+                    ErrorCode.STORAGE_ERROR, f"turn_fts 完整性校验失败：{exc}"
+                ) from exc
+        return current
+    finally:
+        # 迁移失败也要恢复连接的不变式；PRAGMA foreign_keys 在事务内是 no-op，
+        # 先提交/回滚掉残留事务，再恢复 FK=ON。
+        try:
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")
+        except sqlite3.Error:
+            try:
+                conn.rollback()
+                conn.execute("PRAGMA foreign_keys = ON")
+            except sqlite3.Error:
+                pass
 
 
 def _run_migration(conn: sqlite3.Connection, migration: Migration) -> None:
@@ -180,9 +220,11 @@ def _run_migration(conn: sqlite3.Connection, migration: Migration) -> None:
     last_error: sqlite3.Error | None = None
     for attempt in range(_MIGRATION_ATTEMPTS):
         try:
-            conn.executescript(migration.sql)
-            conn.execute(f"PRAGMA user_version = {migration.version}")
-            conn.commit()
+            # 整条迁移（DDL + user_version）同事务提交；失败回滚后不会留下半张表。
+            conn.executescript(
+                f"BEGIN IMMEDIATE;\n{migration.sql}\n"
+                f"PRAGMA user_version = {migration.version};\nCOMMIT;"
+            )
             return
         except sqlite3.Error as exc:
             last_error = exc
@@ -222,6 +264,100 @@ def _load_vec_extension(conn: sqlite3.Connection) -> None:
         conn.enable_load_extension(False)
 
 
+def _data_root(db_file: Path) -> Path:
+    """标准布局 <root>/db/echoes.db 返回 <root>；测试直连文件时返回父目录。"""
+    return db_file.parent.parent if db_file.parent.name == "db" else db_file.parent
+
+
+def _backup_dir(db_file: Path) -> Path:
+    return _data_root(db_file) / "backup"
+
+
+def _backup_before_migrations(
+    conn: sqlite3.Connection,
+    db_file: Path,
+    migrations_dir: Path | None = None,
+    *,
+    was_existing: bool,
+) -> Path | None:
+    """存在待执行迁移时先 VACUUM INTO；新库/已最新不备份。"""
+    if not was_existing or not db_file.is_file() or db_file.stat().st_size == 0:
+        return None
+    migrations = load_migrations(migrations_dir)
+    latest = migrations[-1].version if migrations else 0
+    current = _current_version(conn)
+    if current >= latest:
+        return None
+
+    size = db_file.stat().st_size
+    free = shutil.disk_usage(db_file.parent).free
+    if free < size * 1.2:
+        raise EchoesError(
+            ErrorCode.STORAGE_ERROR,
+            f"备份空间不足：需要约 {size * 1.2:.0f} 字节，剩余 {free} 字节；"
+            "已拒绝迁移，旧库保持不变",
+        )
+
+    directory = _backup_dir(db_file)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise EchoesError(
+            ErrorCode.STORAGE_ERROR,
+            f"无法创建备份目录：{directory}（{exc}）",
+        ) from exc
+
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    target = directory / f"v{latest}-{stamp}-{time.time_ns() % 1_000_000:06d}.db"
+    escaped = str(target).replace("'", "''")
+    try:
+        conn.execute(f"VACUUM INTO '{escaped}'")
+    except sqlite3.Error as exc:
+        raise EchoesError(ErrorCode.STORAGE_ERROR, f"迁移前备份失败：{target}（{exc}）") from exc
+    return target
+
+
+def _prune_backups(db_file: Path, keep: int = 3) -> None:
+    directory = _backup_dir(db_file)
+    if not directory.is_dir():
+        return
+    backups = sorted(
+        directory.glob("v*.db"), key=lambda path: path.stat().st_mtime, reverse=True
+    )
+    for old in backups[keep:]:
+        with contextlib.suppress(OSError):
+            old.unlink()
+
+
+def _clear_recovery_marker(db_file: Path) -> None:
+    with contextlib.suppress(OSError):
+        (_data_root(db_file) / "migration_failed.json").unlink()
+
+
+def _write_recovery_marker(db_file: Path, error: str) -> None:
+    marker = _data_root(db_file) / "migration_failed.json"
+    try:
+        probe = sqlite3.connect(db_file)
+        try:
+            version = _current_version(probe)
+        finally:
+            probe.close()
+        marker.write_text(
+            json.dumps(
+                {
+                    "user_version": version,
+                    "error": error,
+                    "at": time.time(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except (OSError, sqlite3.Error):
+        pass
+
+
 def connect(db_file: Path, *, migrations_dir: Path | None = None) -> sqlite3.Connection:
     """打开（必要时创建）数据库并应用迁移；失败一律映射 STORAGE_ERROR（3.4.1）。"""
     try:
@@ -231,6 +367,7 @@ def connect(db_file: Path, *, migrations_dir: Path | None = None) -> sqlite3.Con
             ErrorCode.STORAGE_ERROR, f"无法创建数据库目录：{db_file.parent}（{exc}）"
         ) from exc
 
+    was_existing = db_file.is_file() and db_file.stat().st_size > 0
     try:
         conn = sqlite3.connect(
             db_file,
@@ -248,11 +385,16 @@ def connect(db_file: Path, *, migrations_dir: Path | None = None) -> sqlite3.Con
     try:
         _apply_pragmas(conn)
         _load_vec_extension(conn)
+        _backup_before_migrations(conn, db_file, migrations_dir, was_existing=was_existing)
         apply_migrations(conn, migrations_dir)
-    except EchoesError:
+        _prune_backups(db_file, keep=3)
+        _clear_recovery_marker(db_file)
+    except EchoesError as exc:
+        _write_recovery_marker(db_file, str(exc))
         conn.close()
         raise
     except sqlite3.Error as exc:
+        _write_recovery_marker(db_file, str(exc))
         conn.close()
         raise EchoesError(
             ErrorCode.STORAGE_ERROR, f"数据库初始化失败：{db_file}（{exc}）"

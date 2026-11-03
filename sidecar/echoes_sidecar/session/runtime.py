@@ -20,10 +20,21 @@ SETTING_BASE_URL = "llm_base_url"
 SETTING_PRIVACY = "privacy_mode"
 SETTING_PERSONA_NAME = "persona_name"
 SETTING_PERSONA_PROMPT = "persona_system_prompt"
+# R2a 2.5：语音链（ASR/TTS）也走拉取语义
+SETTING_ASR_PROVIDER = "asr_provider"
+SETTING_ASR_MODEL = "asr_model"
+SETTING_ASR_BASE_URL = "asr_base_url"
+SETTING_TTS_PROVIDER = "tts_provider"
+SETTING_TTS_MODEL = "tts_model"
+SETTING_TTS_BASE_URL = "tts_base_url"
 
 DEFAULT_PROVIDER = "ollama"
 DEFAULT_MODEL = "qwen3:8b"
 PROVIDERS = frozenset({"mock", "ollama", "openai"})
+DEFAULT_ASR_PROVIDER = "whisper"
+ASR_PROVIDERS = frozenset({"mock", "whisper", "openai"})
+DEFAULT_TTS_PROVIDER = "cosyvoice2"
+TTS_PROVIDERS = frozenset({"mock", "cosyvoice2", "openai"})
 
 
 @dataclass(frozen=True)
@@ -36,6 +47,12 @@ class RuntimeSettings:
     persona_name: str | None
     persona_system_prompt: str | None
     base_url: str | None = None
+    asr_provider: str | None = None
+    asr_model: str | None = None
+    asr_base_url: str | None = None
+    tts_provider: str | None = None
+    tts_model: str | None = None
+    tts_base_url: str | None = None
 
 
 def load_runtime_settings(storage: Storage) -> RuntimeSettings:
@@ -43,6 +60,8 @@ def load_runtime_settings(storage: Storage) -> RuntimeSettings:
     provider = _text(storage.settings.get(SETTING_PROVIDER))
     model = _text(storage.settings.get(SETTING_MODEL))
     base_url = _text(storage.settings.get(SETTING_BASE_URL))
+    asr_provider = _text(storage.settings.get(SETTING_ASR_PROVIDER))
+    tts_provider = _text(storage.settings.get(SETTING_TTS_PROVIDER))
     privacy = storage.settings.get(SETTING_PRIVACY)
     return RuntimeSettings(
         provider=provider if provider in PROVIDERS else None,
@@ -51,6 +70,14 @@ def load_runtime_settings(storage: Storage) -> RuntimeSettings:
         persona_name=_text(storage.settings.get(SETTING_PERSONA_NAME)),
         persona_system_prompt=_text(storage.settings.get(SETTING_PERSONA_PROMPT)),
         base_url=base_url,
+        asr_provider=asr_provider if asr_provider in ASR_PROVIDERS else None,
+        asr_model=_text(storage.settings.get(SETTING_ASR_MODEL)),
+        asr_base_url=_text(storage.settings.get(SETTING_ASR_BASE_URL)),
+        tts_provider=(
+            tts_provider if tts_provider in TTS_PROVIDERS else None
+        ),
+        tts_model=_text(storage.settings.get(SETTING_TTS_MODEL)),
+        tts_base_url=_text(storage.settings.get(SETTING_TTS_BASE_URL)),
     )
 
 
@@ -62,15 +89,25 @@ def _text(value: object | None) -> str | None:
 
 
 __all__ = [
+    "ASR_PROVIDERS",
+    "DEFAULT_ASR_PROVIDER",
     "DEFAULT_MODEL",
     "DEFAULT_PROVIDER",
+    "DEFAULT_TTS_PROVIDER",
     "PROVIDERS",
     "RuntimeSettings",
+    "SETTING_ASR_BASE_URL",
+    "SETTING_ASR_MODEL",
+    "SETTING_ASR_PROVIDER",
     "SETTING_BASE_URL",
     "SETTING_MODEL",
     "SETTING_PERSONA_NAME",
     "SETTING_PERSONA_PROMPT",
     "SETTING_PRIVACY",
     "SETTING_PROVIDER",
+    "SETTING_TTS_BASE_URL",
+    "SETTING_TTS_MODEL",
+    "SETTING_TTS_PROVIDER",
+    "TTS_PROVIDERS",
     "load_runtime_settings",
 ]

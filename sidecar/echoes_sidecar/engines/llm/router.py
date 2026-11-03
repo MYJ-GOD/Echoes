@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Callable
 
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.engines.llm.base import LLMProvider
+from echoes_sidecar.engines.llm.openai_compat import is_loopback
 
 # provider/model/base_url 三者任一变化都要重建（base_url 只对 openai 有意义）
 ProviderFactory = Callable[[str, str, "str | None"], LLMProvider]
@@ -39,12 +40,17 @@ class ProviderRouter(LLMProvider):
         self._provider_name = provider
         self._model = model
         self._base_url = base_url
-        self._allow_cloud = True
+        # 启动期还不知道隐私设置：每轮 apply() 重新判定（3.4 拉取语义）
         self._blocked = False
 
     @property
     def name(self) -> str:
         return self._provider.name
+
+    @property
+    def current(self) -> tuple[str, str]:
+        """(provider, model)：hello 里回报 active_*（R2a 2.5）。"""
+        return self._provider_name, self._model
 
     async def health(self) -> bool:
         return await self._provider.health()
@@ -77,8 +83,11 @@ class ProviderRouter(LLMProvider):
     ) -> None:
         """配置变了才重建；未知 provider 保持当前并记 stderr。
 
-        `allow_cloud=False`（隐私模式）时，云端 provider 不重建也不放行：`generate`
-        直接报错。这是「报错不降级」——偷偷退回本地会把用户的隐私选择变成假的。
+        `allow_cloud=False`（隐私模式）时只拦「会出网」的组合：`openai` + 公网地址。
+        `openai` + 环回地址不出网（LM Studio / vLLM / Ollama `/v1`），按 ADR-016 §3
+        矩阵照常放行——把本机端点也拒掉，等于让隐私模式用户失去本地兼容端点。
+        公网被拦时 `generate` 直接报错，**不静默退回本地**——那会把用户的隐私选择
+        变成假的。
         """
         target_provider = provider or self._provider_name
         target_model = model or self._model
@@ -89,11 +98,15 @@ class ProviderRouter(LLMProvider):
                 file=sys.stderr,
             )
             return
-        self._allow_cloud = allow_cloud
-        self._blocked = target_provider == "openai" and not allow_cloud
+        self._blocked = (
+            target_provider == "openai"
+            and not allow_cloud
+            and not is_loopback(target_base)
+        )
         if self._blocked:
             print(
-                "[sidecar] 隐私模式开启：云端 LLM 已在设置页被选中，turn 将报错",
+                "[sidecar] 隐私模式开启：云端 LLM 已在设置页被选中，turn 将报错"
+                "（本机环回端点不受此限）",
                 file=sys.stderr,
             )
         if (target_provider, target_model, target_base) == (

@@ -6,6 +6,7 @@
 - `paths.py`：数据目录解析与可写性自检（5.3/14.3）；
 - `repo.py`：persona / voice / session / setting 最小 CRUD 与 `Storage` 门面。
 """
+from echoes_sidecar.db.chunk_repo import ChunkHit, ChunkRepo
 from echoes_sidecar.db.connection import (
     Migration,
     apply_migrations,
@@ -21,11 +22,15 @@ from echoes_sidecar.db.repo import (
     SessionSummary,
     SettingRepo,
     Storage,
+    TurnRepo,
+    TurnRow,
     VoiceRepo,
     VoiceRow,
 )
 
 __all__ = [
+    "ChunkHit",
+    "ChunkRepo",
     "DataPaths",
     "Migration",
     "PersonaRepo",
@@ -34,6 +39,8 @@ __all__ = [
     "SessionSummary",
     "SettingRepo",
     "Storage",
+    "TurnRepo",
+    "TurnRow",
     "VoiceRepo",
     "VoiceRow",
     "apply_migrations",

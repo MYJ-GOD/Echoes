@@ -50,3 +50,6 @@
 {"id": "event-08", "transcript": "用户：我在准备一个很重要的考试。", "active": [], "expected": [{"fact": "用户在准备一个重要考试", "category": "event"}]}
 {"id": "identity-12", "transcript": "用户：我住在杭州。", "active": [], "expected": [{"fact": "用户住在杭州", "category": "identity"}]}
 {"id": "other-02", "transcript": "用户：我不太会用电脑。", "active": [], "expected": [{"fact": "用户不太会用电脑", "category": "other"}]}
+{"id": "neg-01", "transcript": "用户：今天天气不错啊。助手：是呀，适合出门走走。", "active": [], "expected": []}
+{"id": "neg-02", "transcript": "用户：帮我查一下明天下午三点开会。助手：好的，记下了。", "active": [], "expected": []}
+{"id": "neg-03", "transcript": "用户：嗯嗯，好的好的。助手：那我先不打扰你了。", "active": [], "expected": []}

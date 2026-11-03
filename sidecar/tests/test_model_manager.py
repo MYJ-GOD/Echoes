@@ -45,7 +45,15 @@ def _entry(
 def test_default_manifest_has_core_models() -> None:
     entries = load_manifest()
     ids = {entry.id for entry in entries}
-    assert {"bge-small-zh-v1.5", "cosyvoice2-0.5b", "faster-whisper-small", "qwen3-8b"} <= ids
+    assert {
+        "bge-small-zh-v1.5",
+        "cosyvoice2-0.5b",
+        "faster-whisper-small",
+        "faster-whisper-tiny",
+        "faster-whisper-base",
+        "bge-reranker-base",
+        "qwen3-8b",
+    } <= ids
     assert all(entry.sources for entry in entries if entry.kind != "ollama")
 
 

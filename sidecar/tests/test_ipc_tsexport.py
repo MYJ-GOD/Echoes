@@ -22,7 +22,8 @@ _GENERATED = Path(__file__).resolve().parents[2] / "src" / "lib" / "ipc_types.ts
 def test_all_messages_are_classified_by_direction() -> None:
     """新增消息必须显式登记方向（3.4）：未分类即报错，不允许默认当事件发出去。"""
     models = tsexport.message_models()
-    assert len(models) == 12
+    # 数量不是契约，但消息集合变化应是显式修改（当前 12 条 + R4 retry = 13）
+    assert len(models) == 13
     for model in models:
         assert tsexport._direction(model) in {"shell", "sidecar"}
 

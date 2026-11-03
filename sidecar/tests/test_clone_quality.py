@@ -8,10 +8,13 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from echoes_sidecar.core.errors import EchoesError, ErrorCode
 from echoes_sidecar.core.types import AudioChunk, VoiceStatus
 from echoes_sidecar.db import Storage
 from echoes_sidecar.engines.tts.base import TTSEngine
+from echoes_sidecar.engines.tts.mock import MockTTSEngine
 from echoes_sidecar.orchestration.clone import CloneService
 from echoes_sidecar.session.session import Session
 from echoes_sidecar.transport.base import Transport
@@ -49,6 +52,10 @@ class QualityTTS(TTSEngine):
         self.sample_len = 0
         self.synth_len = 0
 
+    @property
+    def supports_similarity_check(self) -> bool:
+        return True
+
     async def synthesize(self, text: str, voice_id: str) -> AsyncIterator[AudioChunk]:
         _ = (text, voice_id)
         self.synth_calls += 1
@@ -64,10 +71,20 @@ class QualityTTS(TTSEngine):
         return self.score
 
 
-class NoQualityTTS(QualityTTS):
-    """没有 speaker_similarity 的引擎（mock 形态）：跳过质检。"""
+class NoQualityTTS(TTSEngine):
+    """没有质检能力的引擎（mock 形态）：能力位默认 False → 跳过质检。"""
 
-    speaker_similarity = None  # type: ignore[assignment]
+    def __init__(self) -> None:
+        self.synth_calls = 0
+
+    async def synthesize(self, text: str, voice_id: str) -> AsyncIterator[AudioChunk]:
+        _ = (text, voice_id)
+        self.synth_calls += 1
+        yield AudioChunk(data=b"\x00\x00" * 2400, seq=0, is_final=True)
+
+    async def clone(self, sample: Any) -> str:
+        _ = sample
+        return "clone:plain"
 
 
 class ExplodingSynthTTS(QualityTTS):
@@ -174,7 +191,7 @@ async def test_low_similarity_marks_failed_and_does_not_bind(tmp_path: Path) -> 
 async def test_engine_without_scorer_skips_quality(tmp_path: Path) -> None:
     storage, session, assets = _setup(tmp_path)
     transport = _Transport()
-    tts = NoQualityTTS(0.0, voice_id="clone:plain")
+    tts = NoQualityTTS()
     try:
         ok = await _service(storage, session, assets, transport, tts).run(_tone(3.5))
         assert ok is True
@@ -220,5 +237,44 @@ async def test_non_finite_score_marks_failed(tmp_path: Path) -> None:
         assert [msg["code"] for msg in _errors(transport.sent)] == [
             "CLONE_ENGINE_FAILED"
         ]
+    finally:
+        storage.close()
+
+
+async def test_capability_flag_is_the_only_source_of_truth() -> None:
+    """4.5 v1.4.4：质检能力靠能力位，不靠 getattr 探测。
+
+    两件事必须同时成立，否则「质检悄悄消失」或「假通过」会重新长回来：
+    1. 默认能力位为假（mock 引擎与纯合成引擎不该被当成能质检）；
+    2. 能力位说假却仍被调用时报错，而不是静默返回 0。
+    """
+    assert MockTTSEngine().supports_similarity_check is False
+    assert NoQualityTTS().supports_similarity_check is False
+
+    with pytest.raises(NotImplementedError):
+        await NoQualityTTS().speaker_similarity(b"\x00\x00", b"\x00\x00")
+
+
+async def test_display_name_uses_max_index_not_row_count(tmp_path: Path) -> None:
+    """自动命名取「已用最大编号 +1」：删过行后不能回落到重名（5.1/2.4）。"""
+    storage, session, assets = _setup(tmp_path)
+    now = time.time()
+    for voice_id, name in (("v1", "音色 1"), ("v3", "音色 3")):
+        storage.voices.insert_training(
+            voice_id=voice_id,
+            display_name=name,
+            sample_path=f"voices/{voice_id}.wav",
+            now=now,
+        )
+    transport = _Transport()
+    try:
+        ok = await _service(storage, session, assets, transport, QualityTTS(0.9)).run(
+            _tone(3.5)
+        )
+        assert ok is True
+        row = storage.voices.get("clone:quality")
+        assert row is not None
+        # 只有 2 行，但已用编号到 3 → 下一个是 音色 4（不是 音色 3）
+        assert row.display_name == "音色 4"
     finally:
         storage.close()

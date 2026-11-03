@@ -43,7 +43,7 @@ class OpenAICompatibleLLM(LLMProvider):
         self.model = model
         self._api_key = api_key
         self._key_provider = key_provider
-        self._cloud = not _is_loopback(base_url)
+        self._cloud = not is_loopback(base_url)
         self._client = httpx.AsyncClient(
             base_url=base_url.strip().rstrip("/"),
             transport=transport,
@@ -219,8 +219,14 @@ def _transport_error(exc: httpx.HTTPError) -> EchoesError:
     )
 
 
-def _is_loopback(base_url: str) -> bool:
-    """本机端点判定：LM Studio/vLLM/Ollama `/v1` 不该被当成出网。"""
+def is_loopback(base_url: str | None) -> bool:
+    """本机端点判定：LM Studio/vLLM/Ollama `/v1` 不该被当成出网。
+
+    ADR-016 §3 隐私矩阵的判据之一：`openai` + 环回地址在隐私模式下**允许**
+    （不出网）；空值/解析失败按出网处理（保守，宁拒勿放）。
+    """
+    if not base_url:
+        return False
     try:
         host = httpx.URL(base_url).host
     except Exception:  # noqa: BLE001  解析不了就按出网处理（保守）
@@ -228,4 +234,4 @@ def _is_loopback(base_url: str) -> bool:
     return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
-__all__ = ["OpenAICompatibleLLM"]
+__all__ = ["OpenAICompatibleLLM", "is_loopback"]

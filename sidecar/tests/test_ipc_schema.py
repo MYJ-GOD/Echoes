@@ -65,8 +65,8 @@ def test_unknown_fields_ignored() -> None:
     assert msg.text == "在吗？"
 
 
-def test_error_codes_total_15() -> None:
-    """3.4.1 权威错误码共 15 条；只追加、不重命名、不复用（ADR-016 追加 LLM_KEY_MISSING）。"""
+def test_error_codes_total_16() -> None:
+    """3.4.1 权威错误码共 16 条；只追加、不重命名、不复用（R1a 追加 HISTORY_WRITE_FAILED）。"""
     assert {code.value for code in ErrorCode} == {
         "SAMPLE_TOO_SHORT",
         "SAMPLE_TOO_NOISY",
@@ -81,6 +81,7 @@ def test_error_codes_total_15() -> None:
         "ASR_ENGINE_ERROR",
         "TTS_ENGINE_ERROR",
         "STORAGE_ERROR",
+        "HISTORY_WRITE_FAILED",
         "PROTOCOL_MISMATCH",
         "INTERNAL_ERROR",
     }

@@ -25,10 +25,16 @@ class _Msg(BaseModel):
 
 
 class EngineState(_Msg):
-    """hello.engines 条目；就绪变化时重发 hello（3.4 v1.4 分级就绪载体）。"""
+    """hello.engines 条目；就绪变化时重发 hello（3.4 v1.4 分级就绪载体）。
+
+    `provider` / `model` 是 R2a 2.5 的 active_* 回报：设置页据此显示「实际生效」，
+    而不是只显示「目标值」（2.12 路径可见性）。
+    """
 
     name: str
     ready: bool
+    provider: str | None = None
+    model: str | None = None
 
 
 class HelloMsg(_Msg):
@@ -129,7 +135,7 @@ class ControlMsg(_Msg):
     """
 
     type: Literal["control"] = "control"
-    action: Literal["interrupt", "cancel_turn"]
+    action: Literal["interrupt", "cancel_turn", "open_session"]
     session_id: str
     turn_seq: int | None = None
 
@@ -140,6 +146,19 @@ class UserTextMsg(_Msg):
     type: Literal["user_text"] = "user_text"
     session_id: str
     text: str
+
+
+class RetryMsg(_Msg):
+    """重说 / 编辑上一条（R4 4.4/4.5）：append-only 重跑一轮。
+
+    `text=None` = 重说（沿用上一轮 user_text）；给了 `text` = 编辑上一条。
+    sidecar 新建 turn，旧 turn 由编排层写 `superseded_by`（失败不取代）。
+    不复用 `user_text`：语义不同——重说不能把原文再追加一条用户气泡。
+    """
+
+    type: Literal["retry"] = "retry"
+    session_id: str
+    text: str | None = None
 
 
 class CloneStartMsg(_Msg):
@@ -171,6 +190,7 @@ Message = Annotated[
     | StateMsg
     | ControlMsg
     | UserTextMsg
+    | RetryMsg
     | CloneStartMsg
     | CloneCancelMsg,
     Field(discriminator="type"),

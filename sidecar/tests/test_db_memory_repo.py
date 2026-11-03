@@ -193,3 +193,76 @@ def test_memory_survives_reopen(tmp_path: Path) -> None:
         assert [f.id for f in reopened.memories.search(_vec(1.0), k=5)] == ["m1"]
     finally:
         reopened.close()
+
+
+def test_purge_deleted_vectors_removes_only_deleted(tmp_path: Path) -> None:
+    """壳侧软删（只标 deleted=1）后，sidecar 启动清洗把向量真删。"""
+    storage = _storage(tmp_path)
+    repo = storage.memories
+    _insert(repo, "keep", "保留")
+    _insert(repo, "gone", "删除")
+    # 模拟壳侧删除：只改标记，不动 memory_vec（Rust 连接没有 sqlite-vec）
+    storage.conn.execute("UPDATE memory_fact SET deleted = 1 WHERE id = 'gone'")
+    storage.conn.commit()
+
+    assert repo.purge_deleted_vectors() == 1
+    # 幂等：第二次没有可删的向量
+    assert repo.purge_deleted_vectors() == 0
+    assert [f.id for f in repo.search(_vec(1.0), k=5)] == ["keep"]
+
+
+def test_merge_supersedes_all_old_and_keeps_history(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    repo = storage.memories
+    _insert(repo, "m1", "喜欢猫")
+    _insert(repo, "m2", "喜欢狗")
+
+    merged = repo.merge(
+        ["m1", "m2"],
+        fact_id="m3",
+        fact="喜欢小动物",
+        category="preference",
+        embedding=_vec(1.0),
+        now=200.0,
+    )
+
+    assert merged.id == "m3"
+    assert [f.id for f in repo.list_active()] == ["m3"]
+    assert repo.get("m1").superseded_by == "m3"
+    assert repo.get("m2").superseded_by == "m3"
+    assert repo.get("m1").deleted is False, "合并是取代，不是删除"
+
+
+def test_merge_rolls_back_when_any_id_is_missing(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    repo = storage.memories
+    _insert(repo, "m1", "喜欢猫")
+
+    with pytest.raises(EchoesError):
+        repo.merge(
+            ["m1", "ghost"],
+            fact_id="m3",
+            fact="喜欢小动物",
+            category="preference",
+            embedding=_vec(1.0),
+            now=200.0,
+        )
+
+    assert repo.get("m3") is None
+    assert repo.get("m1").superseded_by is None, "失败必须整笔回滚"
+    assert [f.id for f in repo.list_active()] == ["m1"]
+
+
+def test_merge_requires_two_ids(tmp_path: Path) -> None:
+    storage = _storage(tmp_path)
+    repo = storage.memories
+    _insert(repo, "m1", "喜欢猫")
+    with pytest.raises(EchoesError):
+        repo.merge(
+            ["m1"],
+            fact_id="m2",
+            fact="喜欢小动物",
+            category="preference",
+            embedding=_vec(1.0),
+            now=200.0,
+        )

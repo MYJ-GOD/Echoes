@@ -47,6 +47,43 @@
       "tier": "all"
     },
     {
+      "id": "faster-whisper-tiny",
+      "display_name": "faster-whisper tiny（ASR 最小档）",
+      "kind": "repo",
+      "target": "faster-whisper-tiny",
+      "required_files": ["config.json", "model.bin", "tokenizer.json"],
+      "sources": [
+        {"type": "huggingface", "id": "Systran/faster-whisper-tiny"}
+      ],
+      "size_mb": 75,
+      "tier": "all"
+    },
+    {
+      "id": "faster-whisper-base",
+      "display_name": "faster-whisper base（ASR 中间档）",
+      "kind": "repo",
+      "target": "faster-whisper-base",
+      "required_files": ["config.json", "model.bin", "tokenizer.json"],
+      "sources": [
+        {"type": "huggingface", "id": "Systran/faster-whisper-base"}
+      ],
+      "size_mb": 145,
+      "tier": "all"
+    },
+    {
+      "id": "bge-reranker-base",
+      "display_name": "bge-reranker-base（R3b 精排，可选）",
+      "kind": "repo",
+      "target": "bge-reranker-base",
+      "required_files": ["config.json", "tokenizer_config.json"],
+      "sources": [
+        {"type": "modelscope", "id": "BAAI/bge-reranker-base"},
+        {"type": "huggingface", "id": "BAAI/bge-reranker-base"}
+      ],
+      "size_mb": 1100,
+      "tier": "all"
+    },
+    {
       "id": "qwen3-8b",
       "display_name": "qwen3:8b（Ollama LLM）",
       "kind": "ollama",

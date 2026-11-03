@@ -7,6 +7,8 @@ dependencies = [
   "pydantic>=2.7,<3",
   "websockets>=12,<15",
   "httpx>=0.27,<2",
+  # R2a 2.14：云端 TTS 的 MP3/OGG(Opus) 解码（libsndfile 1.2，随轮子分发）
+  "soundfile==0.12.1",
   # 记忆向量索引（阶段 1 / ADR-006）：vec0 虚表由迁移 0002 建，迁移头声明 -- requires
   "sqlite-vec>=0.1.6",
   # ML 依赖 == 精确锁（15.1；实测装机版 2026-10-22）
@@ -26,6 +28,9 @@ dependencies = [
   "wetext==0.0.4",
   "x-transformers==2.11.24",
   "modelscope==1.20.0",
+  # 模型管理器直连 HF 镜像下载（models/manager.py 直接 import snapshot_download），
+  # 之前靠 transformers 传递引入——15.1 要求显式声明，不能靠运气
+  "huggingface-hub>=0.30,<1",
   "openai-whisper==20250625",   # 上游锚 20231117 的 setup.py 在 py3.13（PEP 667 locals 快照）下 build 必炸，升锁（ADR-014 修订）
   "soundfile==0.12.1",
   "tiktoken==0.14.0",            # 上游 requirements 漏声明而代码必需（冒烟经过确认）
@@ -42,6 +47,7 @@ dependencies = [
   "onnxruntime-gpu==1.22.0",
   "keyring>=25.7.0",
   "rich>=13,<16",
+  "jieba>=0.42.1",
 ]
 
 [project.optional-dependencies]
@@ -80,6 +86,7 @@ files = [
   "echoes_sidecar/orchestration",
   "echoes_sidecar/memory",
   "echoes_sidecar/models",
+  "echoes_sidecar/data_transfer.py",
   "echoes_sidecar/runtime.py",
   "echoes_sidecar/engines/asr/base.py",
   "echoes_sidecar/engines/tts/base.py",
@@ -133,16 +140,23 @@ layers = [
   "echoes_sidecar.core",
 ]
 
-# 3.2「组装归组合根」：编排只依赖引擎 ABC（engines.*.base），
-# 具体引擎实现（mock/未来 faster_whisper/cosyvoice2/ollama/cloud_api——阶段 0 落地时追加）
+# 3.2「组装归组合根」：编排只依赖引擎 ABC/Protocol，具体引擎实现一律不许 import。
+# 修复轮审计：原契约只列了 mock，真引擎（whisper/cosyvoice2/ollama/openai/router）
+# 落地后没有补进来——等于「阶段 0 落地时追加」这句注释没兑现，守护留了缺口。
 [[tool.importlinter.contracts]]
-name = "编排不 import 具体引擎（3.2，修复轮）"
+name = "编排不 import 具体引擎（3.2，v1.4.4 补齐真引擎）"
 type = "forbidden"
 source_modules = ["echoes_sidecar.orchestration"]
 forbidden_modules = [
   "echoes_sidecar.engines.asr.mock",
+  "echoes_sidecar.engines.asr.whisper",
   "echoes_sidecar.engines.tts.mock",
+  "echoes_sidecar.engines.tts.cosyvoice2",
   "echoes_sidecar.engines.llm.mock",
+  "echoes_sidecar.engines.llm.ollama",
+  "echoes_sidecar.engines.llm.openai_compat",
+  # router 也禁：多 provider 切换是「可选能力」，编排只认 base.RuntimeConfigurable
+  "echoes_sidecar.engines.llm.router",
 ]
 
 # ------------------------------ uv 项目锁（15.1；ADR-014） ------------------------------

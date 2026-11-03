@@ -32,7 +32,7 @@ from echoes_sidecar.core.errors import ErrorCode
 from echoes_sidecar.ipc import schema as ipc_schema
 
 # 3.4「控制四类 = 壳→sidecar」；其余全部是 sidecar→壳的事件/状态。
-_SHELL_TO_SIDECAR = frozenset({"control", "user_text", "clone_start", "clone_cancel"})
+_SHELL_TO_SIDECAR = frozenset({"control", "user_text", "retry", "clone_start", "clone_cancel"})
 _SIDECAR_TO_SHELL = frozenset(
     {
         "hello",
