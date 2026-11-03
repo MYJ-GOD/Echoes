@@ -35,10 +35,10 @@
 ## 本机运行（cwd=sidecar）
 
 ```powershell
-..\.venv\Scripts\python scripts/bench_llm.py run    --provider ollama --model qwen2.5:7b-instruct
-..\.venv\Scripts\python scripts/bench_llm.py judge  --provider openai --model deepseek-chat --replies ..\docs\benchmarks\results\ollama-qwen2.5-7b-instruct\replies.jsonl
-..\.venv\Scripts\python scripts/bench_llm.py human  --replies ..\docs\benchmarks\results\ollama-qwen2.5-7b-instruct\replies.jsonl
-..\.venv\Scripts\python scripts/bench_llm.py report --dir ..\docs\benchmarks\results\ollama-qwen2.5-7b-instruct
+.venv\Scripts\python scripts/bench_llm.py run    --provider ollama --model qwen2.5:7b-instruct
+.venv\Scripts\python scripts/bench_llm.py judge  --provider openai --model deepseek-chat --replies ..\docs\benchmarks\results\ollama-qwen2.5-7b-instruct\replies.jsonl
+.venv\Scripts\python scripts/bench_llm.py human  --replies ..\docs\benchmarks\results\ollama-qwen2.5-7b-instruct\replies.jsonl
+.venv\Scripts\python scripts/bench_llm.py report --dir ..\docs\benchmarks\results\ollama-qwen2.5-7b-instruct
 ```
 
 自检（无模型依赖）：`run --provider mock` → `judge --provider mock` → `report` 全链路走通。

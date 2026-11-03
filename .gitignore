@@ -23,6 +23,9 @@ models/*
 .codegraph/
 tmp/
 
+# 工作台/会话数据（本地，不入库）
+.workbuddy/
+
 # GPU 冒烟产物（wav/日志），不入库
 sidecar/scripts/_smoke_out/
 sidecar/scripts/_bench_out/

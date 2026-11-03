@@ -18,8 +18,18 @@ jobs:
       - name: 安装依赖（CPU-only 安全面，15.1/7.2）
         # 不装 CUDA torch / CosyVoice2：CI 只跑非 heavy 面（mock / 契约 / DB / 记忆存储）。
         # 真引擎冒烟走本机 scripts/gpu_smoke.py（13.1-L4）。
+        # keyring 必装：secrets.py 顶层 import，缺它连 tests 收集都过不去（ADR-016 后）。
         run: |
-          python -m pip install pydantic "websockets>=12,<15" httpx sqlite-vec numpy==2.5.4 transformers==4.51.3 faster-whisper==1.2.1 pytest pytest-asyncio ruff mypy import-linter
+          python -m pip install pydantic "websockets>=12,<15" httpx sqlite-vec numpy==2.5.4 transformers==4.51.3 faster-whisper==1.2.1 keyring pytest pytest-asyncio ruff mypy import-linter
+        working-directory: sidecar
+      - name: 依赖锁一致性（15.1：pyproject 变更必须同步 uv.lock）
+        # CI 的 pip 面只是 CPU 安全子集，装什么由本文件决定；但**锁**是交付口径，
+        # 改了 pyproject 忘了 uv lock 会在这里红（以前没人查）。
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+      - name: 校验锁未漂移
+        run: uv lock --check
         working-directory: sidecar
       - name: lint（ruff，100 列，15.3）
         run: ruff check .

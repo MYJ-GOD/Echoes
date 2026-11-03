@@ -6,12 +6,14 @@
 - 仓库结构总览见母文档 §3.3；开发顺序见母文档 §12；提交约定（Conventional Commits）见母文档 §15.4。
 - ADR 决策目录：[docs/decisions/](docs/decisions/)；阶段 -1 与阶段 0 基准产物：[docs/benchmarks/](docs/benchmarks/)。
 
-## 快速开始（当前阶段：阶段 0 功能完成，阶段 1 进行中）
+## 快速开始（当前阶段：阶段 0 功能完成、待验收关账；阶段 1–2 代码面完成；阶段 3 打包与首启向导就绪）
+
+> 更精确的状态见 [PROGRESS.md](PROGRESS.md)：阶段 0 卡在 ADR-012 §9 的延迟预算决策（首音频 2727ms vs 500ms 预算），阶段 3 卡在运行时档案托管地址与 CI。
 
 依赖清单**唯一来源** = `sidecar/pyproject.toml`；锁文件 `sidecar/uv.lock` 入库，依赖变更必须同步更新锁。
 
-> **规范运行环境 = `sidecar/.venv`**（uv 管理，含 torch 2.7.1+cu126 / transformers / sqlite-vec）。
-> 仓库根的 `.venv` 是早期骨架测试环境（无 torch），**不要用于真路或四闸复跑**。
+> **唯一运行环境 = `sidecar/.venv`**（uv 管理，含 torch 2.7.1+cu126 / transformers / sqlite-vec）。
+> 仓库根不再保留第二个 `.venv`；四闸、真路、打包都用这一套。
 
 ```powershell
 # 首次 / 依赖变更后（仓库根）

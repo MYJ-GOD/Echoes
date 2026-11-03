@@ -1,6 +1,6 @@
-# Echoes 开发进度与剩余工作（2026-10-26）
+# Echoes 开发进度与剩余工作（2026-10-29）
 
-> 本文是截至 **2026-10-26** 的进度快照，按「只推进开发、暂不做验收」的口径统计。
+> 本文是截至 **2026-10-29** 的进度快照，按「只推进开发、暂不做验收」的口径统计。
 > 权威依据：[docs/architecture.md](docs/architecture.md)（§2.3 MVP 定义、§6 分阶段计划、§12 下一步动作、§15 工程规范）。
 > 详细执行账本：`.superpowers/sdd/echoes-skeleton/progress.md`（本地文件，gitignored，R1–R21）。
 > **完成度 = 代码 + 自动化测试到位**；不含真机麦克风/扬声器、延迟实测与产品验收。
@@ -21,7 +21,7 @@
 - **2026-10-23 追加**：持久化运行层（§3.4）、分句纯函数（§3.5）、克隆闭环（§3.6）、三跳打断（§3.7）落地。阶段 0 由 50–55% → 75% → 约 82%，剩余约 0.5–1 周 = 克隆真路 ≈0.5 周 + 联调/真机验收 ≈0.5 周。阶段 0 的**功能面已全部写完**，剩下的是真路接线与真机验收，不再是「还没写」。
 - **2026-10-23 第二轮**：编排层收敛（§3.8）、克隆真路 + 分句接线（§3.9）、IPC TS 类型层与漂移守护（§3.10）落地，阶段 0 → **约 92%**。三笔技术债（编排层被绕过 / IPC TS 缺失 / 分句未接线）全部清掉。剩下 8% 不是代码：是真机数字（延迟、三跳毫秒、听感）与断网演练——**部署实际使用的 `sidecar/.venv` 实测 torch 2.7.1+cu126 / CUDA 可用**，故 TTS 侧延迟与克隆嵌入耗时本机就能采；仍缺的是 ollama（LLM 侧）与麦克风/播放设备（PTT→asr_final、三跳分摊、听感盲听）。
 - **2026-10-24 实测轮**：真机整链第一次跑通（`bench_latency.py --tts cosyvoice2`），当场暴露两个只在真路才现形的 bug，都已修：① SQLite 连接跨线程（`asyncio.to_thread` 落库 → `check_same_thread` 判死）；② TTS 流式为给末段盖 `is_final` 扣住一个 chunk，把首音频推迟一整段。修后首音频 **4211 → 2727ms**、引擎级 38 字文本 **7.7 → 2.7s**。数字与判定见 [ADR-012 §4.1](docs/decisions/ADR-012-latency-baseline.md)，缺口处置见其 §9（**需产品决策**：预算是否按本地 0.5B 的物理下界校准）。
-- **2026-10-24 复核**：规范环境是 `sidecar/.venv`（uv 管理，torch 2.7.1+cu126 / transformers 4.51.3 / sqlite-vec 0.1.9）。四闸复跑 **263 passed + 1 deselected**、mypy 36、`cargo test` 20、`npm run build` 通过。用仓库根 `.venv` 复跑会因缺 `sqlite-vec` 迁移依赖而红——那是旧骨架环境，不是代码回归；`uv.lock` 已补 `sqlite-vec`（原锁缺失，0002 迁移在冻结安装下无法复现）。
+- **2026-10-24 复核**：规范环境是 `sidecar/.venv`（uv 管理，torch 2.7.1+cu126 / transformers 4.51.3 / sqlite-vec 0.1.9）。四闸复跑 **263 passed + 1 deselected**、mypy 36、`cargo test` 20、`npm run build` 通过。仓库根 `.venv` 是旧骨架环境，**不能**用于真路或四闸：2026-10-29 复核时它已含 `sqlite-vec`，但缺 `keyring`，收集阶段就 5 个 ERROR（`test_main_*` / `test_secrets`）——「会红」的结论仍然成立，只是红的原因换了，别再按旧归因排查。
 - **2026-10-24 第三轮（阶段 1 抽取线）**：抽取器 + 检索注入 + turn 后置异步写入 + 52 例评测管线落地（`db92e1c`）；pytest 263 → **299**；13.3 真门禁（qwen3:8b + qwen2.5 judge）P 0.917 / R 0.957 / 替代 1.000 通过（`8c4117a`）。bge-small-zh 权重已预取到 `~/.cache/echoes/models/bge-small-zh-v1.5`（512 维 / L2=1.0，真 embedder 检索命中）。阶段 1 完成约 45%，剩余 session_summary、人设卡、Settings。
 - **2026-10-24 第四轮（阶段 1 摘要线）**：`session_summary` 仓储 + `SessionSummarizer` + 最近 12 轮历史 + 预算成对裁剪落地（`8697d04`）；pytest 299 → **317**；qwen3:8b 真摘要 smoke 落库成功（`用户养了一只名为豆豆的猫`）。阶段 1 完成约 60%，剩余人设卡 UI、Settings（需新增 IPC 消息，走 12.2）。
 - **2026-10-24 第五轮（阶段 1 收口）**：人设卡 + Settings 按 3.4 拉取语义落地（`ab03f93`）——壳用 rusqlite 直写 `setting` 表，sidecar 每轮读取；人设覆盖走 `persona_name` / `persona_system_prompt`，provider 由 `ProviderRouter` 在 turn 边界切换。pytest 317 → **333**，cargo 20 → **25**；真机 smoke：mock 启动 → 写 settings → 下一轮切 ollama/qwen3:8b 并应用新人设。阶段 1 **代码面完成**；验收（隔天记忆引用/隐私抓包/首 token 增幅）未跑。
@@ -35,6 +35,13 @@
 - **2026-10-26 第十三轮（LLM 可插拔）**：ADR-016 定稿——LLM 支持「本地 Ollama / OpenAI 兼容云端」二选一，TTS/ASR/嵌入保持本地；API key 存 Windows 凭据管理器（Rust 写 / Python 读，已实测冻结 exe 取到 key 并打到真实 401）；隐私模式与云端互斥、Router 硬阻断不降级。新增 `LLM_KEY_MISSING`；设置页可填 base URL / key。pytest 372 → **388**，cargo 32 → **33**。
 - **2026-10-26 第十四轮（首启向导）**：`--setup` 一次性进程 + 三屏向导（检测 → 准备运行环境 → 选 LLM）落地——硬件探测（`nvidia-smi`/内存/磁盘/Ollama）、档位推荐、缺失权重与下载量、运行时/模型下载进度、完成写 `first_run_done`。pytest 388 → **400**，cargo 33 → **36**；冻结 exe `--setup detect` 已验证。**缺口**：运行时档案仍未托管，向导的运行时下载会提示「未发布」；安装器与 CI 仍未做。
 - **2026-10-26 第十五轮（运行时闭环 + 安装器）**：真建 CPU 运行时档案（**681MB**，116 包）+ `file://` 安装 + 冻结 exe 端到端（ASR 70s / TTS 89s 就绪，单独加载 1s / 23s）；期间修掉三个只在冻结版现形的坑（stdlib 动态 import、`python3.dll`、PYZ 残缺副本压住运行时）。NSIS 安装器 **24.7MB** 产出并通过静默装/卸验证。pytest **403**，cargo **36**，`npx tauri build` 通过。
+- **2026-10-29 审计整改轮（独立代码审计 → 修复）**：按第三方审计报告的 P0/P1/P2 逐条整改，四闸 + cargo + 前端构建全绿（pytest 403 → **409**，cargo 37 → **38**，mypy 43，lint-imports 2 contracts）。
+  - **S-1 隐私矩阵对齐 ADR-016 §3**：原实现把「`openai` + 隐私模式」一律拒掉，连本机环回端点（LM Studio / vLLM / Ollama `/v1`）也拒——与 ADR 矩阵「环回地址允许（不出网）」相反。已改三处：`router.py`（阻断位按 base_url 判定，`is_loopback` 提为公开函数）、`profile.rs`（写入校验放行环回）、`App.vue`/`FirstRun.vue`/`ipc.ts`（前端不再一见 openai 就关隐私模式，只在公网地址时提示）。
+  - **G-6 分级就绪 gate 不再改在途状态**：`_gate_engine_ready` 原来「必需引擎齐了且状态非 ready 就 `transition(ready)`」，TTS 真路 warmup 可能在一轮对话中完成，会把 speaking 拉回 ready（壳会以为轮次结束）。现在只允许 `booting→ready`，其余情况只发 hello + 真实 state。
+  - **G-1/G-7 编排层去具体实现依赖**：4.4 新增 `RuntimeConfigurable` Protocol，编排不再 import `engines.llm.router`；4.5 新增 `supports_similarity_check` + `speaker_similarity` 可选能力位，替掉 `getattr` 鸭子探测（改名即静默降级的老坑）。
+  - **G-3/G-2/G-5/S-2 契约补齐**：`architecture.md` 升 v1.4.4（4.4/4.5 async-generator 形态、可选能力、`LLM_KEY_MISSING` 入表、15.2 补 `db`/`runtime` 两层、前端未拆 stores 的已知偏离与收敛计划）；import-linter 的 forbidden 清单从 3 个 mock 模块补齐到 8 个（含真引擎与 router）。
+  - **N-2/N-6 清理**：`huggingface-hub` 进 pyproject（原来靠 transformers 传递，锁只加 2 行、版本未变）；`音色 N` 改为「已用最大编号 +1」（原「行数 +1」在删过行后会重名）。
+  - **未做（留待决策/后续）**：ADR-012 §9 的延迟预算拍板、阶段 3 运行时档案托管与 CI；前端 `stores/views` 拆分按 v1.4.4 登记的计划在阶段 3 收口前做。
 - MVP 定义见母文档 §2.3：阶段 0–1。
 
 ## 2. 母文档 §12 步骤对照
@@ -75,7 +82,7 @@
 | WS 音频面（0x01/0x02、seq、`is_final`、全双工）         | ✅  | `2705429` / `fe310f9`                |
 | 壳侧采集（48k→16k FIR）/ rodio 播放 / PTT            | ✅  | `fe310f9`；13 Rust tests              |
 | 分级预热 + 3.5 状态机                               | ✅  | R20；`b0e0846`                        |
-| 组合根真路装配                                      | ✅  | 默认真路；`ECHOES_SIDECAR_MOCK=1` 强制 mock |
+| 组合根真路装配                                      | ✅  | **壳**默认传真路（`lib.rs::sidecar_args()`：ollama + whisper + cosyvoice2），`ECHOES_SIDECAR_MOCK=1` 由壳切 mock；直接 `python -m echoes_sidecar.main` 不带参时是 mock（契约链自检），两者别混为一谈 |
 
 关键验证：
 
@@ -146,7 +153,7 @@ TTFA 的收益仍须 ADR-012 实测确认——**接线 ≠ 延迟已改善**，
 | --- | --- | --- |
 | turn 改为后台任务（stdio 主循环得以继续读 `control`） | ✅ | `TurnRunner`；打断消息不再排在 turn 之后 |
 | 协作式取消（不强杀异步生成器） | ✅ | `CancelToken` + `TurnCancelled`；`turn_complete` 一定写得出去 |
-| 取消可插队到 pending 取项（≤150ms 预算） | ✅ | `core/cancel.py::pull`（令牌与 `__anext__` 竞速）；`test_pull_preempts_pending_anext` |
+| 取消可插队到 pending 取项（≤150ms 预算） | ✅ | `core/cancel.py::pull`（令牌与 `__anext__` 竞速）；`test_pull_cancels_pending_anext_and_releases_stream` |
 | 取消后立即停止向 WS 产出音频 | ✅ | `TurnGraph._speak` 的 TTS 循环按 `pull` 收束；`test_cancel_during_speaking_stops_audio_and_returns_ready` 断言取消后零新帧 |
 | `turn_complete(status=CANCELLED)` + 恒回 `ready` | ✅ | 收尾统一走 `finally`（异常也不会把 UI 锁在 generating） |
 | `interrupt` / `cancel_turn` 两动词 | ✅ | sidecar 侧同义（都收束为 CANCELLED），差异在壳：是否立即开采集（3.4 定案） |
@@ -547,6 +554,7 @@ ruff / mypy 43 files / lint-imports；`npm run build`；`tauri build --no-bundle
 - **设置切换冷启动**：provider/model 切换后首轮重新加载模型（实测 qwen3:8b 切后首 token 32.9s）；隐私模式已持久化，但当前无云端 provider，实际不触发网络分支。
 - **LAN 安全边界**：token 在配对 URL/日志明文；局域网阶段不做 TLS/端到端加密（8.3）；单活动端点，断线期间事件不重放（turn 去重是终端侧 `turn_seq`）。
 - **打包**：ADR-011 split-binary；ONEDIR **68.1MB**（排除 torch/ML 与开发依赖）+ 双形态 spawn + 运行时注入（CPU 档案 **681MB** 实测可用）；NSIS 安装器 **24.7MB**；**档案托管 / CUDA 档位 / 签名 / CI 未做**。
+  > ⚠️ 体积口径未统一：各轮记录过 85.3 / 87.5 / 88.0 / 68.1MB（构建内容不同：vendored 入库、runtime 注入、keyring 收集），2026-10-29 审计现场实测 `sidecar/dist/echoes-sidecar` = **65.0MB / 325 文件**。后续一律以「字节 + 文件数 + 构建命令」三元组记录，不再只写一个孤零零的数字。
 - **平台**：当前 dev 形态绑定 Windows + 仓库内 `.venv`；跨平台打包未开始。
 
 ## 6. 下一步

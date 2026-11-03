@@ -17,7 +17,7 @@
 复现命令（仓库根）：
 
 ```powershell
-.venv\Scripts\pyinstaller --noconfirm --onedir --name echoes-sidecar-probe `
+sidecar\.venv\Scripts\pyinstaller --noconfirm --onedir --name echoes-sidecar-probe `
   --paths sidecar --workpath tmp\probe-work --distpath tmp\probe-dist tmp\probe\bootstrap.py
 ```
 

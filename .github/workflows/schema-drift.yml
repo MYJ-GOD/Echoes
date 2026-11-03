@@ -34,7 +34,7 @@ jobs:
         # scripts/gen-ipc-types.mjs 找不到 .venv 时按 PATH 找 python3
         run: node scripts/gen-ipc-types.mjs --check
 
-      - name: 前端类型检查（生成物必须能编译）
+      - name: 前端类型 + 构建（生成物必须能编译且能打包）
         run: |
           npm ci
-          npx vue-tsc --noEmit
+          npm run build

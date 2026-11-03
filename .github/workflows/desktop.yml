@@ -1,0 +1,63 @@
+# R5 桌面壳 CI：Windows 必选。
+#
+# macOS 不在 v1.0 平台范围（ADR-011：Windows 优先；HUD 用到 WS_EX_NOACTIVATE /
+# WS_EX_TOOLWINDOW 等 Win32 扩展样式）。等平台范围扩大到 macOS 时，再往
+# matrix.os 里加 macos-latest 并为平台专属代码加 cfg 分支；现在加只会长期红。
+#
+# 这里只做「构建 + 单测」：安装包签名与按需下载的模型权重不进 CI（无证书、无 GPU）。
+name: desktop
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 先备好 sidecar 的 dev venv：
+      #   - `npm run build` 的 ipc:check 需要一个能 import echoes_sidecar 的 python
+      #   - 壳侧集成测试会起真实 sidecar（`--setup detect`）
+      # 依赖面与 build-sidecar.yml 对齐，避免两套口径。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: sidecar/pyproject.toml
+
+      - name: sidecar 测试 venv
+        run: |
+          python -m venv sidecar/.venv
+          sidecar/.venv/Scripts/python -m pip install --upgrade pip
+          sidecar/.venv/Scripts/python -m pip install pydantic "websockets>=12,<15" httpx sqlite-vec numpy==2.5.4 transformers==4.51.3 faster-whisper==1.2.1 keyring
+        shell: pwsh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 前端依赖
+        run: npm ci
+
+      - name: 前端构建（ipc 契约检查 + vue-tsc + vite）
+        run: npm run build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 壳侧单测（含迁移/数据面/历史读接口）
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: 壳侧编译检查（debug，不打包）
+        run: cargo build --manifest-path src-tauri/Cargo.toml
