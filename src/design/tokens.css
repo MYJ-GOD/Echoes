@@ -1,0 +1,164 @@
+/**
+ * Echoes · 新设计系统 token（D1）
+ *
+ * 只作用于 `[data-skin="next"]`，旧页面在 P2 之前完全不受影响。
+ * 规则：组件里禁止写颜色字面量，只用这里的变量。
+ *
+ * 主题：data-mode = system | light | dark
+ * 密度：data-density = comfortable | compact
+ */
+
+[data-skin="next"] {
+  color-scheme: light;
+
+  /* ---- 表面与文字 ---- */
+  --bg: #f1f1ec;
+  --surface: #f7f7f3;
+  --surface-2: #eaebe5;
+  --raised: #fcfcf9;
+  --ink: #1b1e1b;
+  --ink-2: #535a54;
+  --ink-3: #677066;
+  --rule: #dcded7;
+  --rule-strong: #7f887e;
+
+  /* ---- 主色与语义 ---- */
+  --accent: #2f5d50;
+  --accent-ink: #f7f7f3;
+  --accent-soft: rgba(47, 93, 80, 0.1);
+  --signal: #b4532f;
+  --ok: #3f6b4f;
+  --warn: #8a5a1d;
+  --danger: #a33a2b;
+  --focus: #2f5d50;
+
+  /* ---- 字体 ---- */
+  --font-ui:
+    "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-voice:
+    "Noto Serif SC", "Source Han Serif SC", "Songti SC", Georgia, serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, "SF Mono", monospace;
+
+  /* ---- 间距（4px 网格） ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ---- 尺寸 ---- */
+  --control-h-sm: 24px;
+  --control-h: 32px;
+  --control-h-lg: 40px;
+  --row-h: 36px;
+  --page-pad: 24px;
+  --titlebar-h: 36px;
+
+  /* ---- 圆角 ---- */
+  --radius-control: 4px;
+  --radius-card: 8px;
+  --radius-overlay: 12px;
+  --radius-pill: 999px;
+
+  /* ---- 层高 ---- */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.1);
+  --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.22);
+
+  /* ---- 动效 ---- */
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur-hover: 100ms;
+  --dur-enter: 160ms;
+  --dur-exit: 90ms;
+
+  /* ---- 语义化组合 ---- */
+  --text-body: 14px;
+  --text-body-line: 22px;
+  --text-voice: 16px;
+  --text-voice-line: 27px;
+  --text-title: 18px;
+  --text-title-line: 26px;
+  --text-display: 24px;
+  --text-display-line: 32px;
+  --text-meta: 12px;
+  --text-meta-line: 16px;
+
+  /* ---- 旧组件过渡别名（P2/P3 逐页移除，不要在新组件里用） ---- */
+  --paper: var(--bg);
+  --paper-hi: var(--surface);
+  --paper-lo: var(--surface-2);
+  --line: var(--rule);
+}
+
+[data-skin="next"][data-mode="dark"] {
+  color-scheme: dark;
+
+  --bg: #101413;
+  --surface: #171c1a;
+  --surface-2: #1f2522;
+  --raised: #222925;
+  --ink: #e8e9e3;
+  --ink-2: #b3b8b1;
+  --ink-3: #8a918a;
+  --rule: #2a302d;
+  --rule-strong: #5f6b64;
+
+  --accent: #8fc3b0;
+  --accent-ink: #12201b;
+  --accent-soft: rgba(143, 195, 176, 0.12);
+  --signal: #e08a6a;
+  --ok: #8fbf9a;
+  --warn: #d8a657;
+  --danger: #e08573;
+  --focus: #8fc3b0;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.38);
+  --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-skin="next"][data-mode="system"] {
+    color-scheme: dark;
+
+    --bg: #101413;
+    --surface: #171c1a;
+    --surface-2: #1f2522;
+    --raised: #222925;
+    --ink: #e8e9e3;
+    --ink-2: #b3b8b1;
+    --ink-3: #8a918a;
+    --rule: #2a302d;
+    --rule-strong: #5f6b64;
+
+    --accent: #8fc3b0;
+    --accent-ink: #12201b;
+    --accent-soft: rgba(143, 195, 176, 0.12);
+    --signal: #e08a6a;
+    --ok: #8fbf9a;
+    --warn: #d8a657;
+    --danger: #e08573;
+    --focus: #8fc3b0;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28);
+    --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.38);
+    --shadow-3: 0 24px 64px rgba(0, 0, 0, 0.55);
+  }
+}
+
+[data-skin="next"][data-density="compact"] {
+  --row-h: 30px;
+  --page-pad: 16px;
+  --control-h-sm: 22px;
+  --control-h: 28px;
+  --control-h-lg: 36px;
+  --text-body: 13px;
+  --text-body-line: 20px;
+  --text-voice: 15px;
+  --text-voice-line: 24px;
+}

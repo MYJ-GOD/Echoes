@@ -8,16 +8,26 @@
     "build": "npm run ipc:check && vue-tsc --noEmit && vite build",
     "ipc:types": "node scripts/gen-ipc-types.mjs",
     "ipc:check": "node scripts/gen-ipc-types.mjs --check",
+    "ui:shots": "node scripts/ui-shot.mjs",
+    "check:contrast": "node scripts/check-contrast.mjs",
+    "check:a11y": "node scripts/check-a11y.mjs",
+    "check:keys": "node scripts/check-keys.mjs",
+    "check:memory": "node scripts/check-memory.mjs",
+    "check": "npm run check:contrast && npm run check:a11y && npm run check:keys && npm run check:memory",
     "sidecar:build": "node scripts/build-sidecar.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
-    "vue": "^3.5.44"
+    "d3-force": "^3.0.0",
+    "vue": "^3.5.44",
+    "vue-router": "^4.6.4"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.4",
+    "@types/d3-force": "^3.0.10",
     "@vitejs/plugin-vue": "^6.0.10",
+    "axe-core": "^4.14.0",
     "typescript": "^5.9.3",
     "vite": "^8.3.5",
     "vue-tsc": "^3.3.13"

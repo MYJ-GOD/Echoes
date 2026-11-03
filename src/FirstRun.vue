@@ -34,6 +34,7 @@ const provider = ref<"ollama" | "openai">("ollama");
 const model = ref("qwen3:8b");
 const baseUrl = ref("");
 const key = ref("");
+const llmConsent = ref(false);
 const saving = ref(false);
 const saveError = ref("");
 
@@ -57,7 +58,8 @@ const weightsMb = computed(() => {
     "bge-small-zh-v1.5": 95,
     "cosyvoice2-0.5b": 3800,
   };
-  return r.missingModels.reduce((sum, id) => sum + (known[id] ?? 0), 0);
+  // 兜底 `?? []`：报告字段漂移时向导只显示 0MB，不整屏崩掉（渲染抛错 = 白屏）
+  return (r.missingModels ?? []).reduce((sum, id) => sum + (known[id] ?? 0), 0);
 });
 const readyHint = computed(() => {
   const r = report.value;
@@ -85,6 +87,7 @@ onMounted(async () => {
       provider.value = "openai";
       model.value = settings.value.model;
     }
+    llmConsent.value = settings.value.llmCloudConsent;
   } catch {
     // 设置读不到不阻塞向导：完成时用默认值
   }
@@ -125,9 +128,9 @@ async function startInstall(): Promise<void> {
         installError.value = `${result.code}：${result.message}`;
       }
     }
-    if (current && current.missingModels.length > 0) {
+    if (current && (current.missingModels?.length ?? 0) > 0) {
       const result = await ipc.setupInstall("install-models", {
-        ids: current.missingModels,
+        ids: current.missingModels ?? [],
       });
       if (result.type === "error") {
         installError.value = `${result.code}：${result.message}`;
@@ -165,13 +168,34 @@ async function finish(skip = false): Promise<void> {
           baseUrl: "",
           hasKey: false,
           firstRunDone: false,
+          ttsProvider: "cosyvoice2",
+          ttsModel: "tts-1",
+          ttsBaseUrl: "",
+          hasTtsKey: false,
+          asrProvider: "whisper",
+          asrModel: "small",
+          asrBaseUrl: "",
+          hasAsrKey: false,
+          llmCloudConsent: false,
+          asrCloudConsent: false,
+          ttsCloudConsent: false,
         } satisfies ipc.SettingsView);
+      // 2.11：公网云端 LLM 必须勾选同意（环回端点不出网，不要求）
+      const needsConsent =
+        provider.value === "openai" && !ipc.isLoopbackBaseUrl(baseUrl.value);
+      if (needsConsent && !llmConsent.value) {
+        throw new Error("请先勾选「我知晓对话文本会发送至该端点」");
+      }
       const payload: ipc.SettingsView = {
         ...base,
+        llmCloudConsent: needsConsent && (llmConsent.value || base.llmCloudConsent),
         provider: provider.value,
         model: model.value.trim() || "qwen3:8b",
         baseUrl: provider.value === "openai" ? baseUrl.value.trim() : "",
-        privacyMode: provider.value !== "openai",
+        // 隐私矩阵（ADR-016 §3）：只有「会出网的公网端点」才需要关掉隐私模式；
+        // 本机环回端点（LM Studio / vLLM / Ollama `/v1`）不出网，保持默认隐私模式。
+        privacyMode:
+          provider.value !== "openai" || ipc.isLoopbackBaseUrl(baseUrl.value),
       };
       await ipc.saveSettings(payload);
       if (provider.value === "openai" && key.value.trim() !== "") {
@@ -181,7 +205,7 @@ async function finish(skip = false): Promise<void> {
     await ipc.completeSetup();
     emit("done");
   } catch (err) {
-    saveError.value = String(err);
+    saveError.value = err instanceof Error ? err.message : String(err);
   } finally {
     saving.value = false;
   }
@@ -401,6 +425,10 @@ function pctOf(id: string): number {
             <span>API key</span>
             <input v-model="key" type="password" autocomplete="off" placeholder="sk-…" />
           </label>
+          <label v-if="!ipc.isLoopbackBaseUrl(baseUrl)" class="check">
+            <input v-model="llmConsent" type="checkbox" />
+            <span>我知晓对话文本会发送至该端点（数据出境）</span>
+          </label>
           <p class="note">
             key 存 Windows 凭据管理器，不进数据库；云端模式下隐私模式会自动关闭——
             对话内容会经该 API。
@@ -425,7 +453,7 @@ function pctOf(id: string): number {
 <style scoped>
 .setup {
   position: fixed;
-  inset: 0;
+  inset: var(--titlebar-h, 0) 0 0;
   z-index: 40;
   display: grid;
   place-items: center;
@@ -534,7 +562,7 @@ dd {
   padding: 10px 12px;
   border: 1px solid var(--rule);
   border-radius: 8px;
-  background: #fffdf9;
+  background: var(--paper-hi);
   text-align: left;
   transition:
     border-color 0.16s ease,
@@ -578,7 +606,7 @@ dd {
   padding: 8px 10px;
   border: 1px solid var(--rule);
   border-radius: 8px;
-  background: #fffdf9;
+  background: var(--paper-hi);
   font-size: 13.5px;
   color: var(--ink);
 }

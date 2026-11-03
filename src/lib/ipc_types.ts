@@ -21,6 +21,7 @@ export type ErrorCode =
   | "ASR_ENGINE_ERROR"
   | "TTS_ENGINE_ERROR"
   | "STORAGE_ERROR"
+  | "HISTORY_WRITE_FAILED"
   | "PROTOCOL_MISMATCH"
   | "INTERNAL_ERROR";
 
@@ -97,7 +98,7 @@ export interface StateMsg {
 /** ControlMsg（shell → sidecar） */
 export interface ControlMsg {
   type: "control";
-  action: "interrupt" | "cancel_turn";
+  action: "interrupt" | "cancel_turn" | "open_session";
   session_id: string;
   turn_seq?: number;
 }
@@ -107,6 +108,13 @@ export interface UserTextMsg {
   type: "user_text";
   session_id: string;
   text: string;
+}
+
+/** RetryMsg（shell → sidecar） */
+export interface RetryMsg {
+  type: "retry";
+  session_id: string;
+  text?: string;
 }
 
 /** CloneStartMsg（shell → sidecar） */
@@ -126,6 +134,8 @@ export interface CloneCancelMsg {
 export interface EngineState {
   name: string;
   ready: boolean;
+  provider?: string;
+  model?: string;
 }
 
 /** Timings（嵌套结构体） */
@@ -150,6 +160,7 @@ export type SidecarMessage =
 export type ShellMessage =
   | ControlMsg
   | UserTextMsg
+  | RetryMsg
   | CloneStartMsg
   | CloneCancelMsg;
 

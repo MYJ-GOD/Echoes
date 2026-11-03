@@ -1,0 +1,594 @@
+/**
+ * Echoes · 外观主题
+ *
+ * 三个主题共用同一份 DOM 与同一组 token 名，只换值，再加少量结构微调：
+ *   paper   信笺 —— 暖纸 + 衬线，默认
+ *   nocturne 夜灯 —— 暖黑 + 琥珀，给夜里用
+ *   desktop 台面 —— 中性灰 + 无衬线，密度最高
+ *
+ * 由 `<html data-theme="...">` 驱动；持久化在 localStorage（纯展示偏好，
+ * 不进 sidecar 契约，也不进 SQLite）。
+ */
+
+/* ============ 主题 A · 信笺（默认） ============ */
+:root,
+[data-theme="paper"] {
+  color-scheme: light;
+  --titlebar-h: 40px;
+  --paper: #f6f1e8;
+  --paper-hi: #fbf8f1;
+  --paper-lo: #efe7da;
+  --ink: #23201b;
+  --ink-2: #5c554a;
+  --ink-3: #746c60;
+  --rule: #e3d9c8;
+  --rule-strong: #cfc1a9;
+  --accent: #95512f;
+  --accent-soft: rgba(149, 81, 47, 0.1);
+  --danger: #9e3b2e;
+  --ok: #5a6e52;
+  --font-ui:
+    "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  /* 中文衬线必须写 Windows 上真实存在的家族名：Noto Serif CJK SC 在 Win 上
+     并不存在，漏了 "Noto Serif SC" 会一路掉到 SimSun。 */
+  --font-voice:
+    "Iowan Old Style", "Palatino Linotype", "Noto Serif SC",
+    "Source Han Serif SC", "Songti SC", "SimSun", Georgia, serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, "SF Mono", monospace;
+}
+
+/* ============ 主题 B · 夜灯 ============ */
+[data-theme="nocturne"] {
+  color-scheme: dark;
+  --titlebar-h: 40px;
+  --paper: #131110;
+  --paper-hi: #1a1716;
+  --paper-lo: #241f1d;
+  --ink: #ece2d5;
+  --ink-2: #b9b0a3;
+  --ink-3: #8d8375;
+  --rule: #2b2523;
+  --rule-strong: #3a3230;
+  --accent: #e3a76b;
+  --accent-soft: rgba(227, 167, 107, 0.12);
+  --danger: #e08573;
+  --ok: #8fae86;
+  --font-ui:
+    "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-voice:
+    "Palatino Linotype", "Noto Serif SC", "Source Han Serif SC",
+    "Songti SC", "SimSun", Georgia, serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, "SF Mono", monospace;
+}
+
+/* ============ 主题 C · 台面 ============ */
+[data-theme="desktop"] {
+  color-scheme: light;
+  --titlebar-h: 32px;
+  --paper: #f3f3f4;
+  --paper-hi: #fbfbfc;
+  --paper-lo: #ececee;
+  --ink: #1b1b1b;
+  --ink-2: #55555c;
+  --ink-3: #8b8b93;
+  --rule: #e4e4e6;
+  --rule-strong: #d4d4d8;
+  --accent: #95512f;
+  --accent-soft: rgba(149, 81, 47, 0.08);
+  --danger: #c42b1c;
+  --ok: #4f7a43;
+  /* 台面是 sans-first：把 voice 字体也指到 UI 栈，衬线整体退场 */
+  --font-ui:
+    "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-voice:
+    "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei UI",
+    "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, "SF Mono", monospace;
+}
+
+/* ================================================================
+   结构：消息行（三套皮肤共用 <span.avatar> + <div.body><p.meta>）
+   ================================================================ */
+
+/* 信笺：不显示头像与元信息，助手语用左线，用户语右侧气泡 —— 沿用原有规则 */
+[data-theme="paper"] .avatar,
+[data-theme="paper"] .meta {
+  display: none;
+}
+
+/* 夜灯：左侧时间栏（绝对定位进 padding），正文左线，无气泡 */
+[data-theme="nocturne"] .msg {
+  position: relative;
+  padding-left: 70px;
+  gap: 0;
+}
+[data-theme="nocturne"] .avatar {
+  display: none;
+}
+[data-theme="nocturne"] .meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+[data-theme="nocturne"] .who {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  color: var(--accent);
+}
+[data-theme="nocturne"] .msg.user .who {
+  color: var(--ok);
+}
+[data-theme="nocturne"] .at {
+  position: absolute;
+  left: 0;
+  top: 5px;
+  width: 54px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+}
+[data-theme="nocturne"] .body {
+  border-left: 1px solid var(--rule);
+  padding-left: 18px;
+}
+[data-theme="nocturne"] .said {
+  border-left: none;
+  padding-left: 0;
+  color: var(--ink);
+}
+[data-theme="nocturne"] .msg.user {
+  align-self: stretch;
+  max-width: none;
+}
+[data-theme="nocturne"] .mine {
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: var(--font-ui);
+  font-size: 14.5px;
+  line-height: 1.75;
+  color: var(--ink-2);
+}
+[data-theme="nocturne"] .cut {
+  padding-left: 0;
+  color: var(--ink-3);
+}
+
+/* 台面：头像 + 名字/时间一行，正文直排 */
+[data-theme="desktop"] .msg {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 12px;
+  align-items: start;
+  max-width: 720px;
+}
+[data-theme="desktop"] .avatar {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(140deg, #b4673d, #8c4a29);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  user-select: none;
+}
+[data-theme="desktop"] .msg.user .avatar {
+  background: var(--paper-lo);
+  color: var(--ink-2);
+  font-size: 10.5px;
+}
+[data-theme="desktop"] .meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+[data-theme="desktop"] .who {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+[data-theme="desktop"] .at {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+[data-theme="desktop"] .said {
+  border-left: none;
+  padding-left: 0;
+  font-family: var(--font-voice);
+  font-size: 14px;
+  line-height: 1.78;
+  max-width: 62ch;
+}
+[data-theme="desktop"] .msg.user {
+  align-self: stretch;
+  max-width: 720px;
+}
+[data-theme="desktop"] .mine {
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 14px;
+  line-height: 1.78;
+  color: var(--ink-2);
+  max-width: 62ch;
+}
+[data-theme="desktop"] .cut {
+  padding-left: 0;
+}
+
+/* ================================================================
+   结构：输入区（三套皮肤共用 <div.bar> 包住 write + speak）
+   ================================================================ */
+
+/* 信笺：bar 透明，输入在上、印章在下（保持原布局） */
+[data-theme="paper"] .bar {
+  display: contents;
+}
+
+/* 夜灯：光核在上、胶囊输入在下 */
+[data-theme="nocturne"] .composer {
+  gap: 10px;
+}
+[data-theme="nocturne"] .bar {
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+[data-theme="nocturne"] .write {
+  width: 100%;
+  max-width: 560px;
+  padding: 9px 16px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: rgba(26, 23, 22, 0.78);
+}
+[data-theme="nocturne"] .write:focus-within {
+  border-color: var(--accent);
+}
+[data-theme="nocturne"] .send {
+  color: var(--accent);
+}
+[data-theme="nocturne"] .speak {
+  width: 116px;
+  height: 116px;
+  margin-top: 4px;
+}
+[data-theme="nocturne"] .ring {
+  width: 106px;
+  height: 106px;
+  border-color: rgba(227, 167, 107, 0.12);
+  box-shadow: 0 0 60px rgba(227, 167, 107, 0.1);
+}
+[data-theme="nocturne"] .ring.busy {
+  border-color: rgba(227, 167, 107, 0.22);
+}
+[data-theme="nocturne"] .ring.live {
+  border-color: transparent;
+  border-top-color: var(--accent);
+  border-right-color: rgba(227, 167, 107, 0.35);
+}
+[data-theme="nocturne"] .ptt {
+  width: 78px;
+  height: 78px;
+  border: none;
+  background: radial-gradient(
+    circle at 36% 30%,
+    #ffd7a4 0%,
+    #e0a76a 38%,
+    #ad6d36 74%,
+    #6d411f 100%
+  );
+  color: #43230f;
+  box-shadow:
+    0 0 30px rgba(224, 167, 106, 0.38),
+    0 0 90px rgba(224, 167, 106, 0.16),
+    inset 0 -6px 14px rgba(70, 25, 0, 0.35);
+  font-size: 12.5px;
+  letter-spacing: 0.1em;
+}
+[data-theme="nocturne"] .ptt:hover:not(:disabled) {
+  border: none;
+}
+[data-theme="nocturne"] .ptt.live {
+  background: radial-gradient(
+    circle at 36% 30%,
+    #ffe3bd 0%,
+    #f0b87c 40%,
+    #bb7a3f 76%,
+    #77471f 100%
+  );
+  color: #3a1c08;
+  box-shadow:
+    0 0 42px rgba(240, 184, 124, 0.6),
+    0 0 120px rgba(224, 167, 106, 0.28);
+}
+[data-theme="nocturne"] .hint {
+  color: var(--ink-3);
+}
+
+/* 台面：输入条 + 内嵌麦克风 */
+[data-theme="desktop"] .composer {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px 26px 16px;
+  background: var(--paper-hi);
+}
+[data-theme="desktop"] .bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 5px 5px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 6px 18px rgba(0, 0, 0, 0.03);
+}
+[data-theme="desktop"] .write {
+  flex: 1;
+  width: auto;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+[data-theme="desktop"] .write:focus-within {
+  border-bottom: none;
+}
+[data-theme="desktop"] .write textarea {
+  font-size: 13.5px;
+}
+[data-theme="desktop"] .send {
+  font-size: 12px;
+  color: var(--accent);
+}
+[data-theme="desktop"] .speak {
+  width: 34px;
+  height: 34px;
+  margin: 0;
+  flex: none;
+}
+[data-theme="desktop"] .ring {
+  display: none;
+}
+[data-theme="desktop"] .ptt {
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0;
+  box-shadow: none;
+}
+[data-theme="desktop"] .ptt:hover:not(:disabled) {
+  border: none;
+  background: #a75d38;
+}
+[data-theme="desktop"] .ptt:active:not(:disabled) {
+  transform: scale(0.96);
+}
+[data-theme="desktop"] .ptt.live {
+  background: var(--danger);
+  color: #fff;
+  box-shadow: none;
+}
+[data-theme="desktop"] .ptt span {
+  display: none;
+}
+[data-theme="desktop"] .mic-ico {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+[data-theme="desktop"] .hint {
+  order: 3;
+  font-size: 11px;
+  color: var(--ink-3);
+  text-align: left;
+  padding: 0 2px;
+}
+
+/* ================================================================
+   外壳：信笺保留"信纸列"，台面改成满幅桌面表面
+   ================================================================ */
+
+[data-theme="desktop"] .app {
+  max-width: none;
+  border-left: none;
+  border-right: none;
+  background: var(--paper);
+}
+[data-theme="desktop"] .letterhead {
+  align-items: center;
+  padding: 12px 18px 10px;
+  background: var(--paper-hi);
+}
+[data-theme="desktop"] .wordmark {
+  display: none;
+}
+[data-theme="desktop"] .lh-name {
+  margin-top: 0;
+  gap: 10px;
+}
+[data-theme="desktop"] .name {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+}
+[data-theme="desktop"] .state {
+  font-size: 11.5px;
+}
+[data-theme="desktop"] .chip {
+  padding: 5px 11px;
+  border-color: var(--rule);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 11.5px;
+}
+[data-theme="desktop"] .thread {
+  padding: 20px 40px 8px;
+  gap: 20px;
+}
+[data-theme="desktop"] .empty {
+  margin: 0;
+}
+[data-theme="desktop"] .empty-title {
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+[data-theme="desktop"] .empty-sub {
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+/* 夜灯：页眉做"在场感"，底部加一层暖光 */
+[data-theme="nocturne"] .app {
+  background:
+    radial-gradient(
+      120% 70% at 50% 100%,
+      rgba(227, 167, 107, 0.07) 0%,
+      transparent 62%
+    ),
+    var(--paper);
+}
+[data-theme="nocturne"] .state[data-tone="ready"] .dot {
+  box-shadow: 0 0 10px rgba(143, 174, 134, 0.8);
+}
+[data-theme="nocturne"] .state[data-tone="active"] .dot {
+  box-shadow: 0 0 12px rgba(227, 167, 107, 0.9);
+}
+[data-theme="nocturne"] .chip {
+  background: var(--paper-hi);
+}
+[data-theme="nocturne"] .empty-title {
+  color: var(--ink-2);
+}
+
+/* ================================================================
+   控件在深色/桌面下的硬编码色补丁（原样式里写死了浅色）
+   ================================================================ */
+
+[data-theme="nocturne"] .field input,
+[data-theme="nocturne"] .field textarea,
+[data-theme="nocturne"] .field select {
+  background: var(--paper-lo);
+  border-color: var(--rule);
+  color: var(--ink);
+}
+[data-theme="nocturne"] .voice:hover,
+[data-theme="desktop"] .voice:hover {
+  background: var(--paper-hi);
+}
+[data-theme="nocturne"] .notice-row {
+  background: rgba(224, 133, 115, 0.08);
+}
+[data-theme="nocturne"] .scrim {
+  background: rgba(0, 0, 0, 0.55);
+}
+[data-theme="nocturne"] .sheet {
+  background: var(--paper-hi);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.45);
+}
+[data-theme="nocturne"] .primary {
+  background: var(--ink);
+  color: var(--paper);
+}
+[data-theme="nocturne"] .primary:hover {
+  background: var(--accent);
+  color: #241a10;
+}
+
+[data-theme="desktop"] .field input,
+[data-theme="desktop"] .field textarea,
+[data-theme="desktop"] .field select {
+  background: #fff;
+  border-color: var(--rule);
+  border-radius: 6px;
+}
+[data-theme="desktop"] .scrim {
+  background: rgba(0, 0, 0, 0.28);
+}
+[data-theme="desktop"] .sheet {
+  width: min(420px, 94vw);
+  background: var(--paper-hi);
+  border-left-color: var(--rule);
+}
+[data-theme="desktop"] .voice {
+  border-radius: 6px;
+}
+[data-theme="desktop"] .primary {
+  border-radius: 6px;
+}
+[data-theme="desktop"] .ghost,
+[data-theme="desktop"] .record {
+  border-radius: 6px;
+}
+
+/* ================================================================
+   设置里的"外观"选择器
+   ================================================================ */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.theme-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  text-align: left;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+.theme-opt:hover {
+  border-color: var(--rule-strong);
+}
+.theme-opt.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.theme-swatch {
+  display: block;
+  height: 34px;
+  border-radius: 5px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+.theme-swatch[data-swatch="paper"] {
+  background: linear-gradient(135deg, #fcfcf9 0 55%, #dcded7 55% 100%);
+}
+.theme-swatch[data-swatch="nocturne"] {
+  background: linear-gradient(135deg, #171c1a 0 55%, #8fc3b0 55% 100%);
+}
+/* 跟随系统：左浅右深，示意自动切换 */
+.theme-swatch[data-swatch="system"] {
+  background: linear-gradient(135deg, #fcfcf9 0 42%, #171c1a 42% 58%, #8fc3b0 58% 100%);
+}
+.theme-name {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.theme-desc {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--ink-3);
+}
